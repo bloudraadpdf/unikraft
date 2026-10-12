@@ -1,0 +1,6 @@
+config LIBUKHTTPLISTEN
+	bool "ukhttplisten: HTTP application readiness notification"
+	select LIBPOSIX_SOCKET
+	select LIBPOSIX_SOCKET_EVENTS
+	select LIBPOSIX_VFS
+	select LIBUKFS_DEVFS

@@ -1,0 +1,3 @@
+$(eval $(call addlib_s,libukhttplisten,$(CONFIG_LIBUKHTTPLISTEN)))
+
+LIBUKHTTPLISTEN_SRCS-y += $(LIBUKHTTPLISTEN_BASE)/listen.c
