@@ -779,7 +779,8 @@ static void *vsock_create(struct posix_socket_driver *d __unused,
 
 	uk_pr_debug("calling driver create, dev=%p\n", dev);
 
-	rc = dev->ops->create(dev, type, protocol, &sock);
+	rc = dev->ops->create(dev, type & ~(SOCK_NONBLOCK | SOCK_CLOEXEC),
+			      protocol, &sock);
 	if (unlikely(rc)) {
 		uk_pr_debug("driver create failed: %d\n", rc);
 		return ERR2PTR(rc);
