@@ -34,6 +34,7 @@
  */
 
 #include <errno.h>
+#include <stdint.h>
 #include <time.h>
 #include <unistd.h>
 #include <sys/time.h>
@@ -42,6 +43,7 @@
 #include <uk/config.h>
 #include <uk/print.h>
 #include <uk/syscall.h>
+#include <uk/posix-time.h>
 
 #if CONFIG_HAVE_SCHED
 #include <uk/sched.h>
@@ -49,6 +51,14 @@
 #include <uk/lcpu.h>
 #endif
 #include <uk/essentials.h>
+
+static __u64 realtime_offset;
+
+static __nsec realtime_clock(void)
+{
+	return ukplat_wall_clock() +
+		__atomic_load_n(&realtime_offset, __ATOMIC_RELAXED);
+}
 
 #ifndef CONFIG_HAVE_SCHED
 /* Workaround until Unikraft changes interface for something more
@@ -131,7 +141,7 @@ unsigned int sleep(unsigned int seconds)
 
 time_t uk_sys_time(time_t *tloc)
 {
-	time_t secs = ukarch_time_nsec_to_sec(ukplat_wall_clock());
+	time_t secs = ukarch_time_nsec_to_sec(realtime_clock());
 
 	if (tloc)
 		*tloc = secs;
@@ -146,7 +156,7 @@ UK_SYSCALL_R_DEFINE(time_t, time, time_t *, tloc)
 
 int uk_sys_gettimeofday(struct timeval *restrict tv, void *tz __unused)
 {
-	__nsec now = ukplat_wall_clock();
+	__nsec now = realtime_clock();
 
 	if (!tv)
 		return -EINVAL;
@@ -162,10 +172,19 @@ UK_SYSCALL_R_DEFINE(int, gettimeofday, struct timeval *restrict, tv,
 	return uk_sys_gettimeofday(tv, tz);
 }
 
-int uk_sys_settimeofday(struct timeval *tv __unused, void *tz __unused)
+int uk_sys_settimeofday(struct timeval *tv, void *tz)
 {
-	UK_WARN_STUBBED();
-	return 0;
+	struct timespec tp;
+
+	if (tz)
+		return -EOPNOTSUPP;
+	if (!tv)
+		return 0;
+	if (tv->tv_usec < 0 || tv->tv_usec >= 1000000)
+		return -EINVAL;
+	tp.tv_sec = tv->tv_sec;
+	tp.tv_nsec = tv->tv_usec * 1000;
+	return uk_sys_clock_settime(CLOCK_REALTIME, &tp);
 }
 
 UK_SYSCALL_R_DEFINE(int, settimeofday, struct timeval *, tv, void *, tz)
@@ -228,7 +247,7 @@ int uk_sys_clock_gettime(clockid_t clk_id, struct timespec *tp)
 		break;
 	case CLOCK_REALTIME:
 	case CLOCK_REALTIME_COARSE:
-		now = ukplat_wall_clock();
+		now = realtime_clock();
 		break;
 #if CONFIG_HAVE_SCHED
 	case CLOCK_THREAD_CPUTIME_ID:
@@ -254,10 +273,23 @@ UK_SYSCALL_R_DEFINE(int, clock_gettime, clockid_t, clk_id, struct timespec*, tp)
 	return uk_sys_clock_gettime(clk_id, tp);
 }
 
-int uk_sys_clock_settime(clockid_t clk_id __unused,
-			 const struct timespec *tp __unused)
+int uk_sys_clock_settime(clockid_t clk_id, const struct timespec *tp)
 {
-	UK_WARN_STUBBED();
+	__u64 requested;
+
+	if (clk_id != CLOCK_REALTIME)
+		return -EINVAL;
+	if (!tp)
+		return -EFAULT;
+	if (tp->tv_sec < 0 || tp->tv_nsec < 0 ||
+	    tp->tv_nsec >= UKARCH_NSEC_PER_SEC)
+		return -EINVAL;
+	if ((__u64)tp->tv_sec >
+	    (UINT64_MAX - tp->tv_nsec) / UKARCH_NSEC_PER_SEC)
+		return -EOVERFLOW;
+	requested = (__u64)tp->tv_sec * UKARCH_NSEC_PER_SEC + tp->tv_nsec;
+	__atomic_store_n(&realtime_offset, requested - ukplat_wall_clock(),
+			__ATOMIC_RELAXED);
 	return 0;
 }
 
