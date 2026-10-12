@@ -1,0 +1,5 @@
+$(eval $(call addlib_s,libukvmrestore,$(CONFIG_LIBUKVMRESTORE)))
+$(eval $(call addlib_paramprefix,libukvmrestore,vmrestore))
+
+LIBUKVMRESTORE_SRCS-y += $(LIBUKVMRESTORE_BASE)/restore.c
+LIBUKVMRESTORE_CFLAGS-y += $(ISR_ARCHFLAGS) $(ISR_ARCHFLAGS-y)

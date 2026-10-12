@@ -91,6 +91,10 @@ $(eval $(call import_lib,$(CONFIG_UK_BASE)/lib/ukpm))
 $(eval $(call import_lib,$(CONFIG_UK_BASE)/lib/ukpcpuvar))
 $(eval $(call import_lib,$(CONFIG_UK_BASE)/lib/ukfile-console))
 $(eval $(call import_lib,$(CONFIG_UK_BASE)/lib/ukvsockdev))
+$(eval $(call import_lib,$(CONFIG_UK_BASE)/lib/ukvmrestore))
+
 $(eval $(call import_lib,$(CONFIG_UK_BASE)/lib/ukhttplisten))
+
 $(eval $(call import_lib,$(CONFIG_UK_BASE)/lib/ukfs-erofs))
+
 $(eval $(call import_lib,$(CONFIG_UK_BASE)/lib/ukblkfile))
