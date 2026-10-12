@@ -52,4 +52,6 @@ int __check_result uk_swrand_randr(__u32 *val);
 /* Reseed the CSPRNG */
 int uk_swrand_reseed(void);
 
+int uk_swrand_quiesce(void);
+
 #endif /* __UK_RANDOM_SWRAND_H__ */

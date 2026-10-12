@@ -2,3 +2,4 @@ getrandom
 uk_random_fill_buffer
 uk_random_init
 uk_random_reseed
+uk_random_quiesce

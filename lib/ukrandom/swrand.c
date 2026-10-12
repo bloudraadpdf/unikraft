@@ -129,7 +129,7 @@ int uk_swrand_init(struct uk_random_driver **drv)
 	return 0;
 }
 
-int __check_result uk_swrand_reseed(void)
+static int uk_swrand_reseed_locked(void)
 {
 	__u32 seedv[CHACHA20_SEED_WORDS];
 	int ret;
@@ -154,30 +154,53 @@ int __check_result uk_swrand_reseed(void)
 	return 0;
 }
 
+int __check_result uk_swrand_reseed(void)
+{
+	unsigned long irq_flags;
+	int ret;
+
+	uk_spin_lock_irqsave(&ctx.lock, irq_flags);
+	ret = uk_swrand_reseed_locked();
+	uk_spin_unlock_irqrestore(&ctx.lock, irq_flags);
+	return ret;
+}
+
+int uk_swrand_quiesce(void)
+{
+	unsigned long irq_flags;
+	int ret;
+
+	uk_spin_lock_irqsave(&ctx.lock, irq_flags);
+	ret = ctx.driver ? 0 : -ENODEV;
+	uk_spin_unlock_irqrestore(&ctx.lock, irq_flags);
+	return ret;
+}
+
 int __check_result uk_swrand_randr(__u32 *val)
 {
+	unsigned long irq_flags;
 	int ret;
 
 	if (unlikely(!ctx.driver))
 		return -ENODEV;
 
-	uk_spin_lock(&ctx.lock);
+	uk_spin_lock_irqsave(&ctx.lock, irq_flags);
 
 	/* Depending on the implementation of chacha_rand32()
 	 * this may skip the last block, which we favor over
 	 * increasing implementation complexity.
 	 */
 	if (chacha_counter(&ctx.chacha) == CHACHA_COUNTER_MAX) {
-		ret = uk_swrand_reseed();
+		ret = uk_swrand_reseed_locked();
 		if (unlikely(ret)) {
-			uk_spin_unlock(&ctx.lock);
+			uk_spin_unlock_irqrestore(&ctx.lock, irq_flags);
 			return ret;
 		}
 	}
 
 	*val = chacha_rand32(&ctx.chacha);
 
-	uk_spin_unlock(&ctx.lock);
+	uk_spin_unlock_irqrestore(&ctx.lock, irq_flags);
 
 	return 0;
 }

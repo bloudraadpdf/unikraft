@@ -115,6 +115,11 @@ int __check_result uk_random_reseed(void)
 	return uk_swrand_reseed();
 }
 
+int __check_result uk_random_quiesce(void)
+{
+	return uk_swrand_quiesce();
+}
+
 #if CONFIG_LIBUKRANDOM_DTB_SEED || CONFIG_LIBUKRANDOM_CMDLINE_SEED
 /* Do not print a warning if the user did not pass a seed.
  * It may be the case that the application does not require

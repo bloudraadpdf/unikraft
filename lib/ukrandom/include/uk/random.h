@@ -58,6 +58,8 @@ int __check_result uk_random_fill_buffer(void *buf, __sz buflen);
  */
 int __check_result uk_random_reseed(void);
 
+int __check_result uk_random_quiesce(void);
+
 #ifdef __cplusplus
 }
 #endif
