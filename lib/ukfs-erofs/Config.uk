@@ -1,0 +1,7 @@
+config LIBUKFS_EROFS
+	bool "ukfs-erofs: Read-only EROFS images with LZ4"
+	select LIBUKFS
+	select LIBUKALLOC
+	select LIBUKLOCK
+	select LIBUKBLKFILE
+	select LIBNOLIBC if !HAVE_LIBC
