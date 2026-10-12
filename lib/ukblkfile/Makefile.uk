@@ -1,0 +1,4 @@
+$(eval $(call addlib_s,libukblkfile,$(CONFIG_LIBUKBLKFILE)))
+
+CINCLUDES-$(CONFIG_LIBUKBLKFILE) += -I$(LIBUKBLKFILE_BASE)/include
+LIBUKBLKFILE_SRCS-y += $(LIBUKBLKFILE_BASE)/blkfile.c

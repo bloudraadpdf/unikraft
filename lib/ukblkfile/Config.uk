@@ -1,0 +1,9 @@
+config LIBUKBLKFILE
+	bool "ukblkfile: POSIX block device files"
+	select LIBUKBLKDEV
+	select LIBUKBLKDEV_DISPATCHERTHREADS
+	select LIBUKBLKDEV_SYNC_IO_BLOCKED_WAITING
+	select LIBUKFS_DEVFS
+	select LIBUKFILE
+	select LIBUKLOCK
+	select LIBNOLIBC if !HAVE_LIBC
