@@ -47,6 +47,7 @@ static unsigned long tid_map[UK_BITS_TO_LONGS(TIDMAP_SIZE)] = { [0] = 0x01UL };
 
 /* Process Table */
 struct posix_process *pid_process[TIDMAP_SIZE];
+struct uk_mutex pprocess_children_mutex;
 
 /**
  * Thread-local posix_thread reference
@@ -273,7 +274,7 @@ struct posix_process *pprocess_create(struct uk_alloc *a,
 	}
 #endif /* CONFIG_LIBPOSIX_PROCESS_SIGNAL */
 
-	uk_semaphore_init(&pprocess->wait_semaphore, 0);
+	uk_waitq_init(&pprocess->child_wait);
 	uk_semaphore_init(&pprocess->exit_semaphore, 0);
 
 	/* Check if we have a pthread structure already for this thread
@@ -325,12 +326,14 @@ struct posix_process *pprocess_create(struct uk_alloc *a,
 		goto err_free_pprocess;
 	}
 
+	uk_mutex_lock(&pprocess_children_mutex);
 	pprocess->parent = parent_pprocess;
 	if (parent_pprocess) {
 		uk_list_add_tail(&pprocess->child_list_entry,
 				 &parent_pprocess->children);
 	}
 	pid_process[pprocess->pid] = pprocess;
+	uk_mutex_unlock(&pprocess_children_mutex);
 
 	uk_pr_debug("Process PID %d created (parent PID: %d)\n",
 		    (int) pprocess->pid,
@@ -483,13 +486,16 @@ void pprocess_release(struct posix_process *pprocess)
 {
 	pid_t pid;
 
+	uk_mutex_lock(&pprocess_children_mutex);
 	UK_ASSERT(pprocess);
 	UK_ASSERT(uk_list_empty(&pprocess->threads));
 	UK_ASSERT(uk_list_empty(&pprocess->children));
 
 	/* Unlink this process from its parent */
-	if (pprocess->parent)
+	if (pprocess->parent) {
 		uk_list_del(&pprocess->child_list_entry);
+		uk_waitq_wake_up(&pprocess->parent->child_wait);
+	}
 
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 	pprocess_signal_pdesc_free(pprocess);
@@ -500,6 +506,7 @@ void pprocess_release(struct posix_process *pprocess)
 	pid_process[pid] = NULL;
 
 	uk_free(pprocess->_a, pprocess);
+	uk_mutex_unlock(&pprocess_children_mutex);
 
 	uk_pr_debug("pid %d released\n", pid);
 }
@@ -511,6 +518,7 @@ static int posix_process_init(struct uk_init_ctx *ictx)
 	int ret;
 
 	UK_ASSERT(ictx);
+	uk_mutex_init_config(&pprocess_children_mutex, UK_MUTEX_CONFIG_RECURSE);
 
 	/* If ictx->tmain in set, main() executes on a
 	 * separate uk_thread. Instantiate PID_INIT from

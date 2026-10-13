@@ -17,9 +17,7 @@
 #include <uk/process.h>
 #include <uk/semaphore.h>
 #include <uk/thread.h>
-#if CONFIG_LIBPOSIX_PROCESS_BRK
 #include <uk/mutex.h>
-#endif /* CONFIG_LIBPOSIX_PROCESS_BRK */
 #endif /* CONFIG_LIBPOSIX_PROCESS_MULTITHREADING */
 
 extern struct uk_thread *pprocess_thread_main;
@@ -67,7 +65,7 @@ struct posix_process {
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 	struct uk_signal_pdesc *signal;
 #endif /* CONFIG_LIBPOSIX_PROCESS_SIGNAL */
-	struct uk_semaphore wait_semaphore;
+	struct uk_waitq child_wait;
 	struct uk_semaphore exit_semaphore;
 	enum posix_process_state state;
 	__u64 exit_signal;
@@ -94,12 +92,12 @@ struct posix_thread {
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 	struct uk_signal_tdesc *signal;
 #endif /* CONFIG_LIBPOSIX_PROCESS_SIGNAL */
-	pid_t wait_pid;
 
 	/* TODO: Mutex */
 };
 
 extern struct posix_process *pid_process[TIDMAP_SIZE];
+extern struct uk_mutex pprocess_children_mutex;
 
 extern __uk_tls struct posix_thread *pthread_self;
 

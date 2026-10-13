@@ -20,17 +20,6 @@
 
 #include "process.h"
 
-#define PTHREAD_WAITING_FOR_PID(_pt, _pid)				\
-	((_pt)->state == POSIX_THREAD_BLOCKED_WAIT &&			\
-	 ((_pt)->wait_pid == (_pid) || (_pt)->wait_pid == -1))
-
-#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
-#define PTHREAD_BLOCKING_ON_SIGNAL(_pt)					\
-	((_pt)->state == POSIX_THREAD_BLOCKED_SIGNAL)
-#else /* !CONFIG_LIBPOSIX_PROCESS_SIGNAL */
-#define PTHREAD_BLOCKING_ON_SIGNAL(_pt)		    0
-#endif /* !CONFIG_LIBPOSIX_PROCESS_SIGNAL */
-
 int pprocess_exit_status = PPROCESS_EXIT_STATUS_UNSET;
 
 #if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
@@ -54,6 +43,7 @@ static void pprocess_reparent_children(struct posix_process *pprocess)
 			pchild->parent = pprocess_init;
 			uk_list_add(&pchild->child_list_entry,
 				    &pprocess_init->children);
+			uk_waitq_wake_up(&pprocess_init->child_wait);
 			uk_pr_debug("Process PID %d re-assigned to PID %d\n",
 				    pchild->pid, pchild->parent->pid);
 		} else {
@@ -201,12 +191,14 @@ void pprocess_exit(struct posix_process *pprocess,
 	 */
 	UK_ASSERT(uk_list_empty(&pprocess->threads));
 
+	uk_mutex_lock(&pprocess_children_mutex);
+	parent_process = pprocess->parent;
+
 	/* Update process state & exit_status*/
 	if (state == POSIX_PROCESS_EXITED)
 		pprocess->exit_status = exit_status & 0xff;
 	else /* POSIX_PROCESS_KILLED */
 		pprocess->exit_status = exit_status;
-	pprocess->state = state;
 
 	/* Reparent child processes to init */
 	pprocess_reparent_children(pprocess);
@@ -215,20 +207,14 @@ void pprocess_exit(struct posix_process *pprocess,
 	event_data.pid = pprocess->pid;
 	pprocess_raise_ppexit_event(&event_data);
 
+	pprocess->state = state;
 	uk_semaphore_up(&pprocess->exit_semaphore);
 
-	/* Unblock wait */
-	if (parent_process && !nowait) {
-		uk_pprocess_foreach_pthread(parent_process, pt, ptn) {
-			if (PTHREAD_WAITING_FOR_PID(pt, pprocess->pid) ||
-			    PTHREAD_BLOCKING_ON_SIGNAL(pt)) {
-				uk_semaphore_up(&parent_process->wait_semaphore);
-				break;
-			}
-		}
-	} else if (nowait) { /* release now */
+	if (nowait)
 		pprocess_release(pprocess);
-	}
+	else if (parent_process)
+		uk_waitq_wake_up(&parent_process->child_wait);
+	uk_mutex_unlock(&pprocess_children_mutex);
 }
 
 /* NOTE: The man pages of _exit(2) say:

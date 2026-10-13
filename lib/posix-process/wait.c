@@ -44,22 +44,6 @@ struct posix_process *pprocess_child_state_changed(int state)
 	return NULL;
 }
 
-static int pprocess_reap(struct posix_process *pprocess, siginfo_t *si)
-{
-	pid_t pid;
-
-	UK_ASSERT(pprocess);
-	UK_ASSERT(uk_list_empty(&pprocess->threads));
-
-	if (si)
-		set_siginfo_wait(pprocess, si);
-
-	pid = pprocess->pid;
-	pprocess_release(pprocess);
-
-	return pid;
-}
-
 /* Wait helper
  *
  * @param pid: child pid to wait for or -1 for any
@@ -83,62 +67,40 @@ static int pprocess_wait(pid_t pid, siginfo_t *si, int opt)
 	this_process = this_thread->process;
 	UK_ASSERT(this_process);
 
-	if (uk_list_empty(&this_process->children))
-		return -ECHILD;
-
+	uk_mutex_lock(&pprocess_children_mutex);
 	this_thread->state = POSIX_THREAD_BLOCKED_WAIT;
-
-	if (pid > 0) {
-		child = pid2pprocess(pid);
-		/* Child does not exist or not our child. This also
-		 * covers the case where the process chose to ignore
-		 * SIGCHLD or set SA_NOCLDWAIT and therefore _exit()
-		 * terminated it without further ado.
-		 */
-		if (unlikely(!child || child->parent != this_process)) {
-			ret = -ECHILD;
-			goto out;
-		}
-
-		/* If the process exited already, reap and return the pid */
-		if (child->state != POSIX_PROCESS_RUNNING) {
-			ret = pprocess_reap(child, si);
-			goto out;
-		}
-
-		this_thread->wait_pid = pid;
-	} else { /* any */
-		this_thread->wait_pid = -1;
-	}
-
 	for (;;) {
-		/* Find process with changed state. No change means that
-		 * the state change happened to a different child, so we
-		 * loop back to the semaphore.
-		 */
-		if (pid > 0)
-			waitable = pprocess_state_changed(child, opt);
-		else /* any */
-			waitable = pprocess_child_state_changed(opt);
-
-		if (waitable) {
-			ret = waitable->pid;
-			if (!(opt & WNOWAIT))
-				pprocess_reap(waitable, si);
+		if (uk_list_empty(&this_process->children)) {
+			ret = -ECHILD;
 			break;
 		}
-
+		if (pid > 0) {
+			child = pid2pprocess(pid);
+			if (!child || child->parent != this_process) {
+				ret = -ECHILD;
+				break;
+			}
+			waitable = pprocess_state_changed(child, opt);
+		} else {
+			waitable = pprocess_child_state_changed(opt);
+		}
+		if (waitable) {
+			set_siginfo_wait(waitable, si);
+			ret = waitable->pid;
+			if (!(opt & WNOWAIT))
+				pprocess_release(waitable);
+			break;
+		}
 		if (opt & WNOHANG) {
+			*si = (siginfo_t){0};
 			ret = 0;
 			break;
 		}
-
-		/* Wait for a state change on one of our children */
-		uk_semaphore_down(&this_thread->process->wait_semaphore);
+		uk_waitq_wait_locked(&this_process->child_wait,
+			uk_mutex_lock, uk_mutex_unlock, &pprocess_children_mutex);
 	}
-
-out:
 	this_thread->state = POSIX_THREAD_RUNNING;
+	uk_mutex_unlock(&pprocess_children_mutex);
 	return ret;
 }
 
