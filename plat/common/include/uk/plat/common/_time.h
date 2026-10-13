@@ -36,5 +36,8 @@
 #include <uk/plat/time.h>
 
 void time_block_until(__snsec until);
+#if CONFIG_ARCH_ARM_64 && CONFIG_HAVE_SMP
+void ukplat_time_cpu_init(void);
+#endif
 
 #endif /* __PLAT_CMN_TIME_H__ */

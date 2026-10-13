@@ -25,12 +25,15 @@
 
 #if CONFIG_HAVE_SMP
 extern void lcpu_start(void);
+__uk_pcpuvar __paddr_t uk_plat_native_lcpu_start_pt;
 
 static int plat_native_lcpu_start(__u64 idx)
 {
 	__u64 cpuid;
 	__u64 entry;
 
+	uk_pcpuvar_lval(idx, uk_plat_native_lcpu_start_pt) = uk_paging_pt_read_base();
+	uk_arch_wmb();
 	cpuid = uk_pcpuvar_lval(idx, uk_pcpuvar_cpu_id);
 	entry = uk_paging_virt_to_phys((__vaddr_t)lcpu_start);
 

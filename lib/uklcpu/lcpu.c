@@ -36,6 +36,31 @@
 __uk_pcpuvar struct uk_lcpu uk_lcpus;
 
 static const struct uk_lcpu_pm_ops *pm_ops;
+static unsigned int cpu_count = 1;
+
+unsigned int uk_lcpu_count(void)
+{
+	return cpu_count;
+}
+
+int uk_lcpu_register_id(unsigned int idx, __u64 id)
+{
+	if (!uk_lcpu_current_is_bsp())
+		return -EPERM;
+	if (idx >= CONFIG_UKPLAT_CPU_MAXCOUNT || idx > cpu_count)
+		return -EINVAL;
+	for (unsigned int i = 1; i < cpu_count; ++i)
+		if (uk_pcpuvar_lval(i, uk_lcpus).state != UK_LCPU_STATE_OFFLINE)
+			return -EBUSY;
+	for (unsigned int i = 0; i < cpu_count; ++i)
+		if (i != idx && uk_pcpuvar_lval(i, uk_pcpuvar_cpu_id) == id)
+			return -EINVAL;
+	uk_pcpuvar_lval(idx, uk_pcpuvar_cpu_id) = id;
+	uk_pcpuvar_lval(idx, uk_pcpuvar_cpu_idx) = idx;
+	if (idx == cpu_count)
+		++cpu_count;
+	return 0;
+}
 
 int uk_lcpu_pm_ops_register(const struct uk_lcpu_pm_ops *ops)
 {

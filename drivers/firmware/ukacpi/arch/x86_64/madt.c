@@ -11,6 +11,7 @@
 #include <uk/acpi.h>
 #include <uk/acpi/prio.h>
 #include <uk/assert.h>
+#include <uk/lcpu.h>
 #include <uk/pcpuvar.h>
 #include <uk/print.h>
 #include <uk/prio.h>
@@ -33,8 +34,13 @@ int uk_acpi_madt_fill_cpu_idmap(void)
 	__sz off, len;
 	__u64 cpu_id;
 	__u32 idx;
+	int rc;
 
 	uk_pr_info("Bootstrapping processor has the ID %ld\n", bsp_cpu_id);
+
+	rc = uk_lcpu_register_id(0, bsp_cpu_id);
+	if (rc)
+		return rc;
 
 	/* Enumerate all other CPUs */
 	madt = uk_acpi_get_madt();
@@ -74,8 +80,9 @@ int uk_acpi_madt_fill_cpu_idmap(void)
 			continue;
 		}
 
-		uk_pcpuvar_lval(idx, uk_pcpuvar_cpu_id) = cpu_id;
-		uk_pcpuvar_lval(idx, uk_pcpuvar_cpu_idx) = idx;
+		rc = uk_lcpu_register_id(idx, cpu_id);
+		if (rc)
+			return rc;
 		idx++;
 
 		/* Ignore cores that exceed max configured value */

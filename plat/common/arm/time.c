@@ -44,6 +44,7 @@
 #include <uk/plat/common/bootinfo.h>
 #include <uk/intctlr.h>
 #include <arm/time.h>
+#include <uk/plat/common/_time.h>
 
 static const char * const arch_timer_list[] = {
 	"arm,armv8-timer",
@@ -93,9 +94,9 @@ uint32_t generic_timer_get_frequency(int fdt_timer)
 
 unsigned long sched_have_pending_events;
 
-void time_block_until(__nsec until)
+void time_block_until(__snsec until)
 {
-	while (ukplat_monotonic_clock() < until) {
+	while ((__snsec)ukplat_monotonic_clock() < until) {
 		generic_timer_cpu_block_until(until);
 		if (uk_and_relax(&sched_have_pending_events, 0))
 			break;
@@ -151,6 +152,15 @@ void ukplat_time_init(void)
 	/* Enable timer */
 	generic_timer_enable();
 }
+
+#if CONFIG_HAVE_SMP
+void ukplat_time_cpu_init(void)
+{
+	uk_intctlr_irq_unmask(timer_irq);
+	generic_timer_mask_irq();
+	generic_timer_enable();
+}
+#endif
 
 uint32_t ukplat_time_get_irq(void)
 {

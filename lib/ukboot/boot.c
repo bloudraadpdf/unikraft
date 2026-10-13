@@ -101,6 +101,9 @@
 #endif /* CONFIG_LIBUKINTCTLR */
 
 #include "init.h"
+#if CONFIG_HAVE_SMP && CONFIG_LIBUKBOOT_INITSCHEDCOOP
+#include "smp.h"
+#endif
 
 extern char **boot_argv;
 extern int boot_argc;
@@ -405,6 +408,12 @@ void uk_boot_entry(void)
 			goto exit;
 		}
 	}
+
+#if CONFIG_HAVE_SMP && CONFIG_LIBUKBOOT_INITSCHEDCOOP
+	rc = uk_boot_smp_init(s);
+	if (rc)
+		UK_CRASH("Secondary CPU startup failed: %d\n", rc);
+#endif
 
 #ifdef CONFIG_LIBUKSP
 	uk_stack_chk_guard_setup();

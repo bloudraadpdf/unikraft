@@ -74,6 +74,13 @@ ENTRY(lcpu_start)
 	add	x0, x0, x1
 	msr	tpidr_el1, x0
 
+	uk_pcpuvar_arm64_ldr	x0, uk_plat_native_lcpu_start_pt, x1
+	msr	ttbr0_el1, x0
+	isb
+	tlbi	vmalle1
+	dsb	nsh
+	isb
+
 	/* Load the stack pointer */
 	uk_pcpuvar_arm64_ldr	x0, UK_LCPU_SSTACKP_SYM, x1
 	mov	sp, x0

@@ -130,6 +130,8 @@ UK_CTASSERT(UK_LCPU_MEMBERS_SIZE <= UK_LCPU_SIZE);
  * Return the UK_LCPU structure for the CPU executing this function
  */
 struct uk_lcpu *uk_lcpu_get_current(void);
+unsigned int uk_lcpu_count(void);
+int uk_lcpu_register_id(unsigned int idx, __u64 id);
 
 extern __uk_pcpuvar struct uk_lcpu uk_lcpus;
 

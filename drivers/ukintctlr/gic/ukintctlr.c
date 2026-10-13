@@ -6,6 +6,8 @@
 #include <errno.h>
 
 #include <uk/assert.h>
+#include <uk/lcpu.h>
+#include <string.h>
 #include <uk/config.h>
 #include <uk/intctlr.h>
 #include <uk/intctlr/gic-v2.h>
@@ -104,129 +106,58 @@ static int enumerate_cpus(void)
 
 static int enumerate_cpus(void)
 {
-	int fdt_cpu;
-	const fdt32_t *naddr_prop, *nsize_prop, *id_reg;
-	const struct fdt_property *cpu_prop;
-	int naddr, nsize = 0, cell;
-	int subnode;
-	__u64 bsp_cpu_id;
-	__u64 cpu_id;
-	char bsp_found __maybe_unused = 0;
-	void *dtb;
-	__sz idx;
+	const void *fdt = (void *)ukplat_bootinfo_get()->dtb;
+	const fdt32_t *reg;
+	const char *type, *status, *method;
+	__u64 bsp_id, id;
+	unsigned int idx = 1;
+	int cpus, node, cells, length, rc, bsp_found = 0;
 
-	/* MP support is dependent on an initialized GIC */
-	UK_ASSERT(gic);
-
-	dtb = (void *)ukplat_bootinfo_get()->dtb;
-	UK_ASSERT(dtb);
-
-	bsp_cpu_id = uk_pcpuvar_lval(0, uk_pcpuvar_cpu_id);
-	uk_pr_info("Bootstrapping processor has the ID %ld\n",
-		   bsp_cpu_id);
-
-	/* Search for CPUS node in DTB */
-	fdt_cpu = fdt_path_offset(dtb, "/cpus");
-	if (unlikely(fdt_cpu < 0)) {
-		uk_pr_err("cpus node is not found in device tree\n");
+	if (!fdt || fdt_check_header(fdt))
 		return -EINVAL;
-	}
-
-	/* Get address cells */
-	naddr_prop = fdt_getprop(dtb, fdt_cpu, "#address-cells", &cell);
-	if (!naddr_prop) {
-		naddr = FDT_CPU_ADDR_CELLS_DEFAULT;
-		uk_pr_warn("Using default value 2 for cpu address-cells.\n");
-	} else {
-		naddr = fdt32_to_cpu(naddr_prop[0]);
-	}
-	if (unlikely(naddr < 0 || naddr >= FDT_MAX_NCELLS)) {
-		uk_pr_err("Invalid address-cells size.\n");
+	cpus = fdt_path_offset(fdt, "/cpus");
+	if (cpus < 0)
 		return -EINVAL;
-	}
-	if (unlikely(naddr > FDT_CPU_ADDR_CELLS_DEFAULT)) {
-		uk_pr_err("Address-cells size greater than 2 not supported yet.\n");
+	cells = fdt_address_cells(fdt, cpus);
+	if ((cells != 1 && cells != 2) || fdt_size_cells(fdt, cpus) != 0)
 		return -EINVAL;
-	}
-
-	/* Get size cells */
-	nsize_prop = fdt_getprop(dtb, fdt_cpu, "#size-cells", &cell);
-	if (!nsize_prop) {
-		nsize = FDT_CPU_SIZE_CELLS_DEFAULT;
-		uk_pr_warn("Using default value of 0 for cpu size-cells.\n");
-	} else {
-		nsize = fdt32_to_cpu(nsize_prop[0]);
-	}
-	/**
-	 * According to the device-tree v0.3 specification,
-	 * for the `size-cells` property of the `/cpus` node:
-	 * "Value shall be 0. Specifies that no size is
-	 * required in the reg property in children of this node."
-	 */
-	if (unlikely(nsize != 0)) {
-		uk_pr_err("Invalid size-cells value for cpu node.\n");
-		return -EINVAL;
-	}
-
-	/* Search all the CPU nodes in DTB */
-	idx = 1;
-	fdt_for_each_subnode(subnode, dtb, fdt_cpu) {
-		int prop_len = 0;
-
-		cpu_prop = fdt_get_property(dtb, subnode,
-					    "device_type", &prop_len);
-		if (!cpu_prop)
+	__asm__ volatile("mrs %0, mpidr_el1" : "=r"(bsp_id));
+	bsp_id &= 0xff00ffffffULL;
+	rc = uk_lcpu_register_id(0, bsp_id);
+	if (rc)
+		return rc;
+	fdt_for_each_subnode(node, fdt, cpus) {
+		type = fdt_getprop(fdt, node, "device_type", &length);
+		if (!type || length != 4 || memcmp(type, "cpu", 4))
 			continue;
-		if (strcmp(cpu_prop->data, "cpu"))
+		status = fdt_getprop(fdt, node, "status", &length);
+		if (status && !((length == 5 && !memcmp(status, "okay", 5)) ||
+				(length == 3 && !memcmp(status, "ok", 3))))
 			continue;
-
-		cpu_prop = fdt_get_property(dtb, subnode, "reg", &prop_len);
-		if (unlikely(!cpu_prop || prop_len <= 0)) {
-			uk_pr_err("CPU node does not contain reg field (cpu_id), this core will not be enabled.\n");
-			continue;
-		}
-		id_reg = (const fdt32_t *)cpu_prop->data;
-		cpu_id = fdt_reg_read_number(id_reg, naddr);
-
-		cpu_prop = fdt_get_property(dtb, subnode,
-					    "enable-method", NULL);
-		if (!cpu_prop) {
-			if (cpu_id != bsp_cpu_id) {
-				uk_pr_err("enable-method for core 0x%lx not set, core will not be enabled.",
-					  cpu_id);
-				continue;
-			} else {
-				uk_pr_warn("enable-method for core 0x%lx not set\n",
-					   cpu_id);
-				bsp_found = 1;
-				continue;
-			}
-		} else if (strcmp(cpu_prop->data, "psci")) {
-			uk_pr_err("enable-method for core 0x%lx is not PSCI : (%s), core will not be enabled.\n",
-				  cpu_id, cpu_prop->data);
-			continue;
-		}
-
-		if (cpu_id == bsp_cpu_id) {
-			UK_ASSERT(!bsp_found);
+		reg = fdt_getprop(fdt, node, "reg", &length);
+		if (!reg || length != cells * (int)sizeof(*reg))
+			return -EINVAL;
+		id = fdt32_to_cpu(reg[0]);
+		if (cells == 2)
+			id = (id << 32) | fdt32_to_cpu(reg[1]);
+		if (id & ~0xff00ffffffULL)
+			return -EINVAL;
+		if (id == bsp_id) {
+			if (bsp_found)
+				return -EINVAL;
 			bsp_found = 1;
 			continue;
 		}
-
-		uk_pcpuvar_lval(idx, uk_pcpuvar_cpu_id) = cpu_id;
-		uk_pcpuvar_lval(idx, uk_pcpuvar_cpu_idx) = idx;
-		idx++;
-
-		if (unlikely(idx == CONFIG_UKPLAT_CPU_MAXCOUNT)) {
-			/* Handle gracefully */
-			uk_pr_warn("Maximum number of cores exceeded.\n");
-			return 0;
-		}
+		method = fdt_getprop(fdt, node, "enable-method", &length);
+		if (!method || length != 5 || memcmp(method, "psci", 5))
+			return -EINVAL;
+		rc = uk_lcpu_register_id(idx++, id);
+		if (rc)
+			return rc;
 	}
-	UK_ASSERT(bsp_found);
-
-	return 0;
+	return bsp_found && node == -FDT_ERR_NOTFOUND ? 0 : -EINVAL;
 }
+
 
 #else /* !CONFIG_LIBUKACPI && !CONFIG_LIBUKOFW */
 #error "Invalid config: Either CONFIG_LIBUKACPI or CONFIG_LIBUKOFW must be selected"
