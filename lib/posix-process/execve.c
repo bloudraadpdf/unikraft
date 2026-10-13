@@ -23,7 +23,6 @@ void execve_arch_execenv_init(struct ukarch_execenv *execenv_new,
 static void __noreturn execve_ctx_switch(long arg0, long arg1)
 {
 	struct ukarch_execenv *execenv_new;
-	struct posix_thread *pthread_parent;
 	struct posix_thread *pthread;
 	struct uk_thread *this_thread;
 	void *stack_old;
@@ -37,30 +36,10 @@ static void __noreturn execve_ctx_switch(long arg0, long arg1)
 	pthread = uk_pthread_current();
 	UK_ASSERT(pthread);
 
-	pthread_parent = pthread->parent;
-
-	/* If there is no parent, then must be calling execve()
-	 * from init without having called vfork().
-	 */
-	if (!pthread_parent) {
-		UK_ASSERT(pthread->process);
-		UK_ASSERT(pthread->process->pid == UK_PID_INIT);
-		goto switch_ctx;
-	}
-
-	/* If we're coming from VFORK it's time to wake up the parent.
-	 * Otherwise, free the old stack.
-	 */
-	if (pthread_parent->state == POSIX_THREAD_BLOCKED_VFORK) {
-		uk_pr_debug("Waking up parent (tid %d)\n", pthread_parent->tid);
-		pthread_parent->state = POSIX_THREAD_RUNNING;
-		uk_thread_wake(tid2ukthread(pthread_parent->tid));
-	} else {
+	pprocess_complete_vfork(pthread);
+	if (stack_old)
 		uk_free(this_thread->_mem.stack_a, stack_old);
-	}
 
-	uk_pr_debug("Switching context\n");
-switch_ctx:
 	ukarch_execenv_load((long)execenv_new);
 }
 

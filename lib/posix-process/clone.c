@@ -415,9 +415,12 @@ int uk_clone(struct clone_args *cl_args, size_t cl_args_len,
 	 * or exit(). Yield to schedule the child.
 	 */
 	if (flags & CLONE_VFORK) {
-		pthread = tid2pthread(ukthread2tid(t));
+		pthread = uk_pthread_current();
+		uk_mutex_lock(&pprocess_mutex);
+		uk_thread_uktls_var(child, pthread_self)->vfork_parent = pthread;
 		uk_thread_block(t);
 		pthread->state = POSIX_THREAD_BLOCKED_VFORK;
+		uk_mutex_unlock(&pprocess_mutex);
 		uk_thread_wake(child);
 		uk_sched_yield();
 		goto out;

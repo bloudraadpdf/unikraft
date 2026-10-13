@@ -130,7 +130,6 @@ struct posix_thread *pprocess_create_pthread(struct posix_process *pprocess,
 
 	pthread->_a = a;
 	pthread->process = pprocess;
-	pthread->parent = uk_pthread_current();
 	pthread->tid = tid;
 	pthread->thread = th;
 
@@ -161,10 +160,10 @@ struct posix_thread *pprocess_create_pthread(struct posix_process *pprocess,
 	/* Store reference to pthread with TID */
 	uk_mutex_lock(&pprocess_mutex);
 	tid_thread[tid] = pthread;
-	uk_mutex_unlock(&pprocess_mutex);
 
 	/* Add to parent's list of threads */
 	uk_list_add_tail(&pthread->thread_list_entry, &pprocess->threads);
+	uk_mutex_unlock(&pprocess_mutex);
 
 	uk_pr_debug("Process PID %d: New thread TID %d\n",
 		    (int) pprocess->pid, (int) pthread->tid);
@@ -195,17 +194,36 @@ void pprocess_release_pthread(struct posix_thread *pthread)
 
 	uk_thread_uktls_var(pthread->thread, pthread_self) = NULL;
 
+	uk_mutex_lock(&pprocess_mutex);
+	for (int i = 1; i < TIDMAP_SIZE; ++i) {
+		if (tid_thread[i] && tid_thread[i]->vfork_parent == pthread)
+			tid_thread[i]->vfork_parent = NULL;
+	}
+
 	/* remove from process' thread list */
 	uk_list_del_init(&pthread->thread_list_entry);
 
 	/* release TID */
-	uk_mutex_lock(&pprocess_mutex);
 	tid_thread[pthread->tid] = NULL;
 	release_tid(pthread->tid);
 	uk_mutex_unlock(&pprocess_mutex);
 
 	/* release memory */
 	uk_free(pthread->_a, pthread);
+}
+
+void pprocess_complete_vfork(struct posix_thread *pthread)
+{
+	struct posix_thread *parent;
+
+	uk_mutex_lock(&pprocess_mutex);
+	parent = pthread->vfork_parent;
+	pthread->vfork_parent = NULL;
+	if (parent && parent->state == POSIX_THREAD_BLOCKED_VFORK) {
+		parent->state = POSIX_THREAD_RUNNING;
+		uk_thread_wake(parent->thread);
+	}
+	uk_mutex_unlock(&pprocess_mutex);
 }
 
 int uk_posix_process_create_pthread(struct uk_thread *thread)
@@ -301,6 +319,7 @@ struct posix_process *pprocess_create(struct uk_alloc *a,
 		UK_ASSERT((*pthread)->thread == thread);
 
 		/* Remove thread from original process */
+		uk_mutex_lock(&pprocess_mutex);
 		orig_pprocess = (*pthread)->process;
 		uk_list_del(&(*pthread)->thread_list_entry);
 
@@ -310,13 +329,12 @@ struct posix_process *pprocess_create(struct uk_alloc *a,
 		uk_list_add_tail(&(*pthread)->thread_list_entry,
 				 &pprocess->threads);
 
-		/* Update parent */
-		(*pthread)->parent = parent_pthread;
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 		/* Reset signal state of this thread */
 		ret = pprocess_signal_tdesc_init(*pthread);
 		if (unlikely(ret)) {
 			uk_pr_err("Could not initialize signal descriptor\n");
+			uk_mutex_unlock(&pprocess_mutex);
 			goto err_free_pprocess;
 		}
 #endif /* CONFIG_LIBPOSIX_PROCESS_SIGNAL */
@@ -324,6 +342,7 @@ struct posix_process *pprocess_create(struct uk_alloc *a,
 		/* Release original process if it became empty of threads */
 		if (uk_list_empty(&orig_pprocess->threads))
 			pprocess_release(orig_pprocess);
+		uk_mutex_unlock(&pprocess_mutex);
 	}
 
 	/* Add to process table. No failure past this point. */

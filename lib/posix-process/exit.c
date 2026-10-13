@@ -86,7 +86,6 @@ void pprocess_exit_pthread(struct posix_thread *pthread,
 {
 	struct posix_process_ptexit_event_data event_data;
 	struct posix_process *pprocess;
-	struct posix_thread *parent_pthread;
 	struct uk_thread *thread;
 
 	UK_ASSERT(state == POSIX_THREAD_EXITED ||
@@ -102,9 +101,6 @@ void pprocess_exit_pthread(struct posix_thread *pthread,
 
 	uk_pr_debug("pid %d: exit tid %d\n", pprocess->pid, pthread->tid);
 
-	/* May be NULL if init terminated early */
-	parent_pthread = pthread->parent;
-
 	thread = pthread->thread;
 	if (thread != uk_thread_current() && thread->sched)
 		uk_sched_thread_stop(thread);
@@ -117,12 +113,7 @@ void pprocess_exit_pthread(struct posix_thread *pthread,
 	event_data.tid = pthread->tid;
 	pprocess_raise_ptexit_event(&event_data);
 
-	/* Wake up parent if it was blocking on vfork */
-	if (parent_pthread &&
-	    parent_pthread->state == POSIX_THREAD_BLOCKED_VFORK) {
-		parent_pthread->state = POSIX_THREAD_RUNNING;
-		uk_thread_wake(parent_pthread->thread);
-	}
+	pprocess_complete_vfork(pthread);
 
 	/* Release pthread and terminate the underlying uk_thread
 	 * unless it's the current one or if it hasn't been associated
@@ -238,14 +229,14 @@ UK_LLSYSCALL_R_DEFINE(int, exit, int, status)
 	UK_ASSERT(this_pthread);
 	UK_ASSERT(this_pthread->process);
 
-	/* Last thread, exit the process */
+	uk_mutex_lock(&pprocess_mutex);
 	if (uk_list_is_singular(&this_pthread->process->threads)) {
 		pprocess_exit(this_pthread->process, POSIX_PROCESS_EXITED,
 			      status);
-		uk_sched_thread_exit();
+	} else {
+		pprocess_exit_pthread(this_pthread, POSIX_THREAD_EXITED, status);
 	}
-
-	pprocess_exit_pthread(this_pthread, POSIX_THREAD_EXITED, status);
+	uk_mutex_unlock(&pprocess_mutex);
 	uk_sched_thread_exit();
 }
 
