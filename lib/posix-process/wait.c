@@ -67,7 +67,7 @@ static int pprocess_wait(pid_t pid, siginfo_t *si, int opt)
 	this_process = this_thread->process;
 	UK_ASSERT(this_process);
 
-	uk_mutex_lock(&pprocess_children_mutex);
+	uk_mutex_lock(&pprocess_mutex);
 	this_thread->state = POSIX_THREAD_BLOCKED_WAIT;
 	for (;;) {
 		if (uk_list_empty(&this_process->children)) {
@@ -97,10 +97,10 @@ static int pprocess_wait(pid_t pid, siginfo_t *si, int opt)
 			break;
 		}
 		uk_waitq_wait_locked(&this_process->child_wait,
-			uk_mutex_lock, uk_mutex_unlock, &pprocess_children_mutex);
+			uk_mutex_lock, uk_mutex_unlock, &pprocess_mutex);
 	}
 	this_thread->state = POSIX_THREAD_RUNNING;
-	uk_mutex_unlock(&pprocess_children_mutex);
+	uk_mutex_unlock(&pprocess_mutex);
 	return ret;
 }
 

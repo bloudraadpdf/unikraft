@@ -97,7 +97,7 @@ struct posix_thread {
 };
 
 extern struct posix_process *pid_process[TIDMAP_SIZE];
-extern struct uk_mutex pprocess_children_mutex;
+extern struct uk_mutex pprocess_mutex;
 
 extern __uk_tls struct posix_thread *pthread_self;
 

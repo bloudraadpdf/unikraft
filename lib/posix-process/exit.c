@@ -191,7 +191,7 @@ void pprocess_exit(struct posix_process *pprocess,
 	 */
 	UK_ASSERT(uk_list_empty(&pprocess->threads));
 
-	uk_mutex_lock(&pprocess_children_mutex);
+	uk_mutex_lock(&pprocess_mutex);
 	parent_process = pprocess->parent;
 
 	/* Update process state & exit_status*/
@@ -214,7 +214,7 @@ void pprocess_exit(struct posix_process *pprocess,
 		pprocess_release(pprocess);
 	else if (parent_process)
 		uk_waitq_wake_up(&parent_process->child_wait);
-	uk_mutex_unlock(&pprocess_children_mutex);
+	uk_mutex_unlock(&pprocess_mutex);
 }
 
 /* NOTE: The man pages of _exit(2) say:

@@ -47,7 +47,7 @@ static unsigned long tid_map[UK_BITS_TO_LONGS(TIDMAP_SIZE)] = { [0] = 0x01UL };
 
 /* Process Table */
 struct posix_process *pid_process[TIDMAP_SIZE];
-struct uk_mutex pprocess_children_mutex;
+struct uk_mutex pprocess_mutex;
 
 /**
  * Thread-local posix_thread reference
@@ -83,10 +83,11 @@ static pid_t find_and_reserve_tid(void)
 {
 	pid_t tid;
 
-	/* TODO: Mutex */
+	uk_mutex_lock(&pprocess_mutex);
 	tid = find_free_tid();
 	if (tid > 0)
 		uk_set_bit(tid, tid_map);
+	uk_mutex_unlock(&pprocess_mutex);
 	return tid;
 }
 
@@ -94,8 +95,10 @@ static void release_tid(pid_t tid)
 {
 	UK_ASSERT(tid > 0 && tid <= CONFIG_LIBPOSIX_PROCESS_MAX_PID);
 
-	/* TODO: Mutex */
-	uk_clear_bit(tid, tid_map);
+	uk_mutex_lock(&pprocess_mutex);
+	if (!tid_thread[tid] && !pid_process[tid])
+		uk_clear_bit(tid, tid_map);
+	uk_mutex_unlock(&pprocess_mutex);
 }
 
 /* Allocate a thread for a process */
@@ -156,7 +159,9 @@ struct posix_thread *pprocess_create_pthread(struct posix_process *pprocess,
 #endif /* CONFIG_LIBPOSIX_PROCESS_SIGNAL */
 
 	/* Store reference to pthread with TID */
+	uk_mutex_lock(&pprocess_mutex);
 	tid_thread[tid] = pthread;
+	uk_mutex_unlock(&pprocess_mutex);
 
 	/* Add to parent's list of threads */
 	uk_list_add_tail(&pthread->thread_list_entry, &pprocess->threads);
@@ -194,8 +199,10 @@ void pprocess_release_pthread(struct posix_thread *pthread)
 	uk_list_del_init(&pthread->thread_list_entry);
 
 	/* release TID */
-	release_tid(pthread->tid);
+	uk_mutex_lock(&pprocess_mutex);
 	tid_thread[pthread->tid] = NULL;
+	release_tid(pthread->tid);
+	uk_mutex_unlock(&pprocess_mutex);
 
 	/* release memory */
 	uk_free(pthread->_a, pthread);
@@ -326,14 +333,14 @@ struct posix_process *pprocess_create(struct uk_alloc *a,
 		goto err_free_pprocess;
 	}
 
-	uk_mutex_lock(&pprocess_children_mutex);
+	uk_mutex_lock(&pprocess_mutex);
 	pprocess->parent = parent_pprocess;
 	if (parent_pprocess) {
 		uk_list_add_tail(&pprocess->child_list_entry,
 				 &parent_pprocess->children);
 	}
 	pid_process[pprocess->pid] = pprocess;
-	uk_mutex_unlock(&pprocess_children_mutex);
+	uk_mutex_unlock(&pprocess_mutex);
 
 	uk_pr_debug("Process PID %d created (parent PID: %d)\n",
 		    (int) pprocess->pid,
@@ -486,7 +493,7 @@ void pprocess_release(struct posix_process *pprocess)
 {
 	pid_t pid;
 
-	uk_mutex_lock(&pprocess_children_mutex);
+	uk_mutex_lock(&pprocess_mutex);
 	UK_ASSERT(pprocess);
 	UK_ASSERT(uk_list_empty(&pprocess->threads));
 	UK_ASSERT(uk_list_empty(&pprocess->children));
@@ -504,9 +511,10 @@ void pprocess_release(struct posix_process *pprocess)
 	pid = pprocess->pid;
 
 	pid_process[pid] = NULL;
+	release_tid(pid);
 
 	uk_free(pprocess->_a, pprocess);
-	uk_mutex_unlock(&pprocess_children_mutex);
+	uk_mutex_unlock(&pprocess_mutex);
 
 	uk_pr_debug("pid %d released\n", pid);
 }
@@ -518,7 +526,7 @@ static int posix_process_init(struct uk_init_ctx *ictx)
 	int ret;
 
 	UK_ASSERT(ictx);
-	uk_mutex_init_config(&pprocess_children_mutex, UK_MUTEX_CONFIG_RECURSE);
+	uk_mutex_init_config(&pprocess_mutex, UK_MUTEX_CONFIG_RECURSE);
 
 	/* If ictx->tmain in set, main() executes on a
 	 * separate uk_thread. Instantiate PID_INIT from
