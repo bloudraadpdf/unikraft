@@ -241,6 +241,7 @@ const struct uk_vma_ops uk_fdio_vma_ops = {
 	.new		= file_vma_op_new,
 	.destroy	= file_vma_op_destroy,
 	.fault		= file_vma_op_fault,
+	.fault_discard	= uk_vma_op_fault_discard,
 	.unmap		= uk_vma_op_unmap,	/* default */
 	.split		= file_vma_op_split,
 	.merge		= file_vma_op_merge,

@@ -20,6 +20,8 @@
  */
 int uk_vma_op_deny();
 
+void uk_vma_op_fault_discard(struct uk_vma *vma, struct uk_vm_fault *fault);
+
 /**
  * Unconditionally unmap pages and free their page frames.
  */

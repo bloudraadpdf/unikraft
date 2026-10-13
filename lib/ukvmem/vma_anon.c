@@ -66,6 +66,7 @@ const struct uk_vma_ops uk_vma_anon_ops = {
 	.new		= __NULL,
 	.destroy	= __NULL,
 	.fault		= vma_op_anon_fault,
+	.fault_discard	= uk_vma_op_fault_discard,
 	.unmap		= uk_vma_op_unmap,	/* default */
 	.split		= __NULL,
 	.merge		= __NULL,

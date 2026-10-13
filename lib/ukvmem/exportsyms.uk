@@ -15,6 +15,7 @@ uk_vma_rsvd_ops
 uk_vma_stack_ops
 
 uk_vma_op_deny
+uk_vma_op_fault_discard
 uk_vma_op_unmap
 uk_vma_op_set_attr
 uk_vma_op_advise

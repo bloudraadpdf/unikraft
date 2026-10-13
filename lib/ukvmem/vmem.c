@@ -15,6 +15,7 @@
 #include <uk/paging.h>
 #endif /* CONFIG_LIBUKPAGING */
 #include <uk/alloc.h>
+#include <uk/falloc.h>
 #include <uk/assert.h>
 #include <uk/list.h>
 #include <uk/config.h>
@@ -57,6 +58,7 @@ int uk_vas_init(struct uk_vas *vas, struct uk_pagetable *pt __maybe_unused,
 
 	vas->a = a;
 	uk_spin_init(&vas->fault_lock);
+	vas->mutation_irq_flags = 0;
 	/* File reads prepare their I/O buffers through uk_vma_advise. */
 	uk_mutex_init_config(&vas->mutation_lock, UK_MUTEX_CONFIG_RECURSE);
 
@@ -72,6 +74,35 @@ int uk_vas_init(struct uk_vas *vas, struct uk_pagetable *pt __maybe_unused,
 	UK_INIT_LIST_HEAD(&vas->vma_list);
 
 	return 0;
+}
+
+static unsigned long vmem_mutation_begin(struct uk_vas *vas)
+{
+	unsigned long previous;
+
+	uk_mutex_lock(&vas->mutation_lock);
+	previous = vas->mutation_irq_flags;
+	uk_spin_lock_irqsave(&vas->fault_lock, vas->mutation_irq_flags);
+	return previous;
+}
+
+static void vmem_mutation_end(struct uk_vas *vas, unsigned long previous)
+{
+	unsigned long flags = vas->mutation_irq_flags;
+
+	vas->mutation_irq_flags = previous;
+	uk_spin_unlock_irqrestore(&vas->fault_lock, flags);
+	uk_mutex_unlock(&vas->mutation_lock);
+}
+
+static void vmem_mutation_pause(struct uk_vas *vas)
+{
+	uk_spin_unlock_irqrestore(&vas->fault_lock, vas->mutation_irq_flags);
+}
+
+static void vmem_mutation_resume(struct uk_vas *vas)
+{
+	uk_spin_lock_irq(&vas->fault_lock);
 }
 
 static void vmem_destroy(struct uk_vas *vas)
@@ -91,19 +122,25 @@ static void vmem_destroy(struct uk_vas *vas)
 
 void uk_vas_destroy(struct uk_vas *vas)
 {
-	uk_mutex_lock(&vas->mutation_lock);
+	unsigned long previous;
+
+	previous = vmem_mutation_begin(vas);
 	vmem_destroy(vas);
-	uk_mutex_unlock(&vas->mutation_lock);
+	vmem_mutation_end(vas, previous);
 }
 
 static void vmem_vma_destroy(struct uk_vma *vma)
 {
+	struct uk_vas *vas = vma->vas;
+
 	UK_ASSERT(vma);
 
+	vmem_mutation_pause(vas);
 	if (vma->ops->destroy)
 		vma->ops->destroy(vma);
 
-	uk_free(vma->vas->a, vma);
+	uk_free(vas->a, vma);
+	vmem_mutation_resume(vas);
 }
 
 static void vmem_vma_unlink_and_free(struct uk_vma *vma)
@@ -347,15 +384,16 @@ static int vmem_vma_split(struct uk_vma *vma, __vaddr_t vaddr,
 					    MAX(vma->page_lvl,
 						UK_PAGING_PAGE_LEVEL)));
 
+	vmem_mutation_pause(vma->vas);
 	rc = VMA_SPLIT(vma, vaddr, &v);
-	if (unlikely(rc))
-		return rc;
-
-	if (!v) {
+	if (!rc && !v) {
 		v = uk_malloc(vma->vas->a, sizeof(struct uk_vma));
 		if (unlikely(!v))
-			return -ENOMEM;
+			rc = -ENOMEM;
 	}
+	vmem_mutation_resume(vma->vas);
+	if (unlikely(rc))
+		return rc;
 
 	UK_ASSERT(v);
 
@@ -459,6 +497,13 @@ int uk_vma_op_deny()
 	return -EPERM;
 }
 
+void uk_vma_op_fault_discard(struct uk_vma *vma, struct uk_vm_fault *fault)
+{
+	struct uk_falloc *fa = vma->vas->pt->fa;
+
+	fa->ffree(fa, fault->paddr, fault->len / UK_PAGING_PAGE_SIZE);
+}
+
 int uk_vma_op_unmap(struct uk_vma *vma, __vaddr_t vaddr, __sz len)
 {
 	UK_ASSERT(vaddr >= vma->start);
@@ -550,11 +595,12 @@ static int vmem_unmap(struct uk_vas *vas, __vaddr_t vaddr, __sz len,
 int uk_vma_unmap(struct uk_vas *vas, __vaddr_t vaddr, __sz len,
 		 unsigned long flags)
 {
+	unsigned long previous;
 	int rc;
 
-	uk_mutex_lock(&vas->mutation_lock);
+	previous = vmem_mutation_begin(vas);
 	rc = vmem_unmap(vas, vaddr, len, flags);
-	uk_mutex_unlock(&vas->mutation_lock);
+	vmem_mutation_end(vas, previous);
 	return rc;
 }
 
@@ -592,7 +638,7 @@ static __vaddr_t vmem_first_fit(struct uk_vas *vas, __vaddr_t base, __sz align,
 }
 
 static int vmem_mapx_populate(struct uk_pagetable *pt __unused,
-			      __vaddr_t vaddr, __vaddr_t pt_vaddr __unused,
+			      __vaddr_t vaddr, __vaddr_t pt_vaddr,
 			      unsigned int level, __pte_t *pte, void *user)
 {
 	struct uk_vma *vma = (struct uk_vma *)user;
@@ -606,17 +652,34 @@ static int vmem_mapx_populate(struct uk_pagetable *pt __unused,
 		.level = level,
 		.regs  = __NULL,
 	};
+	__pte_t current;
 	int rc;
 
 	UK_ASSERT(vma->ops);
 	UK_ASSERT(vma->ops->fault);
 
+	vmem_mutation_pause(vma->vas);
 	rc = vma->ops->fault(vma, &fault);
+	vmem_mutation_resume(vma->vas);
 	if (unlikely(rc)) {
 		if (rc == -ENOMEM)
 			return UK_PAGING_PAGE_MAPX_ETOOBIG;
 
 		return rc;
+	}
+
+	/* Mutators retain the mutex across callbacks, so parent tables survive.
+	 * A demand fault can install a leaf or child table while we prepare data.
+	 */
+	rc = uk_paging_pte_read(pt_vaddr, level,
+				UK_PAGING_PT_Lx_IDX(vaddr, level), &current);
+	if (rc || UK_PAGING_PT_Lx_PTE_PRESENT(current, level)) {
+		if (vma->ops->fault_discard)
+			vma->ops->fault_discard(vma, &fault);
+		if (rc)
+			return rc;
+		return UK_PAGING_PAGE_Lx_IS(current, level) ?
+			UK_PAGING_PAGE_MAPX_ESKIP : UK_PAGING_PAGE_MAPX_ETOOBIG;
 	}
 
 	UK_ASSERT(UK_PAGING_PAGE_Lx_ALIGNED(fault.paddr, fault.level));
@@ -665,8 +728,10 @@ static int vmem_map(struct uk_vas *vas, __vaddr_t *vaddr, __sz len,
 		/* Select the first virtual address range starting at the
 		 * mapping base that can accommodate the requested VMA.
 		 */
+		vmem_mutation_pause(vas);
 		base = (ops->get_base) ? ops->get_base(vas, args, flags) :
 					 vas->vma_base;
+		vmem_mutation_resume(vas);
 
 		va = vmem_first_fit(vas, base, UK_PAGING_PAGE_Lx_SIZE(algn_lvl),
 				    len);
@@ -713,20 +778,21 @@ static int vmem_map(struct uk_vas *vas, __vaddr_t *vaddr, __sz len,
 		return -ENOMEM;
 
 	/* Create a new VMA for the requested range. */
+	vmem_mutation_pause(vas);
 	if (ops->new) {
 		/* Split also needs to allocate a new VMA */
 		UK_ASSERT(ops->split);
 
 		rc = ops->new(vas, va, len, args, attr, &flags, &vma);
-		if (unlikely(rc))
-			return rc;
 	} else {
 		vma = uk_malloc(vas->a, sizeof(struct uk_vma));
-		if (unlikely(!vma))
-			return -ENOMEM;
-
-		vma->name = __NULL;
+		rc = vma ? 0 : -ENOMEM;
+		if (vma)
+			vma->name = __NULL;
 	}
+	vmem_mutation_resume(vas);
+	if (unlikely(rc))
+		return rc;
 
 	UK_ASSERT(vma);
 
@@ -803,11 +869,12 @@ int uk_vma_map(struct uk_vas *vas, __vaddr_t *vaddr, __sz len,
 	       unsigned long attr, unsigned long flags, const char *name,
 	       const struct uk_vma_ops *ops, void *args)
 {
+	unsigned long previous;
 	int rc;
 
-	uk_mutex_lock(&vas->mutation_lock);
+	previous = vmem_mutation_begin(vas);
 	rc = vmem_map(vas, vaddr, len, attr, flags, name, ops, args);
-	uk_mutex_unlock(&vas->mutation_lock);
+	vmem_mutation_end(vas, previous);
 	return rc;
 }
 
@@ -900,11 +967,12 @@ static int vmem_set_attr(struct uk_vas *vas, __vaddr_t vaddr, __sz len,
 int uk_vma_set_attr(struct uk_vas *vas, __vaddr_t vaddr, __sz len,
 		    unsigned long attr, unsigned long flags)
 {
+	unsigned long previous;
 	int rc;
 
-	uk_mutex_lock(&vas->mutation_lock);
+	previous = vmem_mutation_begin(vas);
 	rc = vmem_set_attr(vas, vaddr, len, attr, flags);
-	uk_mutex_unlock(&vas->mutation_lock);
+	vmem_mutation_end(vas, previous);
 	return rc;
 }
 
@@ -1022,11 +1090,12 @@ static int vmem_advise(struct uk_vas *vas, __vaddr_t vaddr, __sz len,
 int uk_vma_advise(struct uk_vas *vas, __vaddr_t vaddr, __sz len,
 		  unsigned long advice, unsigned long flags)
 {
+	unsigned long previous;
 	int rc;
 
-	uk_mutex_lock(&vas->mutation_lock);
+	previous = vmem_mutation_begin(vas);
 	rc = vmem_advise(vas, vaddr, len, advice, flags);
-	uk_mutex_unlock(&vas->mutation_lock);
+	vmem_mutation_end(vas, previous);
 	return rc;
 }
 

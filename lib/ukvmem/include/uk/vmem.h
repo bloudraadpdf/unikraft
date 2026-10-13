@@ -57,6 +57,7 @@ struct uk_vma_ops;
 struct uk_vas {
 	uk_spinlock fault_lock;
 	struct uk_mutex mutation_lock;
+	unsigned long mutation_irq_flags;
 	/** Allocator to use for VMAs */
 	struct uk_alloc *a;
 
@@ -290,6 +291,9 @@ struct uk_vma_ops {
 	 *   0 on success, a negative errno error otherwise
 	 */
 	int (*fault)(struct uk_vma *vma, struct uk_vm_fault *fault);
+
+	/** Release a prepared page if another CPU supplied the mapping. */
+	void (*fault_discard)(struct uk_vma *vma, struct uk_vm_fault *fault);
 
 	/**
 	 * Unmaps a range of the VMA. It is the handler's responsibily to
