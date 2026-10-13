@@ -313,13 +313,7 @@ int uk_clone(struct clone_args *cl_args, size_t cl_args_len,
 		 */
 		child->tlsp = child->uktlsp;
 
-		/* Since we didn't specify a stack to
-		 * uk_thread_create_container2() above,
-		 * we need to assign the stack manually.
-		 */
-		child->_mem.stack = (void *)stack;
-
-		/* Also inherit the parent's stack allocator */
+		/* The caller owns the borrowed stack; execve allocates a new one. */
 		child->_mem.stack_a = t->_mem.stack_a;
 #else /* CONFIG_LIBPOSIX_PROCESS_MULTIPROCESS */
 		ret = -ENOTSUP;
@@ -394,8 +388,6 @@ int uk_clone(struct clone_args *cl_args, size_t cl_args_len,
 
 	clone_setup_child_ctx(execenv, child, (__uptr)stack);
 
-	uk_thread_set_runnable(child);
-
 	/* Assign the child to the scheduler */
 	ret = uk_sched_thread_add(s, child);
 	if (unlikely(ret)) {
@@ -426,9 +418,12 @@ int uk_clone(struct clone_args *cl_args, size_t cl_args_len,
 		pthread = tid2pthread(ukthread2tid(t));
 		uk_thread_block(t);
 		pthread->state = POSIX_THREAD_BLOCKED_VFORK;
+		uk_thread_wake(child);
 		uk_sched_yield();
 		goto out;
 	}
+
+	uk_thread_wake(child);
 
 #ifdef CONFIG_LIBPOSIX_PROCESS_CLONE_PREFER_CHILD
 	uk_sched_yield();

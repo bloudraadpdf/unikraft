@@ -406,6 +406,7 @@ pid_t uk_posix_process_run(uk_posix_process_mainlike_func fn,
 	struct uk_sched *s = uk_sched_current();
 	struct uk_thread *parent;
 	struct uk_thread *child;
+	pid_t pid;
 	int ret;
 
 	UK_ASSERT(s);
@@ -455,6 +456,7 @@ pid_t uk_posix_process_run(uk_posix_process_mainlike_func fn,
 				     (uk_thread_fn2_t)fn,
 				     (void *)(unsigned long)argc,
 				     (void *)argv);
+	pid = ukthread2pid(child);
 	ret = uk_sched_thread_add(s, child);
 	if (unlikely(ret < 0)) {
 		uk_pr_err("Unable to add tid %d to scheduler (%d)\n",
@@ -462,7 +464,7 @@ pid_t uk_posix_process_run(uk_posix_process_mainlike_func fn,
 		goto err_free_thread;
 	}
 
-	return ukthread2pid(child);
+	return pid;
 
 err_free_thread:
 	/* also issues exit events */

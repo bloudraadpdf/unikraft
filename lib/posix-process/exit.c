@@ -130,8 +130,8 @@ void pprocess_exit_pthread(struct posix_thread *pthread,
 	/* Wake up parent if it was blocking on vfork */
 	if (parent_pthread &&
 	    parent_pthread->state == POSIX_THREAD_BLOCKED_VFORK) {
-		uk_thread_wake(parent_pthread->thread);
 		parent_pthread->state = POSIX_THREAD_RUNNING;
+		uk_thread_wake(parent_pthread->thread);
 	}
 
 	/* Release pthread and terminate the underlying uk_thread

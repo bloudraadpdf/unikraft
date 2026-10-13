@@ -53,8 +53,8 @@ static void __noreturn execve_ctx_switch(long arg0, long arg1)
 	 */
 	if (pthread_parent->state == POSIX_THREAD_BLOCKED_VFORK) {
 		uk_pr_debug("Waking up parent (tid %d)\n", pthread_parent->tid);
-		uk_thread_wake(tid2ukthread(pthread_parent->tid));
 		pthread_parent->state = POSIX_THREAD_RUNNING;
+		uk_thread_wake(tid2ukthread(pthread_parent->tid));
 	} else {
 		uk_free(this_thread->_mem.stack_a, stack_old);
 	}

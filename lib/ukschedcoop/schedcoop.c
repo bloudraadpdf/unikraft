@@ -151,9 +151,12 @@ static int schedcoop_thread_add(struct uk_sched *s, struct uk_thread *t)
 	UK_ASSERT(t);
 	UK_ASSERT(!uk_thread_is_exited(t));
 
-	/* Add to run queue if runnable */
-	if (uk_thread_is_runnable(t))
+	if (uk_thread_is_runnable(t)) {
 		UK_TAILQ_INSERT_TAIL(&c->run_queue, t, queue);
+		uk_thread_clear_queueable(t);
+	} else {
+		uk_thread_set_queueable(t);
+	}
 
 	return 0;
 }
