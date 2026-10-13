@@ -1287,6 +1287,11 @@ static int vsock_getsockopt(posix_sock *sock, int level, int optname,
 	switch (level) {
 	case SOL_SOCKET:
 		switch (optname) {
+		case SO_TYPE:
+			rc = getsockopt_copy(&vsock->sock_type,
+					     sizeof(vsock->sock_type),
+					     optval, optlen);
+			break;
 		case SO_ERROR:
 			uk_pr_debug("SO_ERROR requested, current so_error=%d\n",
 				    vsock->so_error);
