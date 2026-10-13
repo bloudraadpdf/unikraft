@@ -41,6 +41,7 @@
 #include <uk/config.h>
 #include <sys/sysinfo.h>
 #include <uk/syscall.h>
+#include <uk/pcpuvar.h>
 
 #ifdef CONFIG_LIBUKPAGING
 #include <uk/paging.h>
@@ -219,7 +220,7 @@ UK_SYSCALL_R_DEFINE(int, getcpu, unsigned int *, cpu, unsigned int *, node,
 	/* tcache is ignored since Linux 2.6.24 */
 
 	if (cpu)
-		*cpu = 0;
+		*cpu = uk_pcpuvar_current_get(uk_pcpuvar_cpu_idx);
 
 	if (node)
 		*node = 0;

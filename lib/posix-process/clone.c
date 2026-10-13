@@ -389,7 +389,7 @@ int uk_clone(struct clone_args *cl_args, size_t cl_args_len,
 	clone_setup_child_ctx(execenv, child, (__uptr)stack);
 
 	/* Assign the child to the scheduler */
-	ret = uk_sched_thread_add(s, child);
+	ret = uk_sched_thread_add(uk_sched_select(), child);
 	if (unlikely(ret)) {
 		uk_pr_err("Unable to add tid %d to scheduler (%d)\n",
 			  child_tid, ret);

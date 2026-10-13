@@ -627,3 +627,21 @@ UK_LLSYSCALL_R_DEFINE(int, membarrier, int, cmd, unsigned int, flags,
 		return -EINVAL;
 	}
 }
+
+struct uk_sched *uk_sched_select(void)
+{
+	static unsigned int next = 1;
+	struct uk_sched *scheduler;
+	unsigned int count = 0;
+	unsigned int selected;
+
+	for (scheduler = uk_sched_head; scheduler; scheduler = scheduler->next)
+		if (scheduler->is_started)
+			count++;
+	UK_ASSERT(count);
+	selected = __atomic_fetch_add(&next, 1, __ATOMIC_RELAXED) % count;
+	for (scheduler = uk_sched_head; scheduler; scheduler = scheduler->next)
+		if (scheduler->is_started && !selected--)
+			return scheduler;
+	UK_CRASH("No started scheduler selected");
+}

@@ -51,6 +51,8 @@ extern "C" {
 
 struct uk_sched;
 
+struct uk_sched *uk_sched_select(void);
+
 static inline struct uk_sched *uk_sched_current(void)
 {
 	struct uk_thread *th = uk_thread_current();
