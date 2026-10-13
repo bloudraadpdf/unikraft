@@ -386,14 +386,14 @@ static void tscclock_cpu_block(__u64 until)
 	uk_lcpu_halt_irq();
 }
 
-unsigned long sched_have_pending_events;
+__uk_pcpuvar unsigned long sched_have_pending_events;
 
 void time_block_until(__snsec until)
 {
 	while ((__snsec) ukplat_monotonic_clock() < until) {
+		if (uk_and_relax(uk_pcpuvar_current_ptr_get(sched_have_pending_events), 0))
+			break;
 		tscclock_cpu_block(until);
 
-		if (uk_and_relax(&sched_have_pending_events, 0))
-			break;
 	}
 }

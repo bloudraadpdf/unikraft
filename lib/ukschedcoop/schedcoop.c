@@ -34,6 +34,7 @@
 #include <uk/plat/memory.h>
 #include <uk/plat/time.h>
 #include <uk/sched_impl.h>
+#include <uk/thread_wake_impl.h>
 #include <uk/schedcoop.h>
 #include <uk/essentials.h>
 #include "schedcoop.h"
@@ -50,7 +51,7 @@ static void schedcoop_schedule(struct uk_sched *s)
 
 	now = ukplat_monotonic_clock();
 	prev = uk_thread_current();
-	flags = uk_lcpu_save_irqf();
+	ukplat_spin_lock_irqsave(&s->lock, flags);
 
 #if 0 //TODO
 	if (in_callback)
@@ -73,7 +74,7 @@ static void schedcoop_schedule(struct uk_sched *s)
 			      queue, tmp) {
 		if (likely(thread->wakeup_time)) {
 			if (thread->wakeup_time <= now)
-				uk_thread_wake(thread);
+				uk_thread_wake_locked(thread, false);
 			else if (!min_wakeup_time
 				 || thread->wakeup_time < min_wakeup_time)
 				min_wakeup_time = thread->wakeup_time;
@@ -120,7 +121,8 @@ static void schedcoop_schedule(struct uk_sched *s)
 
 	uk_sched_stats_sched_count_incr(s);
 
-	uk_lcpu_restore_irqf(flags);
+	s->current = next;
+	ukplat_spin_unlock_irqrestore(&s->lock, flags);
 
 	/* Interrupting the switch is equivalent to having the next thread
 	 * interrupted at the return instruction. And therefore at safe point.
@@ -157,9 +159,12 @@ static void schedcoop_thread_remove(struct uk_sched *s, struct uk_thread *t)
 	struct schedcoop *c = uksched2schedcoop(s);
 
 	/* Remove from run_queue */
-	if (t != uk_thread_current()
+	if (t != s->current
 	    && uk_thread_is_runnable(t))
 		UK_TAILQ_REMOVE(&c->run_queue, t, queue);
+	else if (!uk_thread_is_runnable(t) && t->wakeup_time > 0)
+		UK_TAILQ_REMOVE(&c->sleep_queue, t, queue);
+	t->wakeup_time = 0;
 }
 
 static void schedcoop_thread_blocked(struct uk_sched *s, struct uk_thread *t)
@@ -168,7 +173,7 @@ static void schedcoop_thread_blocked(struct uk_sched *s, struct uk_thread *t)
 
 	UK_ASSERT(uk_lcpu_irqs_disabled());
 
-	if (t != uk_thread_current())
+	if (t != s->current)
 		UK_TAILQ_REMOVE(&c->run_queue, t, queue);
 	if (t->wakeup_time > 0)
 		UK_TAILQ_INSERT_TAIL(&c->sleep_queue, t, queue);
@@ -179,6 +184,7 @@ static __noreturn void idle_thread_fn(void *argp)
 	struct schedcoop *c = (struct schedcoop *) argp;
 	__nsec now, wake_up_time;
 	unsigned long flags;
+	bool runnable;
 
 	UK_ASSERT(c);
 
@@ -196,8 +202,11 @@ static __noreturn void idle_thread_fn(void *argp)
 		 * NOTE:  This idle thread must be non-blocking so that the
 		 *        scheduler has always something to schedule.
 		 */
-		if (uk_sched_thread_gc(&c->sched) > 0 ||
-		    UK_TAILQ_FIRST(&c->run_queue)) {
+		runnable = uk_sched_thread_gc(&c->sched) > 0;
+		ukarch_spin_lock(&c->sched.lock);
+		runnable |= UK_TAILQ_FIRST(&c->run_queue) != NULL;
+		ukarch_spin_unlock(&c->sched.lock);
+		if (runnable) {
 			/* We collected successfully some garbage or there is
 			 * a runnable thread in the queue.
 			 * Check if something else can be scheduled now.

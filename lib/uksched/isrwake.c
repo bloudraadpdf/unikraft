@@ -5,17 +5,9 @@
  */
 #include <uk/isr/sched.h>
 #include <uk/isr/thread.h>
+#include <uk/thread_wake_impl.h>
 
 void uk_thread_wake_isr(struct uk_thread *thread)
 {
-	unsigned long flags;
-
-	flags = uk_lcpu_save_irqf();
-	if (!uk_thread_is_runnable(thread)) {
-		uk_thread_set_runnable(thread);
-		if (thread->sched)
-			uk_sched_thread_woken_isr(thread);
-	}
-	thread->wakeup_time = 0LL;
-	uk_lcpu_restore_irqf(flags);
+	uk_thread_wake_impl(thread, true);
 }

@@ -251,7 +251,9 @@ static void gicv3_sgi_gen(__u8 sgintid, __u32 cpuid)
 
 	/* Generate interrupt */
 	dist_lock(gicv3_drv);
+	uk_arch_arm64_dsb(ishst);
 	UK_ARCH_ARM64_SYSREG_WRITE64(ICC_SGI1R_EL1, sgi_register);
+	uk_arch_arm64_isb();
 	dist_unlock(gicv3_drv);
 }
 

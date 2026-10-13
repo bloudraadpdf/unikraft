@@ -41,6 +41,7 @@
 #include <uk/alloc.h>
 #include <uk/lcpu.h>
 #include <uk/sched.h>
+#include <uk/thread_wake_impl.h>
 #include <uk/syscall.h>
 #include <uk/wait.h>
 #include <uk/pcpuvar.h>
@@ -210,6 +211,7 @@ int uk_sched_start(struct uk_sched *s)
 	UK_ASSERT(s);
 	UK_ASSERT(s->sched_start);
 	UK_ASSERT(!s->is_started);
+	s->cpu_index = uk_pcpuvar_current_get(uk_pcpuvar_cpu_idx);
 	UK_ASSERT(!uk_thread_current()); /* No other thread runs */
 
 	/* Allocate an `uk_thread` instance for current context
@@ -227,6 +229,7 @@ int uk_sched_start(struct uk_sched *s)
 		goto err_out;
 	}
 	main_thread->sched = s;
+	s->current = main_thread;
 
 	/* Because `main_thread` acts as container for storing the current
 	 * context, it does not have IP and SP set. We have to manually mark
@@ -263,12 +266,20 @@ err_out:
 
 unsigned int uk_sched_thread_gc(struct uk_sched *sched)
 {
-	struct uk_thread *thread, *tmp;
+	struct uk_thread *thread;
 	unsigned int num = 0;
+	unsigned long flags;
 
-	/* Cleanup finished threads */
-	UK_TAILQ_FOREACH_SAFE(thread, &sched->exited_threads,
-			      thread_list, tmp) {
+	UK_ASSERT(sched->cpu_index == uk_pcpuvar_current_get(uk_pcpuvar_cpu_idx));
+	for (;;) {
+		ukplat_spin_lock_irqsave(&sched->lock, flags);
+		thread = UK_TAILQ_FIRST(&sched->exited_threads);
+		if (!thread) {
+			ukplat_spin_unlock_irqrestore(&sched->lock, flags);
+			break;
+		}
+		UK_TAILQ_REMOVE(&sched->exited_threads, thread, thread_list);
+		ukplat_spin_unlock_irqrestore(&sched->lock, flags);
 		UK_ASSERT(thread != uk_thread_current());
 		UK_ASSERT(uk_thread_is_exited(thread));
 
@@ -276,7 +287,6 @@ unsigned int uk_sched_thread_gc(struct uk_sched *sched)
 			    sched, thread,
 			    thread->name ? thread->name : "<unnamed>");
 
-		UK_TAILQ_REMOVE(&sched->exited_threads, thread, thread_list);
 		if (thread->_gc_fn)
 			thread->_gc_fn(thread,  thread->_gc_argp);
 		uk_thread_release(thread);
@@ -289,6 +299,7 @@ unsigned int uk_sched_thread_gc(struct uk_sched *sched)
 void uk_sched_thread_terminate(struct uk_thread *thread)
 {
 	struct uk_sched *sched;
+	unsigned long flags;
 
 	UK_ASSERT(thread);
 	 /* NOTE: The following assertion can also fail on a double-termination.
@@ -316,8 +327,10 @@ void uk_sched_thread_terminate(struct uk_thread *thread)
 		uk_pr_debug("%p: thread %p (%s) on gc list\n",
 			    sched, thread, thread->name ?
 					   thread->name : "<unnamed>");
+		ukplat_spin_lock_irqsave(&sched->lock, flags);
 		UK_TAILQ_INSERT_TAIL(&sched->exited_threads, thread,
 				     thread_list);
+		ukplat_spin_unlock_irqrestore(&sched->lock, flags);
 
 		/* leave this thread */
 		sched->yield(sched); /* we won't return */
@@ -363,7 +376,7 @@ int uk_sched_thread_add(struct uk_sched *s, struct uk_thread *t)
 	UK_ASSERT(t);
 	UK_ASSERT(!t->sched);
 
-	flags = uk_lcpu_save_irqf();
+	ukplat_spin_lock_irqsave(&s->lock, flags);
 
 	rc = s->thread_add(s, t);
 	if (rc < 0)
@@ -372,7 +385,9 @@ int uk_sched_thread_add(struct uk_sched *s, struct uk_thread *t)
 	t->sched = s;
 	UK_TAILQ_INSERT_TAIL(&s->thread_list, t, thread_list);
 out:
-	uk_lcpu_restore_irqf(flags);
+	ukplat_spin_unlock_irqrestore(&s->lock, flags);
+	if (!rc && s->is_started)
+		uk_sched_wake_cpu(s);
 	return rc;
 }
 
@@ -384,12 +399,12 @@ int uk_sched_thread_remove(struct uk_thread *t)
 	UK_ASSERT(t);
 	UK_ASSERT(t->sched);
 
-	flags = uk_lcpu_save_irqf();
 	s = t->sched;
+	ukplat_spin_lock_irqsave(&s->lock, flags);
 	s->thread_remove(s, t);
 	t->sched = NULL;
 	UK_TAILQ_REMOVE(&s->thread_list, t, thread_list);
-	uk_lcpu_restore_irqf(flags);
+	ukplat_spin_unlock_irqrestore(&s->lock, flags);
 	return 0;
 }
 

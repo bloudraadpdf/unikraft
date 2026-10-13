@@ -247,6 +247,7 @@ void generic_timer_cpu_block_until(__u64 until_ns)
 		 * us up
 		 */
 		uk_lcpu_enable_irq();
+		uk_arch_arm64_isb();
 		uk_lcpu_disable_irq();
 	}
 }

@@ -92,14 +92,14 @@ uint32_t generic_timer_get_frequency(int fdt_timer)
 	return fdt32_to_cpu(fdt_freq[0]);
 }
 
-unsigned long sched_have_pending_events;
+__uk_pcpuvar unsigned long sched_have_pending_events;
 
 void time_block_until(__snsec until)
 {
 	while ((__snsec)ukplat_monotonic_clock() < until) {
-		generic_timer_cpu_block_until(until);
-		if (uk_and_relax(&sched_have_pending_events, 0))
+		if (uk_and_relax(uk_pcpuvar_current_ptr_get(sched_have_pending_events), 0))
 			break;
+		generic_timer_cpu_block_until(until);
 	}
 }
 

@@ -69,6 +69,7 @@ int uk_sched_register(struct uk_sched *s);
 		thread_woken_isr_func, idle_thread_func, \
 		sched_a, sched_a_stack, sched_a_auxstack, sched_a_uktls) \
 	do { \
+		ukarch_spin_init(&(s)->lock); \
 		(s)->sched_start      = start_func; \
 		(s)->yield            = yield_func; \
 		(s)->thread_add       = thread_add_func; \

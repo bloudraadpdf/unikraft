@@ -39,6 +39,7 @@
 #include <uk/thread.h>
 #include <uk/tcb_impl.h>
 #include <uk/sched.h>
+#include <uk/thread_wake_impl.h>
 #include <uk/wait.h>
 #include <uk/print.h>
 #include <uk/assert.h>
@@ -1038,17 +1039,23 @@ void uk_thread_release(struct uk_thread *t)
 
 void uk_thread_block_until(struct uk_thread *thread, __snsec until)
 {
+	struct uk_sched *scheduler;
 	unsigned long flags;
 
 	UK_ASSERT(thread);
 
 	flags = uk_lcpu_save_irqf();
+	scheduler = thread->sched;
+	if (scheduler)
+		ukarch_spin_lock(&scheduler->lock);
 	thread->wakeup_time = until;
 	if (uk_thread_is_runnable(thread)) {
 		uk_thread_set_blocked(thread);
 		if (thread->sched)
 			uk_sched_thread_blocked(thread);
 	}
+	if (scheduler)
+		ukarch_spin_unlock(&scheduler->lock);
 	uk_lcpu_restore_irqf(flags);
 }
 
@@ -1070,14 +1077,5 @@ void uk_thread_block(struct uk_thread *thread)
 
 void uk_thread_wake(struct uk_thread *thread)
 {
-	unsigned long flags;
-
-	flags = uk_lcpu_save_irqf();
-	if (!uk_thread_is_runnable(thread)) {
-		uk_thread_set_runnable(thread);
-		if (thread->sched)
-			uk_sched_thread_woken(thread);
-	}
-	thread->wakeup_time = 0LL;
-	uk_lcpu_restore_irqf(flags);
+	uk_thread_wake_impl(thread, false);
 }

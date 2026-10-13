@@ -42,6 +42,7 @@
 #include <uk/assert.h>
 #include <uk/arch/types.h>
 #include <uk/essentials.h>
+#include <uk/plat/spinlock.h>
 #include <errno.h>
 
 #ifdef __cplusplus
@@ -99,6 +100,9 @@ struct uk_sched {
 
 	/* internal */
 	bool is_started;
+	__spinlock lock;
+	__u64 cpu_index;
+	struct uk_thread *current;
 	struct uk_thread_list thread_list;
 	struct uk_thread_list exited_threads;
 	struct uk_alloc *a;       /**< default allocator for struct uk_thread */
