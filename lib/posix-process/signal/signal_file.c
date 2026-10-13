@@ -97,7 +97,7 @@ static void si_to_ssi(const siginfo_t *si, struct signalfd_siginfo *ssi)
 		break;
 	default:
 		/* For real-time signals which may contain sigqueue data */
-		if (si->si_signo >= SIGRTMIN && si->si_signo <= SIGRTMAX) {
+		if (si->si_signo >= UK_SIGNAL_RTMIN && si->si_signo <= SIGRTMAX) {
 			ssi->ssi_int = si->si_value.sival_int;
 			ssi->ssi_ptr = (uint64_t)si->si_value.sival_ptr;
 			return;

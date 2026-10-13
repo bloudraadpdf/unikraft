@@ -36,6 +36,7 @@ UK_LLSYSCALL_R_DEFINE(int, rt_sigpending,
 	proc = uk_pprocess_current();
 	UK_ASSERT(proc);
 
+	uk_mutex_lock(&pprocess_mutex);
 	sigset = proc->signal->sigqueue.pending;
 	uk_sigorset(&sigset, &pthread->signal->sigqueue.pending);
 
@@ -43,6 +44,7 @@ UK_LLSYSCALL_R_DEFINE(int, rt_sigpending,
 		if (IS_MASKED(pthread, signum) && IS_IGNORED(proc, signum))
 			uk_sigdelset(&sigset, signum);
 
+	uk_mutex_unlock(&pprocess_mutex);
 	*set = sigset;
 
 	return 0;

@@ -27,6 +27,8 @@
 #endif /* CONFIG_LIBPOSIX_PROCESS_SIGNALFD */
 #endif /* __ASSEMBLY__ */
 
+#define UK_SIGNAL_RTMIN 32
+
 #define SIG_ARRAY_COUNT		_NSIG /* SIGRTMAX + 1 */
 
 /* struct pprocess_signal_handler_ctx */
@@ -94,7 +96,7 @@
 
 /* Helper to iterate over standard signals */
 #define pprocess_stdsig_foreach(_sn)					\
-	for ((_sn) = 1; (__sz)(_sn) < SIGRTMIN; (_sn)++)
+	for ((_sn) = 1; (__sz)(_sn) < UK_SIGNAL_RTMIN; (_sn)++)
 
 /* Kernel version of `struct sigaction` passed to rt_sigaction(). The order
  * of the elements of this struct is different of the `struct sigaction`

@@ -31,49 +31,27 @@ static int pprocess_signal_enqueue(struct posix_process *pproc,
 				   struct posix_thread *pthread,
 				   struct uk_signal *sig)
 {
-	int signum;
+	struct uk_signal_queue *queue;
+	int signum = sig->siginfo.si_signo;
+	int rc = 0;
 
-	UK_ASSERT(sig);
-	UK_ASSERT(pproc);
-
-	if (pthread)
-		UK_ASSERT(pthread->process == pproc);
-
-	if (unlikely(pproc->signal->queued_count >= pproc->signal->queued_max))
-		return -EAGAIN;
-
-	signum = sig->siginfo.si_signo;
-
-	if (pthread) {
-		/* Standard signals can be queued once */
-		if (signum < SIGRTMIN && IS_PENDING(pthread->signal->sigqueue, signum))
-			return 0;
-
-		uk_pr_debug("Queueing signal %d for tid %d (pid %d)\n",
-			    signum, pthread->tid, pproc->pid);
-
-		uk_list_add_tail(&sig->list_head,
-				 &pthread->signal->sigqueue.list_head[signum]);
-		SET_PENDING(pproc->signal->sigqueue, signum);
+	UK_ASSERT(!pthread || pthread->process == pproc);
+	queue = pthread ? &pthread->signal->sigqueue : &pproc->signal->sigqueue;
+	uk_mutex_lock(&pprocess_mutex);
+	if (signum < UK_SIGNAL_RTMIN && IS_PENDING(*queue, signum)) {
+		uk_signal_free(pthread ? pthread->_a : pproc->_a, sig);
+	} else if (pproc->signal->queued_count >= pproc->signal->queued_max) {
+		rc = -EAGAIN;
 	} else {
-		/* Standard signals can be queued once */
-		if (signum < SIGRTMIN && IS_PENDING(pproc->signal->sigqueue, signum))
-			return 0;
-
-		uk_pr_debug("Queueing signal %d for pid %d\n",
-			    signum, pproc->pid);
-
-		uk_list_add_tail(&sig->list_head,
-				 &pproc->signal->sigqueue.list_head[signum]);
-		SET_PENDING(pproc->signal->sigqueue, signum);
+		uk_list_add_tail(&sig->list_head, &queue->list_head[signum]);
+		SET_PENDING(*queue, signum);
+		pproc->signal->queued_count++;
 	}
-
-	pproc->signal->queued_count++;
-
-	return 0;
+	uk_mutex_unlock(&pprocess_mutex);
+	return rc;
 }
 
-struct uk_signal *pprocess_signal_dequeue(struct posix_process *pproc,
+static struct uk_signal *signal_dequeue_locked(struct posix_process *pproc,
 					  struct posix_thread *pthread,
 					  int signum)
 {
@@ -107,6 +85,18 @@ struct uk_signal *pprocess_signal_dequeue(struct posix_process *pproc,
 
 	pproc->signal->queued_count--;
 
+	return sig;
+}
+
+struct uk_signal *pprocess_signal_dequeue(struct posix_process *pproc,
+					  struct posix_thread *pthread,
+					  int signum)
+{
+	struct uk_signal *sig;
+
+	uk_mutex_lock(&pprocess_mutex);
+	sig = signal_dequeue_locked(pproc, pthread, signum);
+	uk_mutex_unlock(&pprocess_mutex);
 	return sig;
 }
 

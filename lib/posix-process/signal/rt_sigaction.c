@@ -36,20 +36,19 @@ UK_LLSYSCALL_R_DEFINE(int, rt_sigaction, int, signum,
 	proc = uk_pprocess_current();
 	UK_ASSERT(proc);
 
+	uk_mutex_lock(&pprocess_mutex);
 	if (oldact)
 		memcpy(oldact, KERN_SIGACTION(proc, signum),
 		       sizeof(struct kern_sigaction));
 
 	if (!act)
-		return 0;
+		goto out;
 
 	if (act->ks_flags & SA_NOCLDSTOP)
 		uk_pr_warn("ks_flags: SA_NOCLDSTOP not supported, ignoring\n");
 
 	if (act->ks_flags & SA_RESTART)
 		uk_pr_warn("ks_flags: SA_RESTART not supported, ignoring\n");
-
-	/* TODO Don't update sigaction while executing a signal handler */
 
 	memcpy(KERN_SIGACTION(proc, signum), act,
 	       sizeof(struct kern_sigaction));
@@ -58,6 +57,8 @@ UK_LLSYSCALL_R_DEFINE(int, rt_sigaction, int, signum,
 	if (IS_IGNORED(proc, signum))
 		pprocess_signal_clear_pending(proc, signum);
 
+out:
+	uk_mutex_unlock(&pprocess_mutex);
 	return 0;
 }
 #else /* !CONFIG_LIBPOSIX_PROCESS_SIGNAL */
