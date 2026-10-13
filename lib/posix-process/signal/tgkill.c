@@ -15,14 +15,9 @@
 UK_SYSCALL_R_DEFINE(int, tgkill, int, tgid,
 		    int, tid, int, signum)
 {
-	struct posix_process *pproc;
-
-	/* Chack tid is part of my tgid */
-	pproc = tid2pprocess(tid);
-	if (unlikely(!pproc || pproc->pid != tgid))
+	if (tgid <= 0)
 		return -ESRCH;
-
-	return pprocess_signal_thread_do(tid, signum, NULL);
+	return pprocess_signal_thread_do(tgid, tid, signum, NULL);
 }
 #else /* !CONFIG_LIBPOSIX_PROCESS_SIGNAL */
 UK_SYSCALL_R_DEFINE(int, tgkill, int, tgid,

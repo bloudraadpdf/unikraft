@@ -616,7 +616,8 @@ UK_THREAD_INIT_PRIO(0, posix_thread_fini, UK_PRIO_EARLIEST);
 
 struct posix_process *pid2pprocess(pid_t pid)
 {
-	UK_ASSERT((__sz)pid < ARRAY_SIZE(pid_process));
+	if (pid < 0 || (__sz)pid >= ARRAY_SIZE(pid_process))
+		return NULL;
 
 	return pid_process[pid];
 }

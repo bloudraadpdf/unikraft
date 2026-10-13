@@ -12,7 +12,7 @@
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 UK_LLSYSCALL_R_DEFINE(int, tkill, int, tid, int, signum)
 {
-	return pprocess_signal_thread_do(tid, signum, NULL);
+	return pprocess_signal_thread_do(0, tid, signum, NULL);
 }
 #else /* !CONFIG_LIBPOSIX_PROCESS_SIGNAL */
 UK_LLSYSCALL_R_DEFINE(int, tkill, int, tid, int, signum)

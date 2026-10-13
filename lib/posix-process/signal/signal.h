@@ -281,7 +281,7 @@ struct uk_signal *pprocess_signal_next_pending_t(struct posix_thread *pthread);
 int pprocess_signal_process_do(pid_t pid, int signum, siginfo_t *siginfo);
 
 /* Signal a thread (abstraction for kill / sigqueueinfo) */
-int pprocess_signal_thread_do(int tid, int signum, siginfo_t *siginfo);
+int pprocess_signal_thread_do(int tgid, int tid, int signum, siginfo_t *siginfo);
 
 /* Signal a process */
 int pprocess_signal_send(struct posix_process *proc, int signum,

@@ -203,7 +203,7 @@ int pprocess_signal_send(struct posix_process *proc, int signum,
 	return 0;
 }
 
-int pprocess_signal_process_do(pid_t pid, int signum, siginfo_t *siginfo)
+static int signal_process_locked(pid_t pid, int signum, siginfo_t *siginfo)
 {
 	struct posix_process *pproc = NULL;
 	struct posix_thread *thread, *threadn;
@@ -274,19 +274,35 @@ int pprocess_signal_process_do(pid_t pid, int signum, siginfo_t *siginfo)
 	return 0;
 }
 
-int pprocess_signal_thread_do(int tid, int signum, siginfo_t *siginfo)
+int pprocess_signal_process_do(pid_t pid, int signum, siginfo_t *siginfo)
+{
+	int rc;
+
+	uk_mutex_lock(&pprocess_mutex);
+	rc = signal_process_locked(pid, signum, siginfo);
+	uk_mutex_unlock(&pprocess_mutex);
+	return rc;
+}
+
+static int signal_thread_locked(int tgid, int tid, int signum,
+				siginfo_t *siginfo)
 {
 	struct posix_thread *pthread;
 	struct posix_process *pproc;
 	struct uk_signal *sig;
 	int rc;
 
+	if (signum && !IS_VALID(signum))
+		return -EINVAL;
 	pthread = tid2pthread(tid);
 	if (unlikely(!pthread))
-		return -EINVAL;
+		return -ESRCH;
 
-	pproc = tid2pprocess(tid);
-	UK_ASSERT(pproc);
+	pproc = pthread->process;
+	if (tgid && pproc->pid != tgid)
+		return -ESRCH;
+	if (!signum)
+		return 0;
 
 	sig = uk_signal_alloc(pthread->_a);
 	if (unlikely(!sig)) {
@@ -315,6 +331,16 @@ int pprocess_signal_thread_do(int tid, int signum, siginfo_t *siginfo)
 #endif /* CONFIG_LIBPOSIX_PROCESS_SIGNALFD */
 
 	return 0;
+}
+
+int pprocess_signal_thread_do(int tgid, int tid, int signum, siginfo_t *siginfo)
+{
+	int rc;
+
+	uk_mutex_lock(&pprocess_mutex);
+	rc = signal_thread_locked(tgid, tid, signum, siginfo);
+	uk_mutex_unlock(&pprocess_mutex);
+	return rc;
 }
 
 int pprocess_signal_pdesc_alloc(struct posix_process *process)
