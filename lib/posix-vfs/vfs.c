@@ -1253,6 +1253,15 @@ int uk_sys_mkdirat(const struct uk_file *f, const char *path, mode_t mode)
 	/* Lookup parent of path */
 	/* ignore trailing slashes (uniquely among *dir syscalls) */
 	p = uk_fs_path_len_trail(path, 1);
+	newdir = vfs_lookup(f, path, p.len, VFS_LOOKUP_NOFOLLOW);
+	if (!PTRISERR(newdir)) {
+		uk_file_release(newdir);
+		return -EEXIST;
+	}
+	ret = PTR2ERR(newdir);
+	if (ret != -ENOENT)
+		return ret;
+
 	dir = vfs_lookup(f, path, p.pos, 0);
 	if (unlikely(PTRISERR(dir)))
 		return PTR2ERR(dir);
