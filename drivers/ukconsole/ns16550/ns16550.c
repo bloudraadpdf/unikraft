@@ -265,6 +265,12 @@ static inline int config_fdt_chosen_stdout(const void *dtb)
 
 	/* Check if chosen/stdout-path is set to this device */
 	rc = fdt_chosen_stdout_path(dtb, &offs, &opt);
+	if (rc == -FDT_ERR_NOTFOUND) {
+		offs = fdt_node_offset_by_compatible_list(dtb, -1, fdt_compatible);
+		if (offs < 0)
+			return offs;
+		rc = 0;
+	}
 	if (unlikely(rc)) /* no stdout-path or bad dtb */
 		return rc;
 

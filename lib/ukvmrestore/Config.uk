@@ -1,6 +1,11 @@
 config LIBUKVMRESTORE
 	bool "ukvmrestore: Firecracker snapshot generation and entropy"
-	depends on ARCH_X86_64 && KVM_VMM_FIRECRACKER
+	depends on (ARCH_ARM_64 || ARCH_X86_64) && KVM_VMM_FIRECRACKER
+	select LIBUKOFW if ARCH_ARM_64
+	select LIBUKBUS_PLATFORM if ARCH_ARM_64
+	select LIBVIRTIO_BUS if ARCH_ARM_64
+	select LIBVIRTIO_RING if ARCH_ARM_64
+	select LIBUKSGLIST if ARCH_ARM_64
 	select LIBUKINTCTLR
 	select LIBUKLIBPARAM
 	select LIBUKFILE_POLLED

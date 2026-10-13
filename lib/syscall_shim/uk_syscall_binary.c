@@ -97,6 +97,10 @@ void ukplat_syscall_handler(struct uk_syscall_ctx *usc)
 	UK_ASSERT(t->uktlsp == ukarch_auxspcb_get_uktlsp(auxspcb));
 #endif /* CONFIG_LIBSYSCALL_SHIM_HANDLER_ULTLS */
 
+#if CONFIG_ARCH_ARM_64
+	uk_lcpu_enable_irq();
+#endif
+
 	uk_syscall_nested_depth++;
 	uk_syscall_enter_ctx_init(&enter_ctx,
 				  execenv, uk_syscall_nested_depth,

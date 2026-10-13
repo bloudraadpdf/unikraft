@@ -5,6 +5,7 @@
  */
 
 #include <uk/arch/types.h>
+#include <uk/arch/ctx.h>
 #include <uk/event.h>
 #include <uk/lcpu.h>
 #include <uk/plat/syscall.h>
@@ -27,6 +28,7 @@ static int arm64_syscall_adapter(void *data)
 	uk_lcpu_sysctx_store((struct uk_lcpu_sysctx *)&execenv->sysctx);
 
 	ukplat_syscall_handler((struct uk_syscall_ctx *)execenv);
+	uk_lcpu_disable_irq();
 
 	/* Restore system context state */
 	uk_lcpu_sysctx_load((struct uk_lcpu_sysctx *)&execenv->sysctx);

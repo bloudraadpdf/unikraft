@@ -18,6 +18,11 @@
 #include <uk/random.h>
 #include <uk/spinlock.h>
 #include <uk/wait.h>
+#if CONFIG_ARCH_ARM_64
+#include <uk/bus/platform.h>
+#include <uk/ofw/fdt.h>
+#include <uk/plat/common/bootinfo.h>
+#endif
 
 #define CLOCK_BYTES 112
 #define CLOCK_MAGIC 0x4b4c4356
@@ -245,6 +250,62 @@ static const struct uk_file generation_file = {
 	.state = &generation_state, ._release = uk_file_static_release,
 };
 
+#if CONFIG_ARCH_ARM_64
+static int discover_restore_devices(void)
+{
+	const void *fdt = (const void *)ukplat_bootinfo_get()->dtb;
+	struct uk_intctlr_irq notification;
+	__u64 clock_size, generation_size;
+	int clock_node, generation_node, rc;
+
+	if (!fdt || fdt_check_header(fdt))
+		return -ENODEV;
+	clock_node = fdt_node_offset_by_compatible(fdt, -1, "amazon,vmclock");
+	generation_node = fdt_node_offset_by_compatible(fdt, -1, "microsoft,vmgenid");
+	if (clock_node < 0 || generation_node < 0)
+		return -ENODEV;
+	if (fdt_node_offset_by_compatible(fdt, clock_node, "amazon,vmclock") >= 0 ||
+	    fdt_node_offset_by_compatible(fdt, generation_node, "microsoft,vmgenid") >= 0)
+		return -EINVAL;
+	rc = fdt_get_address(fdt, clock_node, 0, &clock_addr, &clock_size);
+	if (rc)
+		return rc;
+	rc = fdt_get_address(fdt, generation_node, 0, &genid_addr, &generation_size);
+	if (rc)
+		return rc;
+	if (clock_size != 4096 || generation_size != 16 ||
+	    clock_addr < 0x80000000 || clock_addr > 0x801ff000 || clock_addr % 4096 ||
+	    genid_addr < 0x80000000 || genid_addr > 0x801ffff0 || genid_addr % 8 ||
+	    (genid_addr < clock_addr + clock_size && clock_addr < genid_addr + generation_size))
+		return -EINVAL;
+	rc = uk_intctlr_irq_fdt_xlat(fdt, clock_node, 0, &notification);
+	if (rc)
+		return rc;
+	if (notification.trigger != UK_INTCTLR_IRQ_TRIGGER_EDGE)
+		return -EINVAL;
+	rc = uk_intctlr_irq_configure(&notification);
+	if (rc)
+		return rc;
+	irq = notification.id;
+	clock_addr = uk_bus_pf_devmap(clock_addr, clock_size);
+	if (PTRISERR(clock_addr))
+		return PTR2ERR(clock_addr);
+	genid_addr = uk_bus_pf_devmap(genid_addr, generation_size);
+	if (PTRISERR(genid_addr))
+		return PTR2ERR(genid_addr);
+	return 0;
+}
+#else
+static int discover_restore_devices(void)
+{
+	if (clock_addr < 0x9fc00 || clock_addr > 0xdf000 ||
+	    clock_addr % 4096 || genid_addr < 0x9fc00 ||
+	    genid_addr > 0xdfff0 || genid_addr % 8 || irq < 5 || irq > 15)
+		return -EINVAL;
+	return 0;
+}
+#endif
+
 static int restore_devices_init(struct uk_init_ctx *context __unused)
 {
 	const union uk_fs_create_target clock_target = { .file = &clock_file };
@@ -256,10 +317,9 @@ static int restore_devices_init(struct uk_init_ctx *context __unused)
 	const void *created;
 	int rc;
 
-	if (clock_addr < 0x9fc00 || clock_addr > 0xdf000 ||
-	    clock_addr % 4096 || genid_addr < 0x9fc00 ||
-	    genid_addr > 0xdfff0 || genid_addr % 8 || irq < 5 || irq > 15)
-		return -EINVAL;
+	rc = discover_restore_devices();
+	if (rc)
+		return rc;
 	rc = read_clock(snapshot);
 	if (rc)
 		return rc;

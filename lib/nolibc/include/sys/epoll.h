@@ -85,7 +85,11 @@ typedef union epoll_data {
 struct epoll_event {
 	uint32_t events;	/* Epoll events */
 	epoll_data_t data;	/* User data variable */
-} __packed;
+}
+#if CONFIG_ARCH_X86_64
+__packed
+#endif
+;
 
 int epoll_create(int size);
 int epoll_create1(int flags);

@@ -18,7 +18,7 @@ void execve_arch_execenv_init(struct ukarch_execenv *execenv_new,
 	UK_ASSERT(sp);
 	UK_ASSERT(IS_ALIGNED(sp, UKARCH_SP_ALIGN));
 
-	uk_lcpu_regs_set(execenv_new->regs, LR, ip);
+	uk_lcpu_regs_set(execenv_new->regs, PC, ip);
 	uk_lcpu_regs_set(execenv_new->regs, SP, sp);
 
 	/* Copy SPSR to preserve the application's state at
@@ -31,9 +31,8 @@ void execve_arch_execenv_init(struct ukarch_execenv *execenv_new,
 	uk_lcpu_regs_set(execenv_new->regs, ESR_EL1,
 			 uk_lcpu_regs_get(execenv->regs, ESR_EL1));
 
-	/* Leave gpregs and ectx uninitialized for the new
-	 * execution context.
-	 */
+	uk_lcpu_ectx_sanitize((struct uk_lcpu_ectx *)execenv_new->ectx);
+	uk_lcpu_ectx_store((struct uk_lcpu_ectx *)execenv_new->ectx);
 
 	/* Also copy the current sysctx to avoid ending up with undefined
 	 * values that trigger alignment errors.

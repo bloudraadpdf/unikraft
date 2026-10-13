@@ -202,7 +202,7 @@ static inline void overlapping_mrd_fixup(struct ukplat_memregion_list *list,
 		 * drop that part of the right region only
 		 */
 		} else {
-			mr->len -= ml->pbase + ml->len - mr->pbase;
+			mr->len -= ml->pbase + ml->pg_count * UK_PAGING_PAGE_SIZE - mr->pbase;
 			mr->pg_count = UK_PAGING_PAGE_COUNT(mr->len);
 			mr->pbase = ml->pbase + ml->pg_count * UK_PAGING_PAGE_SIZE;
 			mr->vbase = mr->pbase;
@@ -231,7 +231,7 @@ static inline void overlapping_mrd_fixup(struct ukplat_memregion_list *list,
 		} else {
 			__ssz len = ml->pbase + ml->pg_count * UK_PAGING_PAGE_SIZE -
 				    mr->pbase - mr->pg_count * UK_PAGING_PAGE_SIZE;
-			__uptr base = UK_PAGING_PAGE_ALIGN_UP(mr->pbase + mr->len);
+			__uptr base = mr->pbase + mr->pg_count * UK_PAGING_PAGE_SIZE;
 
 			if (len > 0 &&
 			    RANGE_CONTAIN(ml->pbase,
