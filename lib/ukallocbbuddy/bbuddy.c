@@ -54,6 +54,7 @@
 #include <uk/assert.h>
 #include <uk/list.h>
 #include <uk/paging.h>
+#include <uk/plat/spinlock.h>
 
 struct chunk_head {
 	struct uk_hlist_node link;
@@ -79,6 +80,7 @@ struct uk_bbpalloc_memr {
 };
 
 struct uk_bbpalloc {
+	__spinlock lock;
 	unsigned long nr_free_pages;
 	struct uk_hlist_head free_head[FREELIST_SIZE];
 	struct uk_bbpalloc_memr *memr_head;
@@ -361,9 +363,11 @@ static void *bbuddy_palloc(struct uk_alloc *a, unsigned long num_pages)
 	struct uk_bbpalloc *const b = (struct uk_bbpalloc *)&a->priv;
 	struct chunk_head *alloc_ch;
 	size_t ord;
+	unsigned long irq_flags;
 
 	UK_ASSERT(a);
 	UK_ASSERT(num_pages);
+	ukplat_spin_lock_irqsave(&b->lock, irq_flags);
 	freelist_sanitycheck(b->free_head);
 
 	ord = num_pages_to_order(num_pages);
@@ -389,6 +393,7 @@ static void *bbuddy_palloc(struct uk_alloc *a, unsigned long num_pages)
 	uk_alloc_stats_count_palloc(a, (void *) alloc_ch, num_pages);
 	freelist_sanitycheck(b->free_head);
 
+	ukplat_spin_unlock_irqrestore(&b->lock, irq_flags);
 	return (void *)alloc_ch;
 
 err_nomem:
@@ -396,6 +401,7 @@ err_nomem:
 		   a, num_pages);
 
 	uk_alloc_stats_count_penomem(a, num_pages);
+	ukplat_spin_unlock_irqrestore(&b->lock, irq_flags);
 	errno = ENOMEM;
 	return NULL;
 }
@@ -467,12 +473,14 @@ static void bbuddy_pfree(struct uk_alloc *a, void *obj, unsigned long num_pages)
 	size_t freed_pages;
 	size_t ord;
 	struct chunk_head *ch;
+	unsigned long irq_flags;
 
 	UK_ASSERT(a);
 	UK_ASSERT(obj);
 	UK_ASSERT(num_pages);
 	UK_ASSERT(IS_ALIGNED((uintptr_t)obj, __PAGE_SIZE));
 
+	ukplat_spin_lock_irqsave(&b->lock, irq_flags);
 	uk_alloc_stats_count_pfree(a, obj, num_pages);
 	freelist_sanitycheck(b->free_head);
 
@@ -503,22 +511,26 @@ static void bbuddy_pfree(struct uk_alloc *a, void *obj, unsigned long num_pages)
 	} while (num_pages);
 
 	freelist_sanitycheck(b->free_head);
+	ukplat_spin_unlock_irqrestore(&b->lock, irq_flags);
 }
 
 static long bbuddy_pmaxalloc(struct uk_alloc *a)
 {
 	struct uk_bbpalloc *b;
 	size_t i, order;
+	unsigned long irq_flags;
 
 	UK_ASSERT(a != NULL);
 	b = (struct uk_bbpalloc *)&a->priv;
 
 	/* Find biggest order that has still elements available */
+	ukplat_spin_lock_irqsave(&b->lock, irq_flags);
 	order = FREELIST_SIZE;
 	for (i = 0; i < FREELIST_SIZE; i++) {
 		if (!FREELIST_EMPTY(&b->free_head[i]))
 			order = i;
 	}
+	ukplat_spin_unlock_irqrestore(&b->lock, irq_flags);
 	if (order == FREELIST_SIZE)
 		return 0; /* no memory left */
 
@@ -528,11 +540,16 @@ static long bbuddy_pmaxalloc(struct uk_alloc *a)
 static long bbuddy_pavailmem(struct uk_alloc *a)
 {
 	struct uk_bbpalloc *b;
+	unsigned long irq_flags;
+	long pages;
 
 	UK_ASSERT(a != NULL);
 	b = (struct uk_bbpalloc *)&a->priv;
 
-	return (long) b->nr_free_pages;
+	ukplat_spin_lock_irqsave(&b->lock, irq_flags);
+	pages = (long)b->nr_free_pages;
+	ukplat_spin_unlock_irqrestore(&b->lock, irq_flags);
+	return pages;
 }
 
 static int bbuddy_addmem(struct uk_alloc *a, void *base, size_t len)
@@ -543,12 +560,11 @@ static int bbuddy_addmem(struct uk_alloc *a, void *base, size_t len)
 	unsigned long i;
 	struct chunk_head *ch;
 	uintptr_t min, max, range;
+	unsigned long irq_flags;
 
 	UK_ASSERT(a != NULL);
 	UK_ASSERT(base != NULL);
 	b = (struct uk_bbpalloc *)&a->priv;
-
-	freelist_sanitycheck(b->free_head);
 
 	min = UK_PAGING_PAGE_ALIGN_UP((uintptr_t)base);
 	max = UK_PAGING_PAGE_ALIGN_DOWN((uintptr_t)base + (uintptr_t)len);
@@ -572,6 +588,8 @@ static int bbuddy_addmem(struct uk_alloc *a, void *base, size_t len)
 		return -EINVAL;
 	}
 
+	ukplat_spin_lock_irqsave(&b->lock, irq_flags);
+	freelist_sanitycheck(b->free_head);
 	memr = (struct uk_bbpalloc_memr *)min;
 
 	/*
@@ -630,6 +648,7 @@ static int bbuddy_addmem(struct uk_alloc *a, void *base, size_t len)
 
 	freelist_sanitycheck(b->free_head);
 
+	ukplat_spin_unlock_irqrestore(&b->lock, irq_flags);
 	return 0;
 }
 
@@ -662,6 +681,7 @@ struct uk_alloc *uk_allocbbuddy_init(void *base, size_t len)
 	memset(a, 0, metalen);
 	b = (struct uk_bbpalloc *)&a->priv;
 
+	ukarch_spin_init(&b->lock);
 	for (i = 0; i < FREELIST_SIZE; i++)
 		UK_INIT_HLIST_HEAD(&b->free_head[i]);
 	b->memr_head = NULL;
