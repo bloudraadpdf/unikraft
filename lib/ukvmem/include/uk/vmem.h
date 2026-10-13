@@ -38,6 +38,7 @@
 #include <uk/arch/types.h>
 #include <uk/list.h>
 #include <uk/alloc.h>
+#include <uk/spinlock.h>
 #ifdef CONFIG_LIBUKPAGING
 #include <uk/paging.h>
 #endif /* CONFIG_LIBUKPAGING */
@@ -53,6 +54,7 @@ struct uk_vma_ops;
 
 /** Virtual address space (VAS) */
 struct uk_vas {
+	uk_spinlock fault_lock;
 	/** Allocator to use for VMAs */
 	struct uk_alloc *a;
 

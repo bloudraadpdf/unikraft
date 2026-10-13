@@ -56,6 +56,7 @@ int uk_vas_init(struct uk_vas *vas, struct uk_pagetable *pt __maybe_unused,
 	UK_ASSERT(a);
 
 	vas->a = a;
+	uk_spin_init(&vas->fault_lock);
 
 #ifdef CONFIG_LIBUKPAGING
 	vas->pt = pt;
@@ -1050,13 +1051,13 @@ static int vmem_mapx_pagefault(struct uk_pagetable *pt __unused,
 	return 0;
 }
 
-int vmem_pagefault(__vaddr_t vaddr, unsigned int type,
-		   struct uk_lcpu_regs *regs)
+static int vmem_pagefault_locked(struct uk_vas *vas, __vaddr_t vaddr,
+				 unsigned int type, struct uk_lcpu_regs *regs)
 {
 	const unsigned int demand_lvl =
 		UK_PAGING_PAGE_SHIFT_Lx(CONFIG_LIBUKVMEM_DEMAND_PAGE_IN_SIZE);
-	struct uk_vas *vas;
 	struct uk_pagetable *pt;
+	__pte_t pte;
 	struct mapx_pagefault_ctx ctx = {
 		.vaddr = vaddr,
 		.type  = type,
@@ -1071,9 +1072,7 @@ int vmem_pagefault(__vaddr_t vaddr, unsigned int type,
 	unsigned long flags;
 	int rc;
 
-	/* Check if a virtual address space is set */
-	vas = uk_vas_get_active();
-	if (unlikely(!vas || vas->flags & UK_VAS_FLAG_NO_PAGING))
+	if (unlikely(vas->flags & UK_VAS_FLAG_NO_PAGING))
 		return -EFAULT;
 
 	/* If the page fault was caused by an access to a region not covered by
@@ -1096,6 +1095,16 @@ int vmem_pagefault(__vaddr_t vaddr, unsigned int type,
 	UK_ASSERT(ctx.vma->vas);
 	UK_ASSERT(ctx.vma->vas->pt);
 	pt = ctx.vma->vas->pt;
+	if (type & UK_VMA_FAULT_NONPRESENT) {
+		rc = uk_paging_pt_walk(pt, vaddr, &lvl, __NULL, &pte);
+		if (unlikely(rc))
+			return rc;
+		/* A different CPU can install this page before we take the lock. */
+		if (UK_PAGING_PT_Lx_PTE_PRESENT(pte, lvl) &&
+		    UK_PAGING_PAGE_Lx_IS(pte, lvl))
+			return 0;
+		lvl = UK_PAGING_PAGE_LEVEL;
+	}
 
 	/* Find the page level at which we want to page-in. If the VMA does not
 	 * enforce a specific page size and the configuration allows to page-in
@@ -1130,5 +1139,20 @@ int vmem_pagefault(__vaddr_t vaddr, unsigned int type,
 
 	return uk_paging_page_mapx(pt, vbase, 0, 1, ctx.vma->attr,
 				UK_PAGING_PAGE_FLAG_SIZE(lvl) | flags, &mapx);
+}
+
+int vmem_pagefault(__vaddr_t vaddr, unsigned int type,
+		   struct uk_lcpu_regs *regs)
+{
+	struct uk_vas *vas = uk_vas_get_active();
+	unsigned long flags;
+	int rc;
+
+	if (unlikely(!vas))
+		return -EFAULT;
+	uk_spin_lock_irqsave(&vas->fault_lock, flags);
+	rc = vmem_pagefault_locked(vas, vaddr, type, regs);
+	uk_spin_unlock_irqrestore(&vas->fault_lock, flags);
+	return rc;
 }
 #endif /* CONFIG_LIBUKPAGING */
