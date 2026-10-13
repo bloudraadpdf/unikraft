@@ -717,6 +717,9 @@ UK_SYSCALL_R_DEFINE(int, listen, int, sock, int, backlog)
 	int ret;
 	struct uk_ofile *of;
 
+	if ((unsigned int)backlog > SOMAXCONN)
+		backlog = SOMAXCONN;
+
 	trace_posix_socket_listen(sock, backlog);
 
 	of = socketfd_get(sock);
