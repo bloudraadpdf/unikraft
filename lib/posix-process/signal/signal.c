@@ -386,8 +386,6 @@ int pprocess_signal_pdesc_init(struct posix_process *process)
 	pprocess_signal_foreach(signum)
 		pprocess_signal_sigaction_clear(KERN_SIGACTION(process, signum));
 
-	pd->altstack.ss_flags = SS_DISABLE;
-
 #if CONFIG_LIBPOSIX_PROCESS_SIGNALFD
 	uk_signal_files_ctx_init(&pd->sigfiles_ctx);
 #endif /* CONFIG_LIBPOSIX_PROCESS_SIGNALFD */
@@ -405,6 +403,8 @@ int pprocess_signal_tdesc_init(struct posix_thread *thread)
 
 	td = thread->signal;
 
+	td->altstack = (stack_t){ .ss_flags = SS_DISABLE };
+	uk_sigemptyset(&td->sigwait_set);
 	uk_sigemptyset(&td->mask);
 	uk_sigemptyset(&td->sigqueue.pending);
 

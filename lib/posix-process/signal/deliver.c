@@ -94,7 +94,9 @@ static void handle_self(struct uk_signal *sig, const struct kern_sigaction *ks,
 {
 	struct pprocess_signal_handler_ctx handler_ctx;
 	ucontext_t ucontext;
-	struct posix_process *this_process;
+	struct posix_thread *this_thread;
+	stack_t saved_stack;
+	bool switched_stack;
 	stack_t *altstack;
 	__uptr ulsp;
 
@@ -106,30 +108,30 @@ static void handle_self(struct uk_signal *sig, const struct kern_sigaction *ks,
 	UK_ASSERT(SP_IN_AUXSP(uk_arch_read_sp(),
 			      uk_pcpuvar_current_get(UK_LCPU_AUXSP_SYM)));
 
-	this_process = uk_pprocess_current();
-	UK_ASSERT(this_process);
+	this_thread = uk_pthread_current();
+	UK_ASSERT(this_thread);
 
-	altstack = &this_process->signal->altstack;
+	altstack = &this_thread->signal->altstack;
+	saved_stack = *altstack;
+	switched_stack = (ks->ks_flags & SA_ONSTACK) &&
+		!(altstack->ss_flags & (SS_DISABLE | SS_ONSTACK));
 
 	uk_pr_debug("tid %d handling signal %d, handler: 0x%lx, flags: 0x%lx\n",
 		    uk_sys_gettid(), sig->siginfo.si_signo,
 		    (__u64)ks->ks_handler,
 		    ks->ks_flags);
 
-	/* TODO: Make sure sigaltstack() does not modify the altstack state
-	 * while we are executing on it, neither sigaction() modifies
-	 * sa_flags->SA_ONSTACK.
-	 */
-	if ((ks->ks_flags & SA_ONSTACK) && !(altstack->ss_flags & SS_DISABLE)) {
+	if (switched_stack) {
 		UK_ASSERT(altstack->ss_sp);
-		UK_ASSERT(!(altstack->ss_flags & SS_ONSTACK));
-
-		altstack->ss_flags |= SS_ONSTACK;
 
 		uk_pr_debug("Using altstack, ss_sp: 0x%lx, ss_size: 0x%lx\n",
 			    (__u64)altstack->ss_sp, altstack->ss_size);
 
 		ulsp = ukarch_gen_sp(altstack->ss_sp, altstack->ss_size);
+		if ((unsigned int)altstack->ss_flags & SS_AUTODISARM)
+			*altstack = (stack_t){ .ss_flags = SS_DISABLE };
+		else
+			altstack->ss_flags |= SS_ONSTACK;
 	} else {
 		ulsp = ALIGN_DOWN(uk_lcpu_regs_get(execenv->regs, SP),
 				  UKARCH_SP_ALIGN);
@@ -154,11 +156,8 @@ static void handle_self(struct uk_signal *sig, const struct kern_sigaction *ks,
 		pprocess_signal_jmp_handler(&handler_ctx, execenv);
 	}
 
-	if (ks->ks_flags & SA_ONSTACK) {
-		UK_ASSERT(altstack->ss_flags & SS_ONSTACK);
-		UK_ASSERT(!(altstack->ss_flags & SS_DISABLE));
-		altstack->ss_flags &= ~SS_ONSTACK;
-	}
+	if (switched_stack)
+		*altstack = saved_stack;
 }
 
 /* Deliver a signal to a thread. The caller must check that the signal

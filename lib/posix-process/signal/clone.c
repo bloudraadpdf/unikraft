@@ -26,6 +26,7 @@ int uk_posix_clone_sighand(void *arg)
 	struct posix_process *pp; /* parent process */
 	struct posix_process *cp; /* child process */
 	struct posix_thread *ct; /* child thread */
+	struct posix_thread *pt = NULL;
 	pid_t ppid; /* parent pid */
 	pid_t cpid; /* child pid */
 	int signum;
@@ -44,6 +45,8 @@ int uk_posix_clone_sighand(void *arg)
 	if (event_data->parent) {
 		ppid = ukthread2pid(event_data->parent);
 		pp = pid2pprocess(ppid);
+		pt = tid2pthread(ukthread2tid(event_data->parent));
+		UK_ASSERT(pt);
 	} else {
 		pp = __NULL;
 	}
@@ -75,6 +78,12 @@ int uk_posix_clone_sighand(void *arg)
 	if (unlikely(rc)) {
 		uk_pr_err("Could not initialize signal descriptor\n");
 		return rc;
+	}
+
+	if (pt) {
+		ct->signal->mask = pt->signal->mask;
+		if (!(cl_args->flags & CLONE_VM) || (cl_args->flags & CLONE_VFORK))
+			ct->signal->altstack = pt->signal->altstack;
 	}
 
 	/* If CLONE_THREAD was passed, the child is assigned to the
@@ -122,8 +131,10 @@ int uk_posix_clone_sighand(void *arg)
 		if (unlikely(rc))
 			goto fail_malloc;
 
-		memcpy(cp->signal->sigaction, pp->signal->sigaction,
-		       sizeof(*cp->signal->sigaction));
+		uk_mutex_lock(&pprocess_mutex);
+		memcpy(cp->signal->sigaction->ks, pp->signal->sigaction->ks,
+		       sizeof(cp->signal->sigaction->ks));
+		uk_mutex_unlock(&pprocess_mutex);
 	}
 
 	/* The child process has no pending signals */
@@ -134,16 +145,6 @@ int uk_posix_clone_sighand(void *arg)
 	pprocess_signal_foreach(signum)
 		UK_INIT_LIST_HEAD(&cp->signal->sigqueue.list_head[signum]);
 
-	if (pp) {
-		/* sigaltstack(2): Children created with clone() inherit the
-		 * parent's altstack settings, unless clone() was passed the
-		 * CLONE_VM and not CLONE_VFORK. In that case the altstack
-		 * inherited by the parent is disabled.
-		 */
-		memcpy(&cp->signal->altstack, &pp->signal->altstack, sizeof(stack_t));
-		if ((cl_args->flags & CLONE_VM) && !(cl_args->flags & CLONE_VFORK))
-			cp->signal->altstack.ss_flags = SS_DISABLE;
-	}
 
 #if CONFIG_LIBPOSIX_PROCESS_SIGNALFD
 	/*

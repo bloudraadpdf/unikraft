@@ -18,45 +18,29 @@
 UK_SYSCALL_R_DEFINE(int, sigaltstack, const stack_t *, ss,
 		    stack_t *, old_ss)
 {
-	struct posix_process *proc;
-
-	proc = uk_pprocess_current();
-	UK_ASSERT(proc);
+	struct posix_thread *thread = uk_pthread_current();
+	stack_t previous = thread->signal->altstack;
 
 	if (ss) {
-		if (unlikely(ss->ss_flags &&
-			     !((unsigned int)ss->ss_flags == SS_AUTODISARM ||
-			       (unsigned int)ss->ss_flags == SS_DISABLE)))
+		stack_t next = *ss;
+		unsigned int mode = (unsigned int)next.ss_flags & ~SS_AUTODISARM;
+
+		if (previous.ss_flags & SS_ONSTACK)
+			return -EPERM;
+		if (mode != 0 && mode != SS_DISABLE && mode != SS_ONSTACK)
 			return -EINVAL;
-
-		if (unlikely(ss->ss_size < MINSIGSTKSZ))
-			return -ENOMEM;
-
-		/* See BUGS in SIGALTSTACK(2) */
-		if (unlikely(ss->ss_flags & SS_ONSTACK))
-			return -EPERM;
-
-		if (unlikely(proc->signal->altstack.ss_flags == SS_ONSTACK))
-			return -EPERM;
-
-		if ((unsigned int)ss->ss_flags == SS_AUTODISARM)
-			uk_pr_warn("SS_AUTODISARM stubbed\n");
-
-		if ((unsigned int)ss->ss_flags == SS_DISABLE) {
-			proc->signal->altstack.ss_flags |= SS_DISABLE;
-			return 0;
+		if (mode == SS_DISABLE) {
+			next.ss_sp = NULL;
+			next.ss_size = 0;
+		} else {
+			if (next.ss_size < MINSIGSTKSZ)
+				return -ENOMEM;
+			next.ss_flags &= ~SS_ONSTACK;
 		}
-
-		/* TODO Don't allow updating the altstack if we are executing
-		 * on it already.
-		 */
-
-		proc->signal->altstack = *ss;
+		thread->signal->altstack = next;
 	}
-
 	if (old_ss)
-		*old_ss = proc->signal->altstack;
-
+		*old_ss = previous;
 	return 0;
 }
 
