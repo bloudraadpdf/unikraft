@@ -34,6 +34,7 @@
  */
 
 #include <stdlib.h>
+#include <limits.h>
 #include <string.h>
 #include <sys/membarrier.h>
 #include <uk/plat/config.h>
@@ -556,22 +557,22 @@ void uk_sched_dumpk_threads(int klvl, struct uk_sched *s)
 	}
 }
 
-UK_SYSCALL_R_DEFINE(int, sched_getaffinity, int, pid, long, cpusetsize,
-						unsigned long*, mask)
+int uk_sched_get_cpu_mask(size_t size, unsigned long *mask)
 {
-	UK_WARN_STUBBED();
-	/* NOTE: Some applications use this to get the count of CPUs,
-	 *       and the result must be positive.
-	 *       So just return CPU0 to make them run.
-	 */
-	UK_ASSERT(cpusetsize > 0);
-	UK_ASSERT(mask);
-	memset(mask, 0, cpusetsize);
+	const size_t word_bits = sizeof(*mask) * CHAR_BIT;
+	size_t bytes = ALIGN_UP(uk_lcpu_count(), word_bits) / CHAR_BIT;
+	struct uk_sched *scheduler;
 
-	/* Set CPU0 */
-	*mask = 1UL << 0;
-
-	return cpusetsize;
+	if (size < bytes || size % sizeof(*mask))
+		return -EINVAL;
+	if (!mask)
+		return -EFAULT;
+	memset(mask, 0, bytes);
+	for (scheduler = uk_sched_head; scheduler; scheduler = scheduler->next)
+		if (scheduler->is_started)
+			mask[scheduler->cpu_index / word_bits] |=
+				1UL << (scheduler->cpu_index % word_bits);
+	return bytes;
 }
 
 UK_SYSCALL_R_DEFINE(int, sched_setaffinity, int, pid, long, cpusetsize,

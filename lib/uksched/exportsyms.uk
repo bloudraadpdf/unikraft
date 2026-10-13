@@ -40,6 +40,6 @@ uk_thread_wake
 uk_thread_wake_isr
 __uk_sched_thread_current
 sched_yield
-sched_getaffinity
+uk_sched_get_cpu_mask
 sched_setaffinity
 uk_sched_select

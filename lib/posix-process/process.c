@@ -14,6 +14,7 @@
 #include <errno.h>
 #include <uk/config.h>
 #include <uk/syscall.h>
+#include <uk/sched.h>
 
 struct uk_thread *pprocess_thread_main;
 
@@ -23,7 +24,6 @@ struct uk_thread *pprocess_thread_main;
 #include <uk/bitops/bitmap.h>
 #include <uk/list.h>
 #include <uk/alloc.h>
-#include <uk/sched.h>
 #include <uk/thread.h>
 #include <uk/init.h>
 #include <uk/errptr.h>
@@ -747,4 +747,25 @@ UK_SYSCALL_R_DEFINE(pid_t, getppid)
 UK_SYSCALL_R_DEFINE(pid_t, getpid)
 {
 	return uk_sys_getpid();
+}
+
+UK_SYSCALL_R_DEFINE(int, sched_getaffinity, int, pid, size_t, cpusetsize,
+		   unsigned long *, mask)
+{
+	int ret;
+
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+	uk_mutex_lock(&pprocess_mutex);
+	if (pid && !tid2pthread(pid))
+		ret = -ESRCH;
+	else
+		ret = uk_sched_get_cpu_mask(cpusetsize, mask);
+	uk_mutex_unlock(&pprocess_mutex);
+#else
+	if (pid && pid != uk_sys_gettid())
+		ret = -ESRCH;
+	else
+		ret = uk_sched_get_cpu_mask(cpusetsize, mask);
+#endif
+	return ret;
 }
