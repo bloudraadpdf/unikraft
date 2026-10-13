@@ -47,7 +47,8 @@ static unsigned long tid_map[UK_BITS_TO_LONGS(TIDMAP_SIZE)] = { [0] = 0x01UL };
 
 /* Process Table */
 struct posix_process *pid_process[TIDMAP_SIZE];
-struct uk_mutex pprocess_mutex;
+struct uk_mutex pprocess_mutex =
+	UK_MUTEX_INITIALIZER_RECURSIVE(pprocess_mutex);
 
 /**
  * Thread-local posix_thread reference
@@ -545,7 +546,6 @@ static int posix_process_init(struct uk_init_ctx *ictx)
 	int ret;
 
 	UK_ASSERT(ictx);
-	uk_mutex_init_config(&pprocess_mutex, UK_MUTEX_CONFIG_RECURSE);
 
 	/* If ictx->tmain in set, main() executes on a
 	 * separate uk_thread. Instantiate PID_INIT from
@@ -580,7 +580,9 @@ static void posix_thread_fini(struct uk_thread *thread)
 {
 	struct posix_process *pprocess;
 	struct posix_thread *pthread;
+	bool is_init;
 
+	uk_mutex_lock(&pprocess_mutex);
 	pthread = uk_thread_uktls_var(thread, pthread_self);
 
 	/* No pthread was ever assigned to this uk_thread,
@@ -590,21 +592,24 @@ static void posix_thread_fini(struct uk_thread *thread)
 	 * If the pthread exists, this is its return path.
 	 */
 	if (!pthread)
-		return;
+		goto out;
 
 	pprocess = pthread->process;
 	UK_ASSERT(pprocess);
+	is_init = pprocess->pid == UK_PID_INIT;
 
 	/* Terminate and release thread */
-	pprocess_exit_pthread(pthread_self, POSIX_THREAD_EXITED, 0);
+	pprocess_exit_pthread(pthread, POSIX_THREAD_EXITED, 0);
 
 	/* If last thread, also release the process */
 	if  (uk_list_empty(&pprocess->threads)) {
 		pprocess_exit(pprocess, POSIX_PROCESS_EXITED, 0);
 		/* UK_PID_INIT cannot be waited, release here */
-		if (pprocess->pid == UK_PID_INIT)
+		if (is_init)
 			pprocess_release(pprocess);
 	}
+out:
+	uk_mutex_unlock(&pprocess_mutex);
 }
 
 UK_THREAD_INIT_PRIO(0, posix_thread_fini, UK_PRIO_EARLIEST);

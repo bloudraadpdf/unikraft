@@ -50,12 +50,14 @@ static int pprocess_cleanup(struct posix_process *pprocess)
 {
 	struct posix_thread *pt, *ptn;
 
+	uk_mutex_lock(&pprocess_mutex);
 	/* Kill all threads of this process except current */
 	uk_pprocess_foreach_pthread(pprocess, pt, ptn) {
 		if (pt->thread == uk_thread_current())
 			continue;
 		pprocess_exit_pthread(pt, POSIX_THREAD_EXITED, 0);
 	}
+	uk_mutex_unlock(&pprocess_mutex);
 
 	return 0;
 }

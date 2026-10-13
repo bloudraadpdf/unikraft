@@ -140,6 +140,7 @@ void pprocess_exit(struct posix_process *pprocess,
 	UK_ASSERT(state == POSIX_PROCESS_EXITED ||
 		  state == POSIX_PROCESS_KILLED);
 
+	uk_mutex_lock(&pprocess_mutex);
 	UK_ASSERT(pprocess);
 	UK_ASSERT(pprocess->state == POSIX_PROCESS_RUNNING);
 
@@ -182,7 +183,6 @@ void pprocess_exit(struct posix_process *pprocess,
 	 */
 	UK_ASSERT(uk_list_empty(&pprocess->threads));
 
-	uk_mutex_lock(&pprocess_mutex);
 	parent_process = pprocess->parent;
 
 	/* Update process state & exit_status*/
