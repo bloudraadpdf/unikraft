@@ -106,6 +106,8 @@ struct uk_sched {
 	struct uk_thread_list stop_requests;
 	struct uk_thread_list thread_list;
 	struct uk_thread_list exited_threads;
+	struct uk_waitq gc_wait;
+	struct uk_thread *reaper;
 	struct uk_alloc *a;       /**< default allocator for struct uk_thread */
 	struct uk_alloc *a_stack; /**< default allocator for stacks */
 	struct uk_alloc *a_auxstack; /**< default allocator for aux stacks */

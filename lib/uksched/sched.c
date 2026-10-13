@@ -41,6 +41,7 @@
 #include <uk/alloc.h>
 #include <uk/lcpu.h>
 #include <uk/sched.h>
+#include <uk/sched_impl.h>
 #include <uk/thread_wake_impl.h>
 #include <uk/syscall.h>
 #include <uk/wait.h>
@@ -201,6 +202,27 @@ err_out:
 	return NULL;
 }
 
+static bool sched_has_garbage(struct uk_sched *sched)
+{
+	unsigned long flags;
+	bool ready;
+
+	ukplat_spin_lock_irqsave(&sched->lock, flags);
+	ready = !UK_TAILQ_EMPTY(&sched->exited_threads);
+	ukplat_spin_unlock_irqrestore(&sched->lock, flags);
+	return ready;
+}
+
+static __noreturn void sched_reap(void *arg)
+{
+	struct uk_sched *sched = arg;
+
+	for (;;) {
+		uk_waitq_wait_event(&sched->gc_wait, sched_has_garbage(sched));
+		uk_sched_thread_gc(sched);
+	}
+}
+
 int uk_sched_start(struct uk_sched *s)
 {
 	struct uk_thread *main_thread;
@@ -250,6 +272,13 @@ int uk_sched_start(struct uk_sched *s)
 	if (ret < 0)
 		goto err_unset_thread_current;
 	s->is_started = true;
+	s->reaper = uk_sched_thread_create_fn1(s, sched_reap, s,
+		0, 0, false, false, "reaper", NULL, NULL);
+	if (!s->reaper) {
+		s->is_started = false;
+		ret = -ENOMEM;
+		goto err_unset_thread_current;
+	}
 
 #if CONFIG_LIBUKSCHED_STATS
 	s->start_time = (__u64)ukplat_monotonic_clock();
@@ -258,6 +287,9 @@ int uk_sched_start(struct uk_sched *s)
 	return 0;
 
 err_unset_thread_current:
+	UK_TAILQ_REMOVE(&s->thread_list, main_thread, thread_list);
+	main_thread->sched = NULL;
+	s->current = NULL;
 	uk_pcpuvar_current_set(__uk_sched_thread_current, NULL);
 	uk_thread_release(main_thread);
 err_out:
@@ -271,6 +303,8 @@ unsigned int uk_sched_thread_gc(struct uk_sched *sched)
 	unsigned long flags;
 
 	UK_ASSERT(sched->cpu_index == uk_pcpuvar_current_get(uk_pcpuvar_cpu_idx));
+	UK_ASSERT(uk_thread_current() == sched->reaper);
+	UK_ASSERT(!uk_lcpu_irqs_disabled());
 	for (;;) {
 		ukplat_spin_lock_irqsave(&sched->lock, flags);
 		thread = UK_TAILQ_FIRST(&sched->exited_threads);
@@ -406,6 +440,8 @@ void uk_sched_thread_terminate(struct uk_thread *thread)
 		UK_TAILQ_INSERT_TAIL(&sched->exited_threads, thread,
 				     thread_list);
 		ukplat_spin_unlock_irqrestore(&sched->lock, flags);
+
+		uk_waitq_wake_up(&sched->gc_wait);
 
 		/* leave this thread */
 		sched->yield(sched); /* we won't return */

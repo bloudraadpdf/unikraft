@@ -7,6 +7,7 @@ menuconfig LIBUKVMEM
 	select LIBUKPAGING
 	select LIBUKLCPU
 	select LIBUKLOCK
+	select LIBUKLOCK_MUTEX
 	help
 		This library implements virtual address management by
 		providing methods for working with virtual address space

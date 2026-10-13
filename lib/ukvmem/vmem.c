@@ -57,6 +57,8 @@ int uk_vas_init(struct uk_vas *vas, struct uk_pagetable *pt __maybe_unused,
 
 	vas->a = a;
 	uk_spin_init(&vas->fault_lock);
+	/* File reads prepare their I/O buffers through uk_vma_advise. */
+	uk_mutex_init_config(&vas->mutation_lock, UK_MUTEX_CONFIG_RECURSE);
 
 #ifdef CONFIG_LIBUKPAGING
 	vas->pt = pt;
@@ -72,7 +74,7 @@ int uk_vas_init(struct uk_vas *vas, struct uk_pagetable *pt __maybe_unused,
 	return 0;
 }
 
-void uk_vas_destroy(struct uk_vas *vas)
+static void vmem_destroy(struct uk_vas *vas)
 {
 	struct uk_vma *vma, *next;
 
@@ -85,6 +87,13 @@ void uk_vas_destroy(struct uk_vas *vas)
 
 	if (vmem_active_vas == vas)
 		vmem_active_vas = __NULL;
+}
+
+void uk_vas_destroy(struct uk_vas *vas)
+{
+	uk_mutex_lock(&vas->mutation_lock);
+	vmem_destroy(vas);
+	uk_mutex_unlock(&vas->mutation_lock);
 }
 
 static void vmem_vma_destroy(struct uk_vma *vma)
@@ -126,7 +135,12 @@ static struct uk_vma *vmem_vma_find(struct uk_vas *vas, __vaddr_t vaddr,
 
 const struct uk_vma *uk_vma_find(struct uk_vas *vas, __vaddr_t vaddr)
 {
-	return vmem_vma_find(vas, vaddr, 0);
+	const struct uk_vma *vma;
+
+	uk_mutex_lock(&vas->mutation_lock);
+	vma = vmem_vma_find(vas, vaddr, 0);
+	uk_mutex_unlock(&vas->mutation_lock);
+	return vma;
 }
 
 static int vmem_vma_find_range(struct uk_vas *vas, __vaddr_t *vaddr, __sz *len,
@@ -505,7 +519,7 @@ static void vmem_vma_unmap_and_free_vmas(struct uk_vma *start,
 	vmem_vma_unmap_and_free(end);
 }
 
-int uk_vma_unmap(struct uk_vas *vas, __vaddr_t vaddr, __sz len,
+static int vmem_unmap(struct uk_vas *vas, __vaddr_t vaddr, __sz len,
 		 unsigned long flags)
 {
 	struct uk_vma *vma_start = __NULL, *vma_end;
@@ -531,6 +545,17 @@ int uk_vma_unmap(struct uk_vas *vas, __vaddr_t vaddr, __sz len,
 	vmem_vma_unmap_and_free_vmas(vma_start, vma_end);
 
 	return 0;
+}
+
+int uk_vma_unmap(struct uk_vas *vas, __vaddr_t vaddr, __sz len,
+		 unsigned long flags)
+{
+	int rc;
+
+	uk_mutex_lock(&vas->mutation_lock);
+	rc = vmem_unmap(vas, vaddr, len, flags);
+	uk_mutex_unlock(&vas->mutation_lock);
+	return rc;
 }
 
 static __vaddr_t vmem_first_fit(struct uk_vas *vas, __vaddr_t base, __sz align,
@@ -602,7 +627,7 @@ static int vmem_mapx_populate(struct uk_pagetable *pt __unused,
 	return 0;
 }
 
-int uk_vma_map(struct uk_vas *vas, __vaddr_t *vaddr, __sz len,
+static int vmem_map(struct uk_vas *vas, __vaddr_t *vaddr, __sz len,
 	       unsigned long attr, unsigned long flags, const char *name,
 	       const struct uk_vma_ops *ops, void *args)
 {
@@ -774,6 +799,18 @@ int uk_vma_map(struct uk_vas *vas, __vaddr_t *vaddr, __sz len,
 	return 0;
 }
 
+int uk_vma_map(struct uk_vas *vas, __vaddr_t *vaddr, __sz len,
+	       unsigned long attr, unsigned long flags, const char *name,
+	       const struct uk_vma_ops *ops, void *args)
+{
+	int rc;
+
+	uk_mutex_lock(&vas->mutation_lock);
+	rc = vmem_map(vas, vaddr, len, attr, flags, name, ops, args);
+	uk_mutex_unlock(&vas->mutation_lock);
+	return rc;
+}
+
 int uk_vma_op_set_attr(struct uk_vma *vma, unsigned long attr)
 {
 	unsigned long pgs = uk_vma_len(vma) / UK_PAGING_PAGE_SIZE;
@@ -836,7 +873,7 @@ static void vmem_vma_set_attr_vmas(struct uk_vma *start, struct uk_vma *end,
 	vmem_vma_try_merge_with_prev(end);
 }
 
-int uk_vma_set_attr(struct uk_vas *vas, __vaddr_t vaddr, __sz len,
+static int vmem_set_attr(struct uk_vas *vas, __vaddr_t vaddr, __sz len,
 		    unsigned long attr, unsigned long flags)
 {
 	struct uk_vma *vma_start = __NULL, *vma_end;
@@ -858,6 +895,17 @@ int uk_vma_set_attr(struct uk_vas *vas, __vaddr_t vaddr, __sz len,
 	vmem_vma_set_attr_vmas(vma_start, vma_end, attr);
 
 	return 0;
+}
+
+int uk_vma_set_attr(struct uk_vas *vas, __vaddr_t vaddr, __sz len,
+		    unsigned long attr, unsigned long flags)
+{
+	int rc;
+
+	uk_mutex_lock(&vas->mutation_lock);
+	rc = vmem_set_attr(vas, vaddr, len, attr, flags);
+	uk_mutex_unlock(&vas->mutation_lock);
+	return rc;
 }
 
 static int vmem_mapx_advise(struct uk_pagetable *pt,
@@ -937,7 +985,7 @@ static int vmem_vma_advise(struct uk_vma *vma, __vaddr_t vaddr, __sz len,
 	return VMA_ADVISE(vma, vaddr, len, advice);
 }
 
-int uk_vma_advise(struct uk_vas *vas, __vaddr_t vaddr, __sz len,
+static int vmem_advise(struct uk_vas *vas, __vaddr_t vaddr, __sz len,
 		  unsigned long advice, unsigned long flags)
 {
 	struct uk_vma *vma_start = __NULL, *vma_end, *vma;
@@ -969,6 +1017,17 @@ int uk_vma_advise(struct uk_vas *vas, __vaddr_t vaddr, __sz len,
 	}
 
 	return vmem_vma_advise(vma, vaddr, vend - vaddr, advice);
+}
+
+int uk_vma_advise(struct uk_vas *vas, __vaddr_t vaddr, __sz len,
+		  unsigned long advice, unsigned long flags)
+{
+	int rc;
+
+	uk_mutex_lock(&vas->mutation_lock);
+	rc = vmem_advise(vas, vaddr, len, advice, flags);
+	uk_mutex_unlock(&vas->mutation_lock);
+	return rc;
 }
 
 #ifdef CONFIG_LIBUKPAGING

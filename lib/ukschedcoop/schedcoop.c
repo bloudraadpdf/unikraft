@@ -195,28 +195,12 @@ static __noreturn void idle_thread_fn(void *argp)
 	for (;;) {
 		flags = uk_lcpu_save_irqf();
 
-		/*
-		 * FIXME: We assume that `uk_sched_thread_gc()` is non-blocking
-		 *        because we implement a cooperative scheduler. However,
-		 *        this assumption may not be true depending on the
-		 *        destructor functions that are assigned to the threads
-		 *        and are called by `uk_sched_thred_gc()`.
-		 *	  Also check if in the meantime we got a runnable
-		 *	  thread.
-		 * NOTE:  This idle thread must be non-blocking so that the
-		 *        scheduler has always something to schedule.
-		 */
 		runnable = uk_sched_process_stop_requests(&c->sched) > 0;
-		runnable |= uk_sched_thread_gc(&c->sched) > 0;
 		ukarch_spin_lock(&c->sched.lock);
 		runnable |= UK_TAILQ_FIRST(&c->run_queue) != NULL;
 		runnable |= !UK_TAILQ_EMPTY(&c->sched.stop_requests);
 		ukarch_spin_unlock(&c->sched.lock);
 		if (runnable) {
-			/* We collected successfully some garbage or there is
-			 * a runnable thread in the queue.
-			 * Check if something else can be scheduled now.
-			 */
 			uk_lcpu_restore_irqf(flags);
 
 			/* Use yield() here instead of schedule(), as the
