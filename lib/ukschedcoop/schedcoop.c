@@ -82,7 +82,11 @@ static void schedcoop_schedule(struct uk_sched *s)
 	}
 
 	next = UK_TAILQ_FIRST(&c->run_queue);
-	if (next) {
+	if (!UK_TAILQ_EMPTY(&s->stop_requests)) {
+		next = &c->idle;
+		if (prev != &c->idle && uk_thread_is_runnable(prev))
+			UK_TAILQ_INSERT_TAIL(&c->run_queue, prev, queue);
+	} else if (next) {
 		UK_ASSERT(next != prev);
 		UK_ASSERT(uk_thread_is_runnable(next));
 		UK_ASSERT(!uk_thread_is_exited(next));
@@ -202,9 +206,11 @@ static __noreturn void idle_thread_fn(void *argp)
 		 * NOTE:  This idle thread must be non-blocking so that the
 		 *        scheduler has always something to schedule.
 		 */
-		runnable = uk_sched_thread_gc(&c->sched) > 0;
+		runnable = uk_sched_process_stop_requests(&c->sched) > 0;
+		runnable |= uk_sched_thread_gc(&c->sched) > 0;
 		ukarch_spin_lock(&c->sched.lock);
 		runnable |= UK_TAILQ_FIRST(&c->run_queue) != NULL;
+		runnable |= !UK_TAILQ_EMPTY(&c->sched.stop_requests);
 		ukarch_spin_unlock(&c->sched.lock);
 		if (runnable) {
 			/* We collected successfully some garbage or there is

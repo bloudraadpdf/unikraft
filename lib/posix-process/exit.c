@@ -115,6 +115,10 @@ void pprocess_exit_pthread(struct posix_thread *pthread,
 	/* May be NULL if init terminated early */
 	parent_pthread = pthread->parent;
 
+	thread = pthread->thread;
+	if (thread != uk_thread_current() && thread->sched)
+		uk_sched_thread_stop(thread);
+
 	/* Update state */
 	pthread->state = state;
 
@@ -137,7 +141,6 @@ void pprocess_exit_pthread(struct posix_thread *pthread,
 	 * that cleans up created threads that didn't get the chance to
 	 * be added).
 	 */
-	thread = pthread->thread;
 	pprocess_release_pthread(pthread);
 	if (thread != uk_thread_current() && thread->sched)
 		uk_sched_thread_terminate(thread);

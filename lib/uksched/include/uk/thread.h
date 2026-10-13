@@ -65,6 +65,8 @@ struct uk_thread {
 	__snsec wakeup_time;
 	struct uk_sched *sched;
 	struct uk_waitq_ticket wait_ticket;
+	struct uk_waitq stop_wait;
+	bool stop_complete;
 
 	struct {
 		struct uk_alloc *t_a;
@@ -173,13 +175,13 @@ bool uk_thread_in_waitq(struct uk_thread *thread)
  *  present in the run queue.
  */
 #define UK_THREADF_QUEUEABLE  (0x020)
+#define UK_THREADF_STOPPING   (0x040)
+#define uk_thread_is_stopping(t) ((t)->flags & UK_THREADF_STOPPING)
 
 #define uk_thread_is_exited(t)   ((t)->flags & UK_THREADF_EXITED)
-#define uk_thread_is_runnable(t) (!uk_thread_is_exited(t) \
+#define uk_thread_is_runnable(t) (!((t)->flags & (UK_THREADF_EXITED | UK_THREADF_STOPPING)) \
 				  && ((t)->flags & UK_THREADF_RUNNABLE))
-#define uk_thread_is_blocked(t)  ((t)->flags &				\
-				  (UK_THREADF_EXITED | UK_THREADF_RUNNABLE) == \
-				  0x0)
+#define uk_thread_is_blocked(t)  (((t)->flags & (UK_THREADF_EXITED | UK_THREADF_RUNNABLE)) == 0)
 #define uk_thread_is_queueable(t) ((t)->flags & UK_THREADF_QUEUEABLE)
 
 #define uk_thread_set_runnable(t) \

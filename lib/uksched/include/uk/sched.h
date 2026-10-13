@@ -103,6 +103,7 @@ struct uk_sched {
 	__spinlock lock;
 	__u64 cpu_index;
 	struct uk_thread *current;
+	struct uk_thread_list stop_requests;
 	struct uk_thread_list thread_list;
 	struct uk_thread_list exited_threads;
 	struct uk_alloc *a;       /**< default allocator for struct uk_thread */
@@ -132,6 +133,9 @@ static inline void uk_sched_yield(void)
 int uk_sched_thread_add(struct uk_sched *s, struct uk_thread *t);
 
 int uk_sched_thread_remove(struct uk_thread *t);
+
+/* Caller owns the target's lifetime until this cooperative stop returns. */
+void uk_sched_thread_stop(struct uk_thread *thread);
 
 static inline void uk_sched_thread_blocked(struct uk_thread *t)
 {

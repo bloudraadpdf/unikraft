@@ -86,6 +86,7 @@ int uk_sched_register(struct uk_sched *s);
 		(s)->a_uktls = (sched_a_uktls); \
 		UK_TAILQ_INIT(&(s)->thread_list); \
 		UK_TAILQ_INIT(&(s)->exited_threads); \
+		UK_TAILQ_INIT(&(s)->stop_requests); \
 		uk_sched_stats_reset(s); \
 	} while (0)
 
@@ -97,6 +98,7 @@ int uk_sched_register(struct uk_sched *s);
  *   - (>0): Number of threads that were cleaned up
  */
 unsigned int uk_sched_thread_gc(struct uk_sched *sched);
+unsigned int uk_sched_process_stop_requests(struct uk_sched *sched);
 
 static inline
 void uk_sched_thread_switch(struct uk_thread *next)

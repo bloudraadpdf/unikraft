@@ -296,6 +296,81 @@ unsigned int uk_sched_thread_gc(struct uk_sched *sched)
 	return num;
 }
 
+static void sched_stop_complete(struct uk_thread *thread)
+{
+	struct uk_waitq_ticket *ticket;
+	unsigned long flags;
+
+	if (uk_thread_in_waitq(thread))
+		uk_waitq_cancel(thread);
+	thread->wakeup_time = 0;
+	_uk_waitq_lock(&thread->stop_wait, flags);
+	__atomic_store_n(&thread->stop_complete, true, __ATOMIC_RELEASE);
+	uk_list_for_each_entry(ticket, &thread->stop_wait.waiters, link)
+		_uk_waitq_wake(&thread->stop_wait, ticket);
+	_uk_waitq_unlock(&thread->stop_wait, flags);
+}
+
+unsigned int uk_sched_process_stop_requests(struct uk_sched *sched)
+{
+	struct uk_thread *thread;
+	unsigned long flags;
+	unsigned int count = 0;
+
+	UK_ASSERT(sched->cpu_index == uk_pcpuvar_current_get(uk_pcpuvar_cpu_idx));
+	UK_ASSERT(uk_thread_current() == sched->idle_thread(sched, 0));
+	for (;;) {
+		ukplat_spin_lock_irqsave(&sched->lock, flags);
+		thread = UK_TAILQ_FIRST(&sched->stop_requests);
+		if (thread)
+			UK_TAILQ_REMOVE(&sched->stop_requests, thread, queue);
+		ukplat_spin_unlock_irqrestore(&sched->lock, flags);
+		if (!thread)
+			return count;
+		sched_stop_complete(thread);
+		++count;
+	}
+}
+
+void uk_sched_thread_stop(struct uk_thread *thread)
+{
+	struct uk_sched *sched;
+	unsigned long flags;
+	bool local, requested = false;
+
+	UK_ASSERT(thread);
+	UK_ASSERT(thread != uk_thread_current());
+	sched = thread->sched;
+	if (!sched)
+		return;
+	UK_ASSERT(thread != sched->idle_thread(sched, 0));
+	local = !sched->is_started ||
+		sched->cpu_index == uk_pcpuvar_current_get(uk_pcpuvar_cpu_idx);
+	UK_ASSERT(!uk_lcpu_irqs_disabled());
+
+	ukplat_spin_lock_irqsave(&sched->lock, flags);
+	if (!uk_thread_is_stopping(thread)) {
+		sched->thread_remove(sched, thread);
+		thread->flags |= UK_THREADF_STOPPING;
+		uk_thread_set_blocked(thread);
+		if (!local)
+			UK_TAILQ_INSERT_TAIL(&sched->stop_requests, thread, queue);
+		requested = true;
+	}
+	ukplat_spin_unlock_irqrestore(&sched->lock, flags);
+	if (requested) {
+		if (local)
+			sched_stop_complete(thread);
+		else
+			uk_sched_wake_cpu(sched);
+	}
+	uk_waitq_wait_event(&thread->stop_wait,
+		__atomic_load_n(&thread->stop_complete, __ATOMIC_ACQUIRE));
+	/* The owner must finish its final access before the caller can free it. */
+	_uk_waitq_lock(&thread->stop_wait, flags);
+	_uk_waitq_unlock(&thread->stop_wait, flags);
+}
+
 void uk_sched_thread_terminate(struct uk_thread *thread)
 {
 	struct uk_sched *sched;
@@ -315,7 +390,7 @@ void uk_sched_thread_terminate(struct uk_thread *thread)
 	uk_pr_debug("%p: thread %p (%s) terminated\n",
 		    sched, thread, thread->name ? thread->name : "<unnamed>");
 
-	if (uk_thread_in_waitq(thread))
+	if (thread == uk_thread_current() && uk_thread_in_waitq(thread))
 		uk_waitq_cancel(thread);
 	/* remove from scheduling queue */
 	uk_sched_thread_remove(thread);
@@ -400,6 +475,8 @@ int uk_sched_thread_remove(struct uk_thread *t)
 	UK_ASSERT(t->sched);
 
 	s = t->sched;
+	if (t != uk_thread_current())
+		uk_sched_thread_stop(t);
 	ukplat_spin_lock_irqsave(&s->lock, flags);
 	s->thread_remove(s, t);
 	t->sched = NULL;

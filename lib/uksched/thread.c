@@ -243,6 +243,7 @@ static void _uk_thread_struct_init(struct uk_thread *t,
 	UK_ASSERT(!is_uktls || tlsp);
 
 	memset(t, 0x0, sizeof(*t));
+	uk_waitq_init(&t->stop_wait);
 
 	t->ectx = ectx;
 	t->tlsp = tlsp;

@@ -9,7 +9,7 @@ static inline void uk_thread_wake_locked(struct uk_thread *thread, bool isr)
 {
 	struct uk_sched *scheduler = thread->sched;
 
-	if (uk_thread_is_exited(thread))
+	if (uk_thread_is_exited(thread) || uk_thread_is_stopping(thread))
 		return;
 	if (!uk_thread_is_runnable(thread)) {
 		uk_thread_set_runnable(thread);
