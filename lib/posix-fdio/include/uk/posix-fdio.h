@@ -25,6 +25,13 @@
 void uk_fdio_statx_cpyout(struct stat *statbuf,
 			  const struct uk_statx *statxbuf);
 
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+struct uk_posix_signal_wait;
+
+int uk_fdio_poll(const struct uk_file *file, uk_pollevent events,
+		 __nsec deadline, struct uk_posix_signal_wait *wait);
+#endif
+
 /* Internal syscalls */
 /* I/O */
 

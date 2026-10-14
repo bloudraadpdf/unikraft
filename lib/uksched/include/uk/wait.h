@@ -149,7 +149,7 @@ void _uk_waitq_block_until(struct uk_thread *thread, __snsec deadline)
 })
 
 /**
- * INTERNAL. Wait exactly once using `wq` until awoken or a deadline.
+ * INTERNAL. Wait once unless `condition` is true with the queue lock held.
  *
  * Expression returns non-zero if timed out.
  *
@@ -160,36 +160,47 @@ void _uk_waitq_block_until(struct uk_thread *thread, __snsec deadline)
  * If `lock` evaluates true, it will be released before sleeping with
  * `unlock_fn` and re-acquired after wakeup with `lock_fn`.
  */
-#define _uk_waitq_wait(wq, deadline, clock_expr, lock_fn, unlock_fn, lock)\
+#define _uk_waitq_wait(wq, condition, deadline, clock_expr,\
+			     lock_fn, unlock_fn, lock)			\
 ({									\
 	struct uk_thread *_uk_waitq_current = uk_thread_current();	\
 	int _uk_waitq_timedout = 0;					\
 	unsigned long _uk_waitq_flags;					\
 									\
 	_uk_waitq_lock((wq), _uk_waitq_flags);				\
-	_uk_waitq_add((wq), _uk_waitq_current);				\
-	_uk_waitq_block_until(_uk_waitq_current, (deadline));		\
-	_uk_waitq_unlock((wq), _uk_waitq_flags);			\
-	if ((lock))							\
-		unlock_fn((lock));					\
-	uk_sched_yield();						\
-	/* Awoken */							\
-	_uk_waitq_lock((wq), _uk_waitq_flags);				\
-	_uk_waitq_remove(_uk_waitq_current);				\
-	_uk_waitq_unlock((wq), _uk_waitq_flags);			\
-	if ((lock))							\
-		lock_fn((lock));					\
+	if (condition) {						\
+		_uk_waitq_unlock((wq), _uk_waitq_flags);		\
+	} else {							\
+		_uk_waitq_add((wq), _uk_waitq_current);				\
+		_uk_waitq_block_until(_uk_waitq_current, (deadline));		\
+		_uk_waitq_unlock((wq), _uk_waitq_flags);			\
+		if ((lock))							\
+			unlock_fn((lock));					\
+		uk_sched_yield();						\
+		/* Awoken */							\
+		_uk_waitq_lock((wq), _uk_waitq_flags);				\
+		_uk_waitq_remove(_uk_waitq_current);				\
+		_uk_waitq_unlock((wq), _uk_waitq_flags);			\
+		if ((lock))							\
+			lock_fn((lock));					\
+	}								\
 	if ((deadline) && ((clock_expr) >= (deadline)))			\
 		_uk_waitq_timedout = 1;					\
 									\
 	_uk_waitq_timedout;						\
 })
 
+/* The condition must not block. */
+#define uk_waitq_wait_deadline_unless_locked(wq, condition, deadline, \
+					     lock_fn, unlock_fn, lock) \
+	_uk_waitq_wait((wq), (condition), (deadline), \
+			     ukplat_monotonic_clock(), lock_fn, unlock_fn, (lock))
+
 #define uk_waitq_wait_locked(wq, lock_fn, unlock_fn, lock) \
-	_uk_waitq_wait((wq), 0, 0, lock_fn, unlock_fn, (lock))
+	_uk_waitq_wait((wq), 0, 0, 0, lock_fn, unlock_fn, (lock))
 
 #define uk_waitq_wait_deadline_locked(wq, deadline, lock_fn, unlock_fn, lock) \
-	_uk_waitq_wait((wq), deadline, ukplat_monotonic_clock(),	\
+	_uk_waitq_wait((wq), 0, deadline, ukplat_monotonic_clock(),	\
 		       lock_fn, unlock_fn, (lock))
 
 static inline void _uk_waitq_noplock(int lock __unused) {}

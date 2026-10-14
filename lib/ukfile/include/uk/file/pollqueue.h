@@ -235,7 +235,7 @@ struct uk_pollq {
 static inline
 uk_pollevent _uk_pollq_poll_immediate(struct uk_pollq *q, uk_pollevent req)
 {
-	return UK_POLLQ_IS_POLLED(q) ? 0 : (q->events & req);
+	return UK_POLLQ_IS_POLLED(q) ? 0 : (uk_load_n(&q->events) & req);
 }
 
 /**
@@ -245,7 +245,7 @@ static inline
 uk_pollevent _uk_pollq_poll_locked(struct uk_pollq *q, uk_pollevent req,
 				   const struct uk_file *f)
 {
-	return UK_POLLQ_IS_POLLED(q) ? q->poll_fn(f, req) : (q->events & req);
+	return UK_POLLQ_IS_POLLED(q) ? q->poll_fn(f, req) : (uk_load_n(&q->events) & req);
 }
 #else /* !CONFIG_LIBUKFILE_POLLED */
 /**
@@ -255,7 +255,7 @@ uk_pollevent _uk_pollq_poll_locked(struct uk_pollq *q, uk_pollevent req,
 static inline
 uk_pollevent _uk_pollq_poll_immediate(struct uk_pollq *q, uk_pollevent req)
 {
-	return q->events & req;
+	return uk_load_n(&q->events) & req;
 }
 
 /**

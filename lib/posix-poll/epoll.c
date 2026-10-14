@@ -16,6 +16,7 @@
 #include <uk/file/nops.h>
 #include <uk/file/pollqueue.h>
 #include <uk/posix-fd.h>
+#include <uk/posix-fdio.h>
 #include <uk/posix-fdtab.h>
 #include <uk/posix-poll.h>
 #include <uk/timeutil.h>
@@ -557,33 +558,6 @@ int uk_sys_epoll_ctl(const struct uk_file *epf, int op, int fd,
 	return ret;
 }
 
-#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
-static int epoll_wait_events(const struct uk_file *file, __nsec deadline,
-			    struct uk_posix_signal_wait *wait)
-{
-	struct uk_pollq *q = &file->state->pollq;
-	int rc;
-
-	for (;;) {
-		if (uk_file_poll_immediate(file, UKFD_POLLIN))
-			return 1;
-		rc = uk_posix_signal_wait_check(wait);
-		if (rc)
-			return rc;
-		if (deadline && ukplat_monotonic_clock() >= deadline)
-			return 0;
-		uk_rwlock_rlock(&q->waitlock);
-		(void)uk_or(&q->waitmask, UKFD_POLLIN);
-		uk_waitq_set_cookie(UKFD_POLLIN);
-		uk_waitq_wait_event_deadline_locked(&q->waitq,
-			(uk_load_n(&q->events) & UKFD_POLLIN) ||
-			uk_load_n(&wait->interrupted), deadline,
-			uk_rwlock_rlock, uk_rwlock_runlock, &q->waitlock);
-		uk_rwlock_runlock(&q->waitlock);
-	}
-}
-#endif
-
 int uk_sys_epoll_pwait2(const struct uk_file *epf, struct epoll_event *events,
 			int maxevents, const struct timespec *timeout,
 			const sigset_t *sigmask, size_t sigsetsize __maybe_unused)
@@ -633,7 +607,7 @@ int uk_sys_epoll_pwait2(const struct uk_file *epf, struct epoll_event *events,
 		int nout = 0;
 
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
-		ret = epoll_wait_events(epf, deadline, &wait);
+		ret = uk_fdio_poll(epf, UKFD_POLLIN, deadline, &wait);
 #else
 		ret = !!uk_file_poll_until(epf, UKFD_POLLIN, deadline);
 #endif

@@ -9,6 +9,9 @@
 #include <poll.h>
 
 #include <uk/posix-fdio.h>
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+#include <uk/posix-signal-wait.h>
+#endif
 
 #include "fdio-impl.h"
 
@@ -52,6 +55,52 @@ ssize_t fdio_get_eof(const struct uk_file *f)
 }
 
 
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+int uk_fdio_poll(const struct uk_file *file, uk_pollevent events,
+		 __nsec deadline, struct uk_posix_signal_wait *wait)
+{
+	struct uk_pollq *q = &file->state->pollq;
+	int rc;
+
+	for (;;) {
+		if (uk_file_poll_immediate(file, events))
+			return 1;
+		rc = uk_posix_signal_wait_check(wait);
+		if (rc)
+			return rc;
+		if (deadline && ukplat_monotonic_clock() >= deadline)
+			return 0;
+		if (_uk_pollq_lock(q, events, file))
+			return 1;
+		(void)uk_or(&q->waitmask, events);
+		uk_waitq_set_cookie(events);
+		uk_waitq_wait_deadline_unless_locked(&q->waitq,
+			uk_load_n(&wait->interrupted), deadline,
+			uk_rwlock_rlock, uk_rwlock_runlock, &q->waitlock);
+		uk_rwlock_runlock(&q->waitlock);
+	}
+}
+#endif
+
+static int fdio_wait(const struct uk_file *file, uk_pollevent events)
+{
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+	struct uk_posix_signal_wait wait;
+	int rc;
+
+	rc = uk_posix_signal_wait_init(&wait, &file->state->pollq.waitq,
+				      NULL, 0);
+	if (rc)
+		return rc;
+	rc = uk_fdio_poll(file, events, 0, &wait);
+	uk_posix_signal_wait_end(&wait, rc);
+	return rc < 0 ? rc : 0;
+#else
+	uk_file_poll(file, events);
+	return 0;
+#endif
+}
+
 ssize_t uk_sys_preadv(struct uk_ofile *of, const struct iovec *iov, int iovcnt,
 		      off_t offset)
 {
@@ -82,7 +131,9 @@ ssize_t uk_sys_preadv(struct uk_ofile *of, const struct iovec *iov, int iovcnt,
 			uk_file_runlock(f);
 		if (!_SHOULD_BLOCK(r, mode))
 			break;
-		uk_file_poll(f, UKFD_POLLIN|UKFD_POLL_ALWAYS);
+		r = fdio_wait(f, UKFD_POLLIN|UKFD_POLL_ALWAYS);
+		if (r)
+			return r;
 	}
 	return r;
 }
@@ -131,7 +182,9 @@ ssize_t uk_sys_readv(struct uk_ofile *of, const struct iovec *iov, int iovcnt)
 			break;
 		if (seekable)
 			_of_unlock(of);
-		uk_file_poll(f, UKFD_POLLIN|UKFD_POLL_ALWAYS);
+		r = fdio_wait(f, UKFD_POLLIN|UKFD_POLL_ALWAYS);
+		if (r)
+			return r;
 	}
 
 	if (seekable) {
@@ -199,7 +252,9 @@ ssize_t uk_sys_preadv2(struct uk_ofile *of, const struct iovec *iov, int iovcnt,
 			break;
 		if (use_pos)
 			_of_unlock(of);
-		uk_file_poll(f, UKFD_POLLIN|UKFD_POLL_ALWAYS);
+		r = fdio_wait(f, UKFD_POLLIN|UKFD_POLL_ALWAYS);
+		if (r)
+			return r;
 	}
 
 	if (use_pos) {
@@ -242,7 +297,9 @@ ssize_t uk_sys_pwritev(struct uk_ofile *of, const struct iovec *iov, int iovcnt,
 			uk_file_wunlock(f);
 		if (!_SHOULD_BLOCK(r, mode))
 			break;
-		uk_file_poll(f, UKFD_POLLOUT|UKFD_POLL_ALWAYS);
+		r = fdio_wait(f, UKFD_POLLOUT|UKFD_POLL_ALWAYS);
+		if (r)
+			return r;
 	}
 
 	return r;
@@ -302,7 +359,9 @@ ssize_t uk_sys_writev(struct uk_ofile *of, const struct iovec *iov, int iovcnt)
 			break;
 		if (seekable)
 			_of_unlock(of);
-		uk_file_poll(f, UKFD_POLLOUT|UKFD_POLL_ALWAYS);
+		r = fdio_wait(f, UKFD_POLLOUT|UKFD_POLL_ALWAYS);
+		if (r)
+			return r;
 	}
 
 	if (seekable) {
@@ -382,7 +441,9 @@ ssize_t uk_sys_pwritev2(struct uk_ofile *of, const struct iovec *iov,
 			break;
 		if (use_pos)
 			_of_unlock(of);
-		uk_file_poll(f, UKFD_POLLOUT|UKFD_POLL_ALWAYS);
+		r = fdio_wait(f, UKFD_POLLOUT|UKFD_POLL_ALWAYS);
+		if (r)
+			return r;
 	}
 
 	if (use_pos) {
