@@ -30,10 +30,6 @@
 #define _SHOULD_BLOCK(r, m) ((r) == -EAGAIN && _IS_BLOCKING((m)))
 
 /* RWF flags not supported by our libc's yet; defining them for bincompat */
-#ifndef RWF_NOWAIT
-#define RWF_NOWAIT	0x08
-#endif /* RWF_NOWAIT */
-
 #ifndef RWF_SYNC
 #define RWF_SYNC	0x04
 #endif /* RWF_SYNC */
@@ -210,13 +206,16 @@ ssize_t uk_sys_preadv(struct uk_ofile *of, const struct iovec *iov, int iovcnt,
 	unsigned int mode = of->mode;
 
 	if (unlikely(!_CAN_READ(mode)))
-		return -EINVAL;
+		return -EBADF;
 	if (unlikely(iovcnt < 0))
 		return -EINVAL;
 	if (unlikely(!iov && iovcnt))
 		return -EFAULT;
 	if (unlikely(offset < 0))
 		return -EINVAL;
+
+	if (!_IS_SEEKABLE(mode))
+		return -ESPIPE;
 
 	r = fdio_buffer_init(&buffer, iov, iovcnt, 0);
 	if (r)
@@ -261,7 +260,7 @@ ssize_t uk_sys_readv(struct uk_ofile *of, const struct iovec *iov, int iovcnt)
 	unsigned int mode = of->mode;
 
 	if (unlikely(!_CAN_READ(mode)))
-		return -EINVAL;
+		return -EBADF;
 	if (unlikely(iovcnt < 0))
 		return -EINVAL;
 	if (unlikely(!iov && iovcnt))
@@ -327,21 +326,21 @@ ssize_t uk_sys_preadv2(struct uk_ofile *of, const struct iovec *iov, int iovcnt,
 	int use_pos;
 	int iolock;
 
-	if (unlikely(flags & RWF_NOWAIT)) {
-		uk_pr_warn_once("STUB: preadv2 flag RWF_NOWAIT not supported");
-		return -EINVAL; /* Not supported */
-	}
-
 	mode = of->mode;
 
 	if (unlikely(!_CAN_READ(mode)))
-		return -EINVAL;
+		return -EBADF;
 	if (unlikely(iovcnt < 0))
 		return -EINVAL;
 	if (unlikely(!iov && iovcnt))
 		return -EFAULT;
-	if (unlikely(offset < 0))
+	if (unlikely(offset < -1))
 		return -EINVAL;
+
+	if (flags & ~(RWF_SYNC | RWF_DSYNC | RWF_APPEND))
+		return -EOPNOTSUPP;
+	if (offset != -1 && !_IS_SEEKABLE(mode))
+		return -ESPIPE;
 
 	r = fdio_buffer_init(&buffer, iov, iovcnt, 0);
 	if (r)
@@ -400,13 +399,16 @@ ssize_t uk_sys_pwritev(struct uk_ofile *of, const struct iovec *iov, int iovcnt,
 	unsigned int mode = of->mode;
 
 	if (!_CAN_WRITE(mode))
-		return -EINVAL;
+		return -EBADF;
 	if (unlikely(iovcnt < 0))
 		return -EINVAL;
 	if (unlikely(!iov && iovcnt))
 		return -EFAULT;
 	if (unlikely(offset < 0))
 		return -EINVAL;
+
+	if (!_IS_SEEKABLE(mode))
+		return -ESPIPE;
 
 	r = fdio_buffer_init(&buffer, iov, iovcnt, 1);
 	if (r)
@@ -419,7 +421,10 @@ ssize_t uk_sys_pwritev(struct uk_ofile *of, const struct iovec *iov, int iovcnt,
 	for (;;) {
 		if (iolock)
 			uk_file_wlock(f);
-		r = uk_file_write(f, iov, (size_t)iovcnt, offset, flags);
+		off_t off = _IS_APPEND(mode) ? fdio_get_eof(f) : offset;
+
+		r = off < 0 ? off :
+			uk_file_write(f, iov, (size_t)iovcnt, off, flags);
 		if (iolock)
 			uk_file_wunlock(f);
 		if (!_SHOULD_BLOCK(r, mode))
@@ -453,7 +458,7 @@ ssize_t uk_sys_writev(struct uk_ofile *of, const struct iovec *iov, int iovcnt)
 	unsigned int mode = of->mode;
 
 	if (!_CAN_WRITE(mode))
-		return -EINVAL;
+		return -EBADF;
 	if (unlikely(iovcnt < 0))
 		return -EINVAL;
 	if (unlikely(!iov && iovcnt))
@@ -530,13 +535,18 @@ ssize_t uk_sys_pwritev2(struct uk_ofile *of, const struct iovec *iov,
 	unsigned int mode = of->mode;
 
 	if (!_CAN_WRITE(mode))
-		return -EINVAL;
+		return -EBADF;
 	if (unlikely(iovcnt < 0))
 		return -EINVAL;
 	if (unlikely(!iov && iovcnt))
 		return -EFAULT;
-	if (unlikely(offset < 0))
+	if (unlikely(offset < -1))
 		return -EINVAL;
+
+	if (flags & ~(RWF_SYNC | RWF_DSYNC | RWF_APPEND))
+		return -EOPNOTSUPP;
+	if (offset != -1 && !_IS_SEEKABLE(mode))
+		return -ESPIPE;
 
 	r = fdio_buffer_init(&buffer, iov, iovcnt, 1);
 	if (r)
@@ -562,15 +572,10 @@ ssize_t uk_sys_pwritev2(struct uk_ofile *of, const struct iovec *iov,
 			uk_file_wlock(f);
 
 		if (seekable) {
-			if (flags & RWF_APPEND)
+			if ((flags & RWF_APPEND) || _IS_APPEND(mode))
 				off = fdio_get_eof(f);
-			else
-				if (offset == -1) {
-					if (_IS_APPEND(mode))
-						off = fdio_get_eof(f);
-					else
-						off = of->pos;
-				}
+			else if (use_pos)
+				off = of->pos;
 		}
 
 		if (likely(off >= 0))

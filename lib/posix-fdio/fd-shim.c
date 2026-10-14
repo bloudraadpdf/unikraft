@@ -19,8 +19,9 @@
 
 /* I/O */
 
-UK_SYSCALL_R_DEFINE(ssize_t, preadv2, int, fd, const struct iovec *, iov,
-		    int, iovcnt, off_t, offset, int, flags)
+UK_LLSYSCALL_R_DEFINE(ssize_t, preadv2, int, fd, const struct iovec *, iov,
+		    int, iovcnt, off_t, offset,
+		    unsigned long, offset_high, int, flags)
 {
 	ssize_t r;
 	union uk_shim_file sf;
@@ -45,8 +46,16 @@ UK_SYSCALL_R_DEFINE(ssize_t, preadv2, int, fd, const struct iovec *, iov,
 	return r;
 }
 
-UK_SYSCALL_R_DEFINE(ssize_t, preadv, int, fd, const struct iovec *, iov,
-		    int, iovcnt, off_t, offset)
+#if UK_LIBC_SYSCALLS
+ssize_t preadv2(int fd, const struct iovec *iov, int iovcnt,
+		 off_t offset, int flags)
+{
+	return uk_syscall_e_preadv2(fd, (long)iov, iovcnt, offset, 0, flags);
+}
+#endif
+
+UK_LLSYSCALL_R_DEFINE(ssize_t, preadv, int, fd, const struct iovec *, iov,
+		    int, iovcnt, off_t, offset, unsigned long, offset_high)
 {
 	ssize_t r;
 	union uk_shim_file sf;
@@ -67,6 +76,14 @@ UK_SYSCALL_R_DEFINE(ssize_t, preadv, int, fd, const struct iovec *, iov,
 	}
 	return r;
 }
+
+#if UK_LIBC_SYSCALLS
+ssize_t preadv(int fd, const struct iovec *iov, int iovcnt,
+		 off_t offset)
+{
+	return uk_syscall_e_preadv(fd, (long)iov, iovcnt, offset, 0);
+}
+#endif
 
 /*
  * Some libc's define some macros that remove the 64 suffix
@@ -151,8 +168,9 @@ UK_SYSCALL_R_DEFINE(ssize_t, read, int, fd,
 	return r;
 }
 
-UK_SYSCALL_R_DEFINE(ssize_t, pwritev2, int, fd, const struct iovec*, iov,
-		    int, iovcnt, off_t, offset, int, flags)
+UK_LLSYSCALL_R_DEFINE(ssize_t, pwritev2, int, fd, const struct iovec*, iov,
+		    int, iovcnt, off_t, offset,
+		    unsigned long, offset_high, int, flags)
 {
 	ssize_t r;
 	union uk_shim_file sf;
@@ -177,8 +195,16 @@ UK_SYSCALL_R_DEFINE(ssize_t, pwritev2, int, fd, const struct iovec*, iov,
 	return r;
 }
 
-UK_SYSCALL_R_DEFINE(ssize_t, pwritev, int, fd, const struct iovec*, iov,
-		    int, iovcnt, off_t, offset)
+#if UK_LIBC_SYSCALLS
+ssize_t pwritev2(int fd, const struct iovec *iov, int iovcnt,
+		 off_t offset, int flags)
+{
+	return uk_syscall_e_pwritev2(fd, (long)iov, iovcnt, offset, 0, flags);
+}
+#endif
+
+UK_LLSYSCALL_R_DEFINE(ssize_t, pwritev, int, fd, const struct iovec*, iov,
+		    int, iovcnt, off_t, offset, unsigned long, offset_high)
 {
 	ssize_t r;
 	union uk_shim_file sf;
@@ -199,6 +225,14 @@ UK_SYSCALL_R_DEFINE(ssize_t, pwritev, int, fd, const struct iovec*, iov,
 	}
 	return r;
 }
+
+#if UK_LIBC_SYSCALLS
+ssize_t pwritev(int fd, const struct iovec *iov, int iovcnt,
+		 off_t offset)
+{
+	return uk_syscall_e_pwritev(fd, (long)iov, iovcnt, offset, 0);
+}
+#endif
 
 /* (see comment on pread64 above) */
 #ifdef pwrite64
