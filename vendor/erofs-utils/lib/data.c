@@ -11,6 +11,7 @@
 #include "liberofs_cache.h"
 #include "liberofs_fragments.h"
 
+#ifndef EROFS_READONLY
 int erofs_dev_write(struct erofs_sb_info *sbi, int device_id,
 		    const void *buf, u64 offset, size_t len)
 {
@@ -25,6 +26,8 @@ int erofs_dev_write(struct erofs_sb_info *sbi, int device_id,
 		return -EIO;
 	return 0;
 }
+
+#endif
 
 void *erofs_bread(struct erofs_buf *buf, erofs_off_t offset, bool need_kmap)
 {

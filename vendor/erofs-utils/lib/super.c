@@ -89,7 +89,7 @@ int erofs_read_superblock(struct erofs_sb_info *sbi)
 		return 0;
 
 	read = erofs_io_pread(&sbi->bdev, data, EROFS_MAX_BLOCK_SIZE, 0);
-	if (read < EROFS_SUPER_OFFSET + sizeof(*dsb)) {
+	if (read < 0 || (size_t)read < EROFS_SUPER_OFFSET + sizeof(*dsb)) {
 		ret = read < 0 ? read : -EIO;
 		erofs_err("cannot read erofs superblock: %s",
 			  erofs_strerror(ret));
@@ -170,7 +170,9 @@ int erofs_read_superblock(struct erofs_sb_info *sbi)
 	if (ret)
 		return ret;
 
+#ifndef EROFS_READONLY
 	ret = erofs_xattr_prefixes_init(sbi);
+#endif
 	if (ret && sbi->devs) {
 		free(sbi->devs);
 		sbi->devs = NULL;
@@ -185,6 +187,7 @@ int erofs_read_superblock(struct erofs_sb_info *sbi)
 	return ret;
 }
 
+#ifndef EROFS_READONLY
 void erofs_put_super(struct erofs_sb_info *sbi)
 {
 	erofs_chunkmgr_exit(sbi);
@@ -361,6 +364,8 @@ int erofs_enable_sb_chksum(struct erofs_sb_info *sbi, u32 *crc)
 	return 0;
 }
 
+#endif
+
 int erofs_superblock_csum_verify(struct erofs_sb_info *sbi)
 {
 	u32 len = erofs_blksiz(sbi), crc;
@@ -388,6 +393,7 @@ int erofs_superblock_csum_verify(struct erofs_sb_info *sbi)
 	return -EBADMSG;
 }
 
+#ifndef EROFS_READONLY
 int erofs_mkfs_init_devices(struct erofs_sb_info *sbi, unsigned int devices)
 {
 	struct erofs_buffer_head *bh;
@@ -548,3 +554,5 @@ int erofs_flush_all_devices(struct erofs_sb_info *sbi)
 	}
 	return 0;
 }
+
+#endif /* !EROFS_READONLY */

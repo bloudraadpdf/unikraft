@@ -309,3 +309,20 @@ int erofs_ilookup(const char *path, struct erofs_inode *vi)
 	vi->nid = nd.nid;
 	return erofs_read_inode_from_disk(vi);
 }
+
+int erofs_ilookupat(struct erofs_inode *directory, const char *name,
+                   unsigned int length, struct erofs_inode *inode)
+{
+    struct nameidata nd = { .sbi = directory->sbi, .nid = directory->nid };
+    int result;
+
+    if (!S_ISDIR(directory->i_mode))
+        return -ENOTDIR;
+    result = erofs_namei(&nd, name, length);
+    if (result)
+        return result;
+    memset(inode, 0, sizeof(*inode));
+    inode->sbi = directory->sbi;
+    inode->nid = nd.nid;
+    return erofs_read_inode_from_disk(inode);
+}

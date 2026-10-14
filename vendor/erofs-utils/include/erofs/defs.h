@@ -118,7 +118,9 @@ typedef int64_t         s64;
 #define BUILD_BUG_ON(condition) assert(!(condition))
 #endif
 
+#ifndef DIV_ROUND_UP
 #define DIV_ROUND_UP(n, d) (((n) + (d) - 1) / (d))
+#endif
 
 #define __round_mask(x, y)      ((__typeof__(x))((y)-1))
 #define round_up(x, y)          ((((x)-1) | __round_mask(x, y))+1)
@@ -174,7 +176,9 @@ typedef int64_t         s64;
 	typeof(y) _y = (y);	\
 	(_x > _y) - (_x < _y); })
 
+#ifndef ARRAY_SIZE
 #define ARRAY_SIZE(arr)	(sizeof(arr) / sizeof((arr)[0]))
+#endif
 
 #define BIT(nr)             (1UL << (nr))
 #define BIT_ULL(nr)         (1ULL << (nr))

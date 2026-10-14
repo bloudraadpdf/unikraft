@@ -466,6 +466,8 @@ int erofs_flush_all_devices(struct erofs_sb_info *sbi);
 /* namei.c */
 int erofs_read_inode_from_disk(struct erofs_inode *vi);
 int erofs_ilookup(const char *path, struct erofs_inode *vi);
+int erofs_ilookupat(struct erofs_inode *directory, const char *name,
+                   unsigned int length, struct erofs_inode *inode);
 
 /* data.c */
 static inline void erofs_unmap_metabuf(struct erofs_buf *buf) {}
