@@ -200,6 +200,7 @@ struct uk_vm_fault {
 
 /** VMA operations */
 struct uk_vma_ops {
+	int (*sync)(struct uk_vma *vma, __vaddr_t addr, __sz len);
 	/**
 	 * Returns the base virtual address from which to begin the search for
 	 * a large enough hole to allocate.
@@ -684,6 +685,8 @@ int uk_vma_populate_page(struct uk_vas *vas, __vaddr_t vaddr);
  */
 int uk_vma_advise(struct uk_vas *vas, __vaddr_t vaddr, __sz len,
 		  unsigned long advice, unsigned long flags);
+
+int uk_vma_sync(struct uk_vas *vas, __vaddr_t addr, __sz len);
 
 #ifdef __cplusplus
 }

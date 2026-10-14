@@ -641,12 +641,13 @@ ssize_t ramfs_live_mem(struct ramfs_node *n, enum uk_file_mem_op op,
 			return 0;
 		__fallthrough;
 	case UKFILE_MEM_ACQUIRE:
-	case UKFILE_MEM_RELEASE:
 	case UKFILE_MEM_BUFCOUNT:
 		if (unlikely(off >= n->statx.stx_size))
 			return 0;
 		if (off + len > n->statx.stx_size)
 			len = n->statx.stx_size - off;
+		break;
+	case UKFILE_MEM_RELEASE:
 		break;
 	case UKFILE_MEM_GIFT:
 		if (unlikely(ISROFS(mntflags)))

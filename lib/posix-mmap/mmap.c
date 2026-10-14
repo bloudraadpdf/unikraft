@@ -317,10 +317,17 @@ UK_SYSCALL_R_DEFINE(int, madvise, void *, addr, size_t, len, int, advice)
 
 UK_SYSCALL_R_DEFINE(int, msync, void*, addr, size_t, length, int, flags)
 {
-	/* Since writing mmap memory back to file is not supported,
-	 * this doesn't make sense.
-	 */
-	return 0;
+	if (!UK_PAGING_PAGE_ALIGNED((__vaddr_t)addr) ||
+	    (flags & ~(MS_ASYNC | MS_SYNC | MS_INVALIDATE)) ||
+	    ((flags & MS_ASYNC) && (flags & MS_SYNC)))
+		return -EINVAL;
+	if (length > __SZ_MAX - (UK_PAGING_PAGE_SIZE - 1))
+		return -ENOMEM;
+	length = UK_PAGING_PAGE_ALIGN_UP(length);
+	if ((__vaddr_t)addr > __VADDR_MAX - length)
+		return -ENOMEM;
+	int rc = uk_vma_sync(uk_vas_get_active(), (__vaddr_t)addr, length);
+	return rc == -ENOENT ? -ENOMEM : rc;
 }
 
 UK_SYSCALL_R_DEFINE(int, mlock, const void*, addr, size_t, len)

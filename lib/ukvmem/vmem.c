@@ -885,34 +885,28 @@ int uk_vma_op_set_attr(struct uk_vma *vma, unsigned long attr)
 	return uk_paging_page_set_attr(vma->vas->pt, vma->start, pgs, attr, 0);
 }
 
-static void vmem_vma_set_attr(struct uk_vma *vma, unsigned long attr)
+static int vmem_vma_set_attr(struct uk_vma *vma, unsigned long attr)
 {
 	int rc;
 
 	UK_ASSERT(vma);
 
 	if (vma->attr == attr)
-		return;
+		return 0;
 
 	/* Do not change attributes if there is no VMA handler for this */
 	if (!vma->ops->set_attr)
-		return;
+		return 0;
 
 	rc = VMA_SETATTR(vma, attr);
-	if (unlikely(rc)) {
-		/* We consider a failure to set attributes in an address range
-		 * as fatal to simplify error handling. In contrast to unmap(),
-		 * this can be changed if necessary.
-		 */
-		UK_CRASH("Failed to set attributes in address range "
-			 "0x%" __PRIvaddr "-0x%" __PRIvaddr " to 0x%lx: %d",
-			 vma->start, vma->end, attr, rc);
-	}
+	if (unlikely(rc))
+		return rc;
 
 	vma->attr = attr;
+	return 0;
 }
 
-static void vmem_vma_set_attr_vmas(struct uk_vma *start, struct uk_vma *end,
+static int vmem_vma_set_attr_vmas(struct uk_vma *start, struct uk_vma *end,
 				   unsigned long attr)
 {
 	struct uk_vma *vma = start;
@@ -921,11 +915,15 @@ static void vmem_vma_set_attr_vmas(struct uk_vma *start, struct uk_vma *end,
 	UK_ASSERT(end);
 
 	while (vma != end) {
-		vmem_vma_set_attr(vma, attr);
+		int rc = vmem_vma_set_attr(vma, attr);
+		if (rc)
+			return rc;
 		vma = uk_list_next_entry(vma, vma_list);
 	}
 
-	vmem_vma_set_attr(end, attr);
+	int rc = vmem_vma_set_attr(end, attr);
+	if (rc)
+		return rc;
 
 	/* Do a second pass and try to merge VMAs */
 	vma = vmem_vma_try_merge_with_next(end);
@@ -938,6 +936,7 @@ static void vmem_vma_set_attr_vmas(struct uk_vma *start, struct uk_vma *end,
 	}
 
 	vmem_vma_try_merge_with_prev(end);
+	return 0;
 }
 
 static int vmem_set_attr(struct uk_vas *vas, __vaddr_t vaddr, __sz len,
@@ -959,9 +958,7 @@ static int vmem_set_attr(struct uk_vas *vas, __vaddr_t vaddr, __sz len,
 		return rc;
 	}
 
-	vmem_vma_set_attr_vmas(vma_start, vma_end, attr);
-
-	return 0;
+	return vmem_vma_set_attr_vmas(vma_start, vma_end, attr);
 }
 
 int uk_vma_set_attr(struct uk_vas *vas, __vaddr_t vaddr, __sz len,
@@ -1085,6 +1082,37 @@ static int vmem_advise(struct uk_vas *vas, __vaddr_t vaddr, __sz len,
 	}
 
 	return vmem_vma_advise(vma, vaddr, vend - vaddr, advice);
+}
+
+int uk_vma_sync(struct uk_vas *vas, __vaddr_t addr, __sz len)
+{
+	struct uk_vma *first = NULL, *last, *vma;
+	unsigned long saved;
+	int rc;
+
+	if (!len)
+		return 0;
+	saved = vmem_mutation_begin(vas);
+	rc = vmem_vma_find_range(vas, &addr, &len, &first, &last, 1);
+	if (rc)
+		goto out;
+	const __vaddr_t end = addr + len;
+	for (vma = first; ; vma = uk_list_next_entry(vma, vma_list)) {
+		__vaddr_t stop = MIN(vma->end, end);
+		if (vma->ops->sync) {
+			vmem_mutation_pause(vas);
+			rc = vma->ops->sync(vma, addr, stop - addr);
+			vmem_mutation_resume(vas);
+			if (rc)
+				break;
+		}
+		if (vma == last)
+			break;
+		addr = vma->end;
+	}
+out:
+	vmem_mutation_end(vas, saved);
+	return rc;
 }
 
 int uk_vma_populate_page(struct uk_vas *vas, __vaddr_t vaddr)
