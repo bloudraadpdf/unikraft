@@ -128,7 +128,6 @@ int uk_sys_ftruncate(struct uk_ofile *of, off_t len)
 {
 	unsigned int mode;
 	const struct uk_file *f;
-	int r;
 	int iolock;
 
 	if (len < 0)
@@ -140,6 +139,10 @@ int uk_sys_ftruncate(struct uk_ofile *of, off_t len)
 
 	iolock = _SHOULD_LOCK(mode);
 	f = of->file;
+#if CONFIG_LIBPOSIX_FDIO_VMA_COPY
+	return uk_fdio_file_truncate(f, len, iolock);
+#else
+	int r;
 	if (iolock)
 		uk_file_wlock(f);
 	r = uk_file_ctl(f, UKFILE_CTL_FILE, UKFILE_CTL_FILE_TRUNC,
@@ -147,6 +150,7 @@ int uk_sys_ftruncate(struct uk_ofile *of, off_t len)
 	if (iolock)
 		uk_file_wunlock(f);
 	return r;
+#endif
 }
 
 int uk_sys_fallocate(struct uk_ofile *of, int mode, off_t offset, off_t len)

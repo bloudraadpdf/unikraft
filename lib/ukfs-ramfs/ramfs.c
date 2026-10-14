@@ -683,7 +683,7 @@ ssize_t ramfs_live_mem(struct ramfs_node *n, enum uk_file_mem_op op,
 		return ramfs_file_range_get(&n->file_data, off, len,
 					    iov, iovcnt);
 	case UKFILE_MEM_RELEASE:
-		ramfs_file_range_release(&n->file_data, off, len);
+		ramfs_file_range_release(&n->file_data, off, len, n->statx.stx_size);
 		return 0;
 	case UKFILE_MEM_GIFT:
 		r = ramfs_file_range_gift(&n->file_data,

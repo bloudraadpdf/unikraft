@@ -219,6 +219,7 @@ void sys_error_handler(struct ukarch_execenv *execenv, long arg);
 /* System error descriptor passed to handler */
 struct sys_error_desc {
 	int signum;
+	int code;
 	__uptr auxsp;
 	__vaddr_t vaddr;
 };

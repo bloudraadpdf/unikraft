@@ -185,20 +185,26 @@ ssize_t ramfs_file_range_acquire(struct ramfs_file_data *file_data,
 
 static
 void ramfs_file_range_release(struct ramfs_file_data *file_data,
-			      size_t off, size_t len)
+			      size_t off, size_t len, size_t size)
 {
 	int r;
 	const size_t pgoff = off / UK_PAGING_PAGE_SIZE;
 	const size_t pgend = DIV_ROUND_UP(off + len, UK_PAGING_PAGE_SIZE);
-	const size_t npages = pgend - pgoff;
+	const size_t split = MIN(MAX(DIV_ROUND_UP(size, UK_PAGING_PAGE_SIZE), pgoff), pgend);
 	UK_SPARSEBUF_EMBED_HEAD(fhead, file_data);
 
-	r = uk_sparsebuf_ref_release(&ramfs_sb_ctx,
-				     UK_SPARSEBUF_EMBED_HEADP(fhead, file_data),
-				     pgoff, npages, 0);
-	if (unlikely(r))
-		uk_pr_err("Cannot release file %p range 0x%zx + 0x%zx: %d\n",
-			  file_data, off, len, r);
+	if (split > pgoff) {
+		r = uk_sparsebuf_ref_release(&ramfs_sb_ctx,
+			UK_SPARSEBUF_EMBED_HEADP(fhead, file_data), pgoff, split - pgoff, 0);
+		if (r)
+			uk_pr_err("Cannot release file memory: %d\n", r);
+	}
+	if (split < pgend) {
+		r = uk_sparsebuf_ref_release(&ramfs_sb_ctx,
+			UK_SPARSEBUF_EMBED_HEADP(fhead, file_data), split, pgend - split, 1);
+		if (r)
+			uk_pr_err("Cannot release file memory past EOF: %d\n", r);
+	}
 }
 
 static

@@ -49,6 +49,7 @@ int sys_error_handler_except(int signum,
 
 	handler_desc = (struct sys_error_desc *)handler_sp;
 	handler_desc->signum = signum;
+	handler_desc->code = 0;
 	handler_desc->auxsp = auxsp;
 	handler_desc->vaddr = uk_lcpu_except_err_ctx_get_fault_addr(trap_ctx);
 

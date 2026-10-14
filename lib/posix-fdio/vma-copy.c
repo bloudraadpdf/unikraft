@@ -100,18 +100,23 @@ int file_vma_op_new(struct uk_vas *vas, __vaddr_t vaddr __unused,
 	return 0;
 }
 
-static void file_pages_release(struct file_vma *fvma)
+static void file_pages_release(struct file_vma *fvma, __u64 start)
 {
 	const struct uk_file *file = fvma->of->file;
 
 	if (!fvma->pages)
 		return;
 	uk_file_wlock(file);
-	while (fvma->pages) {
-		struct file_page *page = fvma->pages;
+	struct file_page **entry = &fvma->pages;
+	while (*entry) {
+		struct file_page *page = *entry;
+		if ((__u64)page->offset < start) {
+			entry = &page->next;
+			continue;
+		}
 		uk_file_mem(file, UKFILE_MEM_RELEASE, page->offset,
 			    UK_PAGING_PAGE_SIZE, NULL, 0);
-		fvma->pages = page->next;
+		*entry = page->next;
 		uk_free(fvma->base.vas->a, page);
 	}
 	uk_file_wunlock(file);
@@ -121,21 +126,32 @@ static int file_shared_fault(struct file_vma *fvma, struct uk_vm_fault *fault)
 {
 	const struct uk_file *file = fvma->of->file;
 	const __off off = fault->vbase - fvma->base.start + fvma->offset;
-	struct file_page *page;
+	struct file_page *page = NULL;
+	struct uk_statx stat;
 	struct iovec buffer;
 	ssize_t rc;
 
 	if (fault->len != UK_PAGING_PAGE_SIZE)
 		return -ENOMEM;
+	uk_file_wlock(file);
+	rc = uk_file_getstat(file, UK_STATX_SIZE, &stat);
+	if (rc)
+		goto fail;
+	if ((__u64)off >= stat.stx_size) {
+		rc = -ENXIO;
+		goto fail;
+	}
 	for (page = fvma->pages; page; page = page->next)
 		if (page->offset == off) {
 			fault->paddr = page->physical;
+			uk_file_wunlock(file);
 			return 0;
 		}
 	page = uk_malloc(fvma->base.vas->a, sizeof(*page));
-	if (!page)
-		return -ENOMEM;
-	uk_file_wlock(file);
+	if (!page) {
+		rc = -ENOMEM;
+		goto fail;
+	}
 	rc = uk_file_mem(file, UKFILE_MEM_ACQUIRE, off, fault->len, NULL, 0);
 	if (rc <= 0) {
 		if (!rc)
@@ -171,7 +187,7 @@ void file_vma_op_destroy(struct uk_vma *vma)
 	struct file_vma *fvma = (struct file_vma *)vma;
 
 	UK_ASSERT(fvma->of);
-	file_pages_release(fvma);
+	file_pages_release(fvma, 0);
 	uk_ofile_release(fvma->of);
 }
 
@@ -181,8 +197,16 @@ __ssz file_vma_readin(const struct uk_file *f, __vaddr_t buf, __sz len,
 {
 	__ssz read = 0;
 	__ssz r;
+	struct uk_statx stat;
 
 	uk_file_rlock(f);
+	r = uk_file_getstat(f, UK_STATX_SIZE, &stat);
+	if (r)
+		goto out;
+	if ((__u64)offset >= stat.stx_size) {
+		r = -ENXIO;
+		goto out;
+	}
 	/* Read up until done, error, or confirmed EOF */
 	do {
 		r = uk_file_read(f, &(struct iovec){ (void *)buf, len }, 1,
@@ -194,6 +218,7 @@ __ssz file_vma_readin(const struct uk_file *f, __vaddr_t buf, __sz len,
 		offset += r;
 		read += r;
 	} while (len);
+out:
 	uk_file_runlock(f);
 	/* Only return success if done reading or EOF */
 	if (!len || !r)
@@ -383,3 +408,41 @@ const struct uk_vma_ops uk_fdio_vma_ops = {
 	.advise		= file_vma_advise,
 	.sync		= file_vma_sync,
 };
+
+int uk_fdio_file_truncate(const struct uk_file *file, __off length, int iolock)
+{
+	struct uk_vas *vas = uk_vas_get_active();
+	const struct uk_vma *vma;
+	const __u64 end = UK_PAGING_PAGE_ALIGN_UP((__u64)length);
+	int rc;
+
+	uk_mutex_lock(&vas->mutation_lock);
+	if (iolock)
+		uk_file_wlock(file);
+	rc = uk_file_ctl(file, UKFILE_CTL_FILE, UKFILE_CTL_FILE_TRUNC,
+			 length, 0, 0);
+	if (iolock)
+		uk_file_wunlock(file);
+	if (rc)
+		goto out;
+	for (vma = uk_vma_first(vas); vma; vma = uk_vma_next(vma)) {
+		if (vma->ops != &uk_fdio_vma_ops)
+			continue;
+		struct file_vma *fvma = (struct file_vma *)vma;
+		const struct uk_file *mapped = fvma->of->file;
+		if (mapped != file && (!file->state || mapped->state != file->state))
+			continue;
+		__u64 first = MAX((__u64)fvma->offset, end);
+		__u64 last = fvma->offset + vma->end - vma->start;
+		if (first >= last)
+			continue;
+		rc = uk_vma_advise(vas, vma->start + first - fvma->offset,
+			last - first, UK_VMA_ADV_DONTNEED, UK_VMA_FLAG_STRICT_VMA_CHECK);
+		if (rc)
+			break;
+		file_pages_release(fvma, first);
+	}
+out:
+	uk_mutex_unlock(&vas->mutation_lock);
+	return rc;
+}

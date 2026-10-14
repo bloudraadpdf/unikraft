@@ -366,6 +366,10 @@ void sys_error_handler(struct ukarch_execenv *ee __unused, long arg)
 
 	/* Prepare siginfo */
 	set_siginfo_kill(error->signum, &sig.siginfo);
+	if (error->code) {
+		sig.siginfo.si_code = error->code;
+		sig.siginfo.si_addr = (void *)error->vaddr;
+	}
 
 	/* Execute standard delivery path */
 	do_deliver(pthread, &sig, ee, NULL);
@@ -374,5 +378,6 @@ void sys_error_handler(struct ukarch_execenv *ee __unused, long arg)
 
 err_panic:
 	/* FIXME: Cascading faulting */
-	UK_CRASH("Cannot deliver SIGSEGV for pf at 0x%lx\n", error->vaddr);
+	UK_CRASH("Cannot deliver signal %d for fault at 0x%lx\n",
+		 error->signum, error->vaddr);
 }

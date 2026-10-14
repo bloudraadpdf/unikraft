@@ -28,4 +28,8 @@
 #define _of_lock(of) uk_mutex_lock(&(of)->lock)
 #define _of_unlock(of) uk_mutex_unlock(&(of)->lock)
 
+#if CONFIG_LIBPOSIX_FDIO_VMA_COPY
+int uk_fdio_file_truncate(const struct uk_file *file, __off length, int iolock);
+#endif
+
 #endif /* __UK_POSIX_FDIO_IMPL_H__ */

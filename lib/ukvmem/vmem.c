@@ -690,6 +690,15 @@ static int vmem_mapx_populate(struct uk_pagetable *pt __unused,
 	return 0;
 }
 
+static int vmem_mapx_initial_populate(struct uk_pagetable *pt,
+		__vaddr_t vaddr, __vaddr_t pt_vaddr, unsigned int level,
+		__pte_t *pte, void *user)
+{
+	int rc = vmem_mapx_populate(pt, vaddr, pt_vaddr, level, pte, user);
+
+	return rc == -ENXIO ? UK_PAGING_PAGE_MAPX_ESKIP : rc;
+}
+
 static int vmem_map(struct uk_vas *vas, __vaddr_t *vaddr, __sz len,
 	       unsigned long attr, unsigned long flags, const char *name,
 	       const struct uk_vma_ops *ops, void *args)
@@ -844,7 +853,7 @@ static int vmem_map(struct uk_vas *vas, __vaddr_t *vaddr, __sz len,
 					 len >> UK_PAGING_PAGE_Lx_SHIFT(algn_lvl),
 					 vma->attr, flgs,
 					 &(struct uk_paging_page_mapx){
-						.map = vmem_mapx_populate,
+						.map = vmem_mapx_initial_populate,
 						.ctx = vma,
 					 });
 		if (unlikely(rc)) {
