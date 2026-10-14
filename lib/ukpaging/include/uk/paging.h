@@ -443,17 +443,18 @@ int uk_paging_pt_write_base(__paddr_t pt_paddr)
 	return uk_pal_pt_write_base(pt_paddr);
 }
 
-static inline
-void uk_paging_tlb_flush_entry(__vaddr_t vaddr)
-{
-	uk_pal_tlb_flush_entry(vaddr);
-}
+/** Invalidate translations on all online CPUs before returning. */
+void uk_paging_tlb_flush_entry(__vaddr_t vaddr);
+void uk_paging_tlb_flush(void);
 
-static inline
-void uk_paging_tlb_flush(void)
+#if CONFIG_ARCH_X86_64 && CONFIG_HAVE_SMP
+/** Service an invalidation while waiting with interrupts disabled. */
+void uk_paging_tlb_service(void);
+#else
+static inline void uk_paging_tlb_service(void)
 {
-	uk_pal_tlb_flush();
 }
+#endif
 
 /**
  * Returns the active page table of the current CPU.

@@ -13,3 +13,8 @@ uk_paging_pt_init
 uk_paging_pt_set_active
 uk_paging_pt_walk
 uk_paging_virt_to_phys
+uk_paging_tlb_flush
+uk_paging_tlb_flush_entry
+#if CONFIG_ARCH_X86_64 && CONFIG_HAVE_SMP
+uk_paging_tlb_service
+#endif

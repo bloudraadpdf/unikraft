@@ -74,13 +74,22 @@ int uk_vas_init(struct uk_vas *vas, struct uk_pagetable *pt __maybe_unused,
 	return 0;
 }
 
+static void vmem_fault_lock(struct uk_vas *vas)
+{
+	while (!uk_spin_trylock(&vas->fault_lock)) {
+		uk_paging_tlb_service();
+		uk_arch_spinwait();
+	}
+}
+
 static unsigned long vmem_mutation_begin(struct uk_vas *vas)
 {
 	unsigned long previous;
 
 	uk_mutex_lock(&vas->mutation_lock);
 	previous = vas->mutation_irq_flags;
-	uk_spin_lock_irqsave(&vas->fault_lock, vas->mutation_irq_flags);
+	vas->mutation_irq_flags = uk_pal_save_irqf();
+	vmem_fault_lock(vas);
 	return previous;
 }
 
@@ -100,7 +109,8 @@ static void vmem_mutation_pause(struct uk_vas *vas)
 
 static void vmem_mutation_resume(struct uk_vas *vas)
 {
-	uk_spin_lock_irq(&vas->fault_lock);
+	uk_pal_disable_irq();
+	vmem_fault_lock(vas);
 }
 
 static void vmem_destroy(struct uk_vas *vas)
@@ -1335,7 +1345,8 @@ int vmem_pagefault(__vaddr_t vaddr, unsigned int type,
 
 	if (unlikely(!vas))
 		return -EFAULT;
-	uk_spin_lock_irqsave(&vas->fault_lock, flags);
+	flags = uk_pal_save_irqf();
+	vmem_fault_lock(vas);
 	rc = vmem_pagefault_locked(vas, vaddr, type, regs);
 	uk_spin_unlock_irqrestore(&vas->fault_lock, flags);
 	return rc;

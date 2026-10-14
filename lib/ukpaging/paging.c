@@ -736,9 +736,8 @@ TOO_BIG:
 			pt->nr_lx_pages[lvl]++;
 #endif /* CONFIG_LIBUKPAGING_STATS */
 
-		if (UK_PAL_PT_Lx_PTE_PRESENT(orig_pte, lvl) &&
-		    pt == uk_paging_pt_get_active())
-			uk_pal_tlb_flush_entry(vaddr);
+		if (UK_PAL_PT_Lx_PTE_PRESENT(orig_pte, lvl))
+			uk_paging_tlb_flush_entry(vaddr);
 
 NEXT_PTE:
 		UK_ASSERT(len >= page_size);
@@ -1051,9 +1050,10 @@ static int pg_page_unmap(struct uk_pagetable *pt, __vaddr_t pt_vaddr,
 			if (unlikely(rc))
 				return rc;
 
-			if (vaddr != UK_PAL_VADDR_INV &&
-			    pt == uk_paging_pt_get_active())
-				uk_pal_tlb_flush_entry(vaddr);
+			if (vaddr != UK_PAL_VADDR_INV)
+				uk_paging_tlb_flush_entry(vaddr);
+			else
+				uk_paging_tlb_flush();
 
 #ifdef CONFIG_LIBUKPAGING_STATS
 			if (!(flags & UK_PAGING_PAGE_FLAG_INTERN_STATS_KEEP)) {
@@ -1163,9 +1163,10 @@ static int pg_page_unmap(struct uk_pagetable *pt, __vaddr_t pt_vaddr,
 			if (unlikely(rc))
 				return rc;
 
-			if (vaddr != UK_PAL_VADDR_INV &&
-			    pt == uk_paging_pt_get_active())
-				uk_pal_tlb_flush_entry(vaddr);
+			if (vaddr != UK_PAL_VADDR_INV)
+				uk_paging_tlb_flush_entry(vaddr);
+			else
+				uk_paging_tlb_flush();
 
 			pg_pt_free(pt, pt_vaddr_cache[plvl], plvl);
 		}
@@ -1188,8 +1189,6 @@ static int pg_page_unmap(struct uk_pagetable *pt, __vaddr_t pt_vaddr,
 
 	} while (1);
 
-	if (vaddr == UK_PAL_VADDR_INV && pt == uk_paging_pt_get_active())
-		uk_pal_tlb_flush();
 
 	return 0;
 }
@@ -1328,9 +1327,10 @@ static int pg_page_set_attr(struct uk_pagetable *pt, __vaddr_t pt_vaddr,
 			if (unlikely(rc))
 				return rc;
 
-			if (vaddr != UK_PAL_VADDR_INV &&
-			    pt == uk_paging_pt_get_active())
-				uk_pal_tlb_flush_entry(vaddr);
+			if (vaddr != UK_PAL_VADDR_INV)
+				uk_paging_tlb_flush_entry(vaddr);
+			else
+				uk_paging_tlb_flush();
 		}
 
 		/* Bail out if there is nothing more to do */
@@ -1369,8 +1369,6 @@ static int pg_page_set_attr(struct uk_pagetable *pt, __vaddr_t pt_vaddr,
 
 	} while (1);
 
-	if (vaddr == UK_PAL_VADDR_INV && pt == uk_paging_pt_get_active())
-		uk_pal_tlb_flush();
 
 	return 0;
 }
