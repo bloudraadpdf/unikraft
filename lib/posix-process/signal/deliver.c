@@ -239,11 +239,9 @@ static bool do_deliver(struct posix_thread *pthread, struct uk_signal *sig,
 out_restore_mask:
 	if (!prepared)
 		pthread->signal->mask = saved_mask;
-#if CONFIG_ARCH_ARM_64
 	if ((pthread->signal->sigqueue.pending | pproc->signal->sigqueue.pending) &
 	    ~pthread->signal->mask)
 		uk_store_n(&pthread->signal->notification, true);
-#endif
 	uk_mutex_unlock(&pprocess_mutex);
 	return prepared;
 }
@@ -311,9 +309,7 @@ void pprocess_signal_deliver(struct ukarch_execenv *execenv)
 
 	pthread = uk_pthread_current();
 	UK_ASSERT(pthread);
-#if CONFIG_ARCH_ARM_64
 	uk_store_n(&pthread->signal->notification, false);
-#endif
 
 	pproc = uk_pprocess_current();
 	UK_ASSERT(pproc);

@@ -40,9 +40,7 @@ static void signal_notify_thread(struct posix_thread *thread)
 {
 	if (thread->state == POSIX_THREAD_BLOCKED_SIGNAL)
 		pprocess_signal_wake_waiter(thread);
-#if CONFIG_ARCH_ARM_64
 	pprocess_signal_notify(thread);
-#endif
 }
 
 /* Enqueue signal for a thread or a process
@@ -562,9 +560,7 @@ int pprocess_signal_tdesc_init(struct posix_thread *thread)
 	td = thread->signal;
 
 	td->altstack = (stack_t){ .ss_flags = SS_DISABLE };
-#if CONFIG_ARCH_ARM_64
 	td->notification = false;
-#endif
 	td->wait_pending = false;
 	td->restore_mask = false;
 	td->saved_mask = 0;

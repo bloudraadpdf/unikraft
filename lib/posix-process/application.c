@@ -6,10 +6,10 @@
 #include <uk/sched.h>
 #include <uk/syscall.h>
 
-#include "../../process.h"
-#include "../../application.h"
+#include "process.h"
+#include "application.h"
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
-#include "../../signal/signal.h"
+#include "signal/signal.h"
 #endif
 
 void pprocess_exit_trampoline(void);
@@ -99,7 +99,11 @@ static int application_irq(void *data)
 		return UK_EVENT_NOT_HANDLED;
 	pthread = uk_thread_uktls_var(thread, pthread_self);
 	if (pthread && pprocess_thread_exit_requested(pthread)) {
+#if CONFIG_ARCH_ARM_64
 		uk_lcpu_regs_set(regs, X8, SYS_exit);
+#else
+		uk_lcpu_regs_set(regs, RAX, SYS_exit);
+#endif
 		uk_lcpu_regs_set(regs, PC, (__uptr)pprocess_exit_trampoline);
 	}
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL

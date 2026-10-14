@@ -207,9 +207,7 @@ struct uk_signal_tdesc {
 	struct uk_posix_signal_wait *poll_wait;
 	siginfo_t wait_info;
 	uk_sigset_t saved_mask;
-#if CONFIG_ARCH_ARM_64
 	bool notification;
-#endif
 	bool wait_pending;
 	bool restore_mask;
 };
@@ -233,9 +231,7 @@ struct pprocess_signal_handler_ctx {
 } __packed;
 
 void pprocess_signal_deliver(struct ukarch_execenv *execenv);
-#if CONFIG_ARCH_ARM_64
 void pprocess_signal_notify(struct posix_thread *thread);
-#endif
 
 /* Allocate signal descriptor of a posix process */
 int pprocess_signal_pdesc_alloc(struct posix_process *proc);

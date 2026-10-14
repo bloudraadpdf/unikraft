@@ -9,6 +9,8 @@
 #include <uk/arch/ctx.h>
 #include <uk/lcpu.h>
 
+#include "../../process.h"
+
 void clone_setup_child_ctx(struct ukarch_execenv *pexecenv,
 			   struct uk_thread *child, __uptr sp)
 {
@@ -57,10 +59,11 @@ void clone_setup_child_ctx(struct ukarch_execenv *pexecenv,
 		fsbase = child->tlsp;
 
 	uk_lcpu_sysctx_set(cexecenv->sysctx, FSBASE, fsbase);
+	child->tlsp = child->uktlsp;
 
 	ukarch_ctx_init_entry1(&child->ctx,
 			       auxsp_pos,
 			       1,
-			       (ukarch_ctx_entry1)&ukarch_execenv_load,
+			       (ukarch_ctx_entry1) pprocess_execenv_load,
 			       auxsp_pos);
 }

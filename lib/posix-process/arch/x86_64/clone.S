@@ -5,6 +5,7 @@
  */
 
 #include <uk/syscall.h>
+#include <uk/asm.h>
 
 /*
  * NOTE: We need to replicate this assembly libc wrapper in our
@@ -79,3 +80,8 @@ clone:
 	popq	%rbx
 	ret
 #endif /* UK_LIBC_SYSCALLS */
+
+ENTRY(pprocess_exit_trampoline)
+	syscall
+	ud2
+END(pprocess_exit_trampoline)

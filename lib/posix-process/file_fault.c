@@ -41,12 +41,7 @@ static void file_fault_dispatch(struct ukarch_execenv *execenv, long arg)
 			UK_CRASH("File page fault at 0x%lx failed: %d\n",
 				 fault->address, rc);
 	}
-#if CONFIG_ARCH_ARM_64
 	pprocess_execenv_load((long)execenv);
-#else
-	uk_lcpu_disable_irq();
-	ukarch_execenv_load((long)execenv);
-#endif
 }
 
 static int deferred_file_fault(void *data)

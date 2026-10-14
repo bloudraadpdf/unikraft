@@ -127,9 +127,7 @@ void pprocess_finish_exit(struct posix_process *process,
                          struct posix_thread *thread);
 int pprocess_stop_others(struct posix_process *process);
 void pprocess_enter_application(void);
-#if CONFIG_ARCH_ARM_64
 void __noreturn pprocess_execenv_load(long execenv);
-#endif
 
 static inline bool pprocess_thread_exit_requested(struct posix_thread *thread)
 {
