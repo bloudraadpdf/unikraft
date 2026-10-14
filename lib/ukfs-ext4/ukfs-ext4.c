@@ -333,11 +333,15 @@ static int inode_delete(struct ext4_inode_ref *inode)
 	ext4_inode_set_del_time(inode->inode, UINT32_MAX);
 	return ext4_fs_free_inode(inode);
 }
+static void node_acquire_locked(struct disk_node *node)
+{
+	node->references++;
+	node->volume->users++;
+}
 static void node_acquire(struct disk_node *node)
 {
 	uk_mutex_lock(&node->volume->lock);
-	node->references++;
-	node->volume->users++;
+	node_acquire_locked(node);
 	uk_mutex_unlock(&node->volume->lock);
 }
 static void node_release(struct disk_node *node)
@@ -374,8 +378,7 @@ static struct disk_node *node_get(struct disk_volume *volume, uint32_t number)
 
 	for (node = volume->nodes; node; node = node->next)
 		if (node->inode == number) {
-			node->references++;
-			volume->users++;
+			node_acquire_locked(node);
 			return node;
 		}
 	result = ext4_fs_get_inode_ref(&volume->fs, number, &inode);
@@ -820,7 +823,7 @@ static int node_lookup(struct disk_node *node, const char *path, size_t length,
 		if (PTRISERR(found))
 			result = -PTR2ERR(found);
 		else if (found->type == S_IFLNK)
-			node->references++;
+			node_acquire_locked(node);
 	}
 	uk_mutex_unlock(&volume->lock);
 	if (result)
