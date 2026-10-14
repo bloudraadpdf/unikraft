@@ -26,9 +26,9 @@ Local dependency changes follow their imports as separate source commits.
 | `vendor/lwip-source` | TCP/IP stack, including upstream adapter changes |
 | `vendor/erofs-utils` | Read EROFS application images |
 | `vendor/lz4` | Decompress EROFS data |
-| `vendor/lwext4` | Selected BSD filesystem components |
+| `vendor/ext4` | Selected BSD filesystem components |
 
-The [ext4 import notes](vendor/lwext4/README.md) identify the excluded GPL
+The [ext4 import notes](vendor/ext4/README.md) identify the excluded GPL
 implementations. Extent and extended-attribute replacements remain unfinished.
 Do not enable `CONFIG_LIBUKFS_EXT4` until these replacements are complete.
 
