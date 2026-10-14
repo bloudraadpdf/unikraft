@@ -18,6 +18,7 @@
 #include "signal.h"
 #include "siginfo.h"
 
+#if !CONFIG_ARCH_ARM_64
 UK_CTASSERT(__offsetof(struct pprocess_signal_handler_ctx, handler_fn) ==
 	    PPROCESS_SIGHNDL_CTX_FN_OFFS);
 UK_CTASSERT(__offsetof(struct pprocess_signal_handler_ctx, handler_sp) ==
@@ -34,6 +35,8 @@ UK_CTASSERT(__offsetof(struct pprocess_signal_handler_ctx, ucontext) ==
  */
 void pprocess_signal_jmp_handler(struct pprocess_signal_handler_ctx *h,
 				 struct ukarch_execenv *execenv);
+
+#endif
 
 static void uk_sigact_term(int __unused sig)
 {
@@ -83,6 +86,7 @@ bool pprocess_signal_is_deliverable(struct posix_thread *pthread, int signum)
 	return (!IS_MASKED(pthread, signum) && !IS_IGNORED(proc, signum));
 }
 
+#if !CONFIG_ARCH_ARM_64
 static void handle_self(struct uk_signal *sig, const struct kern_sigaction *ks,
 			struct ukarch_execenv *execenv, uk_sigset_t *saved_mask)
 {
@@ -162,17 +166,20 @@ static void handle_self(struct uk_signal *sig, const struct kern_sigaction *ks,
 		uk_lcpu_regs_get(execenv->regs, SP));
 }
 
+#endif
+
 /* Deliver a signal to a thread. The caller must check that the signal
  * is not masked by the handling thread or ignored by the process or its
  * default disposition.
  */
-static void do_deliver(struct posix_thread *pthread, struct uk_signal *sig,
+static bool do_deliver(struct posix_thread *pthread, struct uk_signal *sig,
 		       struct ukarch_execenv *execenv,
 		       const uk_sigset_t *restore_mask)
 {
 	struct posix_process *pproc;
 	uk_sigset_t saved_mask;
 	struct kern_sigaction action;
+	bool prepared = false;
 	int signum;
 
 	UK_ASSERT(sig && sig->siginfo.si_signo);
@@ -221,20 +228,27 @@ static void do_deliver(struct posix_thread *pthread, struct uk_signal *sig,
 		goto out_restore_mask;
 	}
 
+#if CONFIG_ARCH_ARM_64
+	pprocess_signal_arch_prepare(sig, &action, execenv, &saved_mask);
+	prepared = true;
+#else
 	handle_self(sig, &action, execenv, &saved_mask);
+#endif
 
 	uk_mutex_lock(&pprocess_mutex);
 out_restore_mask:
-	pthread->signal->mask = saved_mask;
+	if (!prepared)
+		pthread->signal->mask = saved_mask;
 #if CONFIG_ARCH_ARM_64
 	if ((pthread->signal->sigqueue.pending | pproc->signal->sigqueue.pending) &
-	    ~saved_mask)
+	    ~pthread->signal->mask)
 		uk_store_n(&pthread->signal->notification, true);
 #endif
 	uk_mutex_unlock(&pprocess_mutex);
+	return prepared;
 }
 
-static void deliver_pending(struct posix_thread *thread, bool process_queue,
+static bool deliver_pending(struct posix_thread *thread, bool process_queue,
 			    struct ukarch_execenv *execenv)
 {
 	struct posix_process *proc = thread->process;
@@ -254,12 +268,14 @@ static void deliver_pending(struct posix_thread *thread, bool process_queue,
 				break;
 			delivery.siginfo = sig->siginfo;
 			uk_signal_free(alloc, sig);
-			do_deliver(thread, &delivery, execenv, NULL);
+			if (do_deliver(thread, &delivery, execenv, NULL))
+				return true;
 		}
 	}
+	return false;
 }
 
-static void deliver_waited(struct posix_thread *thread,
+static bool deliver_waited(struct posix_thread *thread,
 			   struct ukarch_execenv *execenv)
 {
 	struct uk_signal_tdesc *td = thread->signal;
@@ -270,7 +286,7 @@ static void deliver_waited(struct posix_thread *thread,
 	uk_mutex_lock(&pprocess_mutex);
 	if (!td->wait_pending) {
 		uk_mutex_unlock(&pprocess_mutex);
-		return;
+		return false;
 	}
 	sig.siginfo = td->wait_info;
 	restore_mask = td->restore_mask;
@@ -278,7 +294,7 @@ static void deliver_waited(struct posix_thread *thread,
 	td->wait_pending = false;
 	td->restore_mask = false;
 	uk_mutex_unlock(&pprocess_mutex);
-	do_deliver(thread, &sig, execenv, restore_mask ? &saved_mask : NULL);
+	return do_deliver(thread, &sig, execenv, restore_mask ? &saved_mask : NULL);
 }
 
 void pprocess_signal_deliver(struct ukarch_execenv *execenv)
@@ -306,10 +322,12 @@ void pprocess_signal_deliver(struct ukarch_execenv *execenv)
 	UK_ASSERT(!IS_PENDING(pproc->signal->sigqueue, SIGSTOP));
 	UK_ASSERT(!IS_PENDING(pproc->signal->sigqueue, SIGCONT));
 
-	deliver_waited(pthread, execenv);
+	if (deliver_waited(pthread, execenv))
+		return;
 
 	/* Deliver all pending signals of this process & thread */
-	deliver_pending(pthread, true, execenv);
+	if (deliver_pending(pthread, true, execenv))
+		return;
 	if (pthread->state == POSIX_THREAD_RUNNING ||
 	    pthread->state == POSIX_THREAD_BLOCKED_SIGNAL)
 		deliver_pending(pthread, false, execenv);

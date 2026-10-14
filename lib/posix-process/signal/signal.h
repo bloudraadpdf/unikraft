@@ -337,6 +337,13 @@ void pprocess_signal_arch_jmp_handler(struct ukarch_execenv *execenv,
 				      ucontext_t *ctx,
 				      void *handler, void *sp);
 
+#if CONFIG_ARCH_ARM_64
+void pprocess_signal_arch_prepare(struct uk_signal *signal,
+	const struct kern_sigaction *action, struct ukarch_execenv *execenv,
+	const uk_sigset_t *saved_mask);
+void pprocess_signal_altstack_update(__uptr sp);
+#endif
+
 void pprocess_signal_restore_altstack(const stack_t *stack, __uptr sp);
 
 /* Populate POSIX u_context from ukarch_execenv */

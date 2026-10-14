@@ -44,6 +44,13 @@ static void update_stack_position(stack_t *stack, __uptr sp)
 		stack->ss_flags |= SS_ONSTACK;
 }
 
+#if CONFIG_ARCH_ARM_64
+void pprocess_signal_altstack_update(__uptr sp)
+{
+	update_stack_position(&uk_pthread_current()->signal->altstack, sp);
+}
+#endif
+
 void pprocess_signal_restore_altstack(const stack_t *stack, __uptr sp)
 {
 	stack_t *current = &uk_pthread_current()->signal->altstack;
@@ -53,12 +60,23 @@ void pprocess_signal_restore_altstack(const stack_t *stack, __uptr sp)
 	update_stack_position(current, sp);
 }
 
+#if CONFIG_ARCH_ARM_64
+UK_SYSCALL_R_E_DEFINE(int, sigaltstack, const stack_t *, ss,
+		    stack_t *, old_ss)
+#else
 UK_SYSCALL_R_DEFINE(int, sigaltstack, const stack_t *, ss,
 		    stack_t *, old_ss)
+#endif
 {
 	stack_t *current = &uk_pthread_current()->signal->altstack;
-	stack_t previous = *current;
+	stack_t previous;
 	int ret;
+
+#if CONFIG_ARCH_ARM_64
+	if (execenv)
+		update_stack_position(current, uk_lcpu_regs_get(execenv->regs, SP));
+#endif
+	previous = *current;
 
 	if (ss) {
 		ret = set_altstack(current, ss);
@@ -72,8 +90,13 @@ UK_SYSCALL_R_DEFINE(int, sigaltstack, const stack_t *, ss,
 
 #else /* !CONFIG_LIBPOSIX_PROCESS_SIGNAL */
 
+#if CONFIG_ARCH_ARM_64
+UK_SYSCALL_R_E_DEFINE(int, sigaltstack, const stack_t *, ss,
+		    stack_t *, old_ss)
+#else
 UK_SYSCALL_R_DEFINE(int, sigaltstack, const stack_t *, ss,
 		    stack_t *, old_ss)
+#endif
 {
 	UK_WARN_STUBBED();
 	return 0;

@@ -10,6 +10,8 @@
 
 #include <uk/essentials.h>
 #include <uk/syscall.h>
+#include <uk/sched.h>
+#include "../../signal/signal.h"
 #if CONFIG_LIBUKPLAT_NATIVE_ECTX
 #include <uk/plat/native/ectx.h>
 #endif
@@ -165,4 +167,92 @@ int pprocess_signal_arch_get_ucontext(ucontext_t *ucontext,
 	uk_lcpu_regs_set(execenv->regs, PC, ucontext->uc_mcontext.pc);
 	uk_lcpu_regs_set(execenv->regs, SPSR_EL1, ucontext->uc_mcontext.pstate);
 	return 0;
+}
+
+struct arm64_signal_frame {
+	siginfo_t info;
+	ucontext_t context;
+	struct {
+		__uptr fp;
+		__uptr lr;
+	} previous;
+};
+
+UK_CTASSERT(__offsetof(struct arm64_signal_frame, context) == 128);
+UK_CTASSERT(sizeof(struct arm64_signal_frame) < MINSIGSTKSZ);
+UK_CTASSERT(IS_ALIGNED(sizeof(struct arm64_signal_frame), UKARCH_SP_ALIGN));
+
+void pprocess_signal_return(void);
+
+void pprocess_signal_arch_prepare(struct uk_signal *signal,
+	const struct kern_sigaction *action, struct ukarch_execenv *execenv,
+	const uk_sigset_t *saved_mask)
+{
+	struct uk_signal_tdesc *state = uk_pthread_current()->signal;
+	__uptr sp = uk_lcpu_regs_get(execenv->regs, SP);
+	struct arm64_signal_frame *frame;
+	stack_t saved_stack;
+	bool on_altstack;
+
+	pprocess_signal_altstack_update(sp);
+	saved_stack = state->altstack;
+	on_altstack = saved_stack.ss_flags & SS_ONSTACK;
+	if ((action->ks_flags & SA_ONSTACK) &&
+	    !(saved_stack.ss_flags & (SS_DISABLE | SS_ONSTACK))) {
+		sp = (__uptr)saved_stack.ss_sp + saved_stack.ss_size;
+		on_altstack = true;
+		if ((unsigned int)saved_stack.ss_flags & SS_AUTODISARM)
+			state->altstack = (stack_t){ .ss_flags = SS_DISABLE };
+		else
+			state->altstack.ss_flags |= SS_ONSTACK;
+	}
+	if (sp < sizeof(*frame) || (on_altstack &&
+	    ALIGN_DOWN(sp - sizeof(*frame), UKARCH_SP_ALIGN) < (__uptr)saved_stack.ss_sp)) {
+		pprocess_exit(uk_pprocess_current(), POSIX_PROCESS_KILLED, SIGSEGV);
+		uk_sched_thread_exit();
+	}
+	sp = ALIGN_DOWN(sp - sizeof(*frame), UKARCH_SP_ALIGN);
+	frame = (void *)sp;
+	frame->previous.fp = uk_lcpu_regs_get(execenv->regs, X29);
+	frame->previous.lr = uk_lcpu_regs_get(execenv->regs, LR);
+	frame->info = signal->siginfo;
+	pprocess_signal_arch_set_ucontext(execenv, &frame->context);
+	memcpy(&frame->context.uc_sigmask, saved_mask, sizeof(*saved_mask));
+	frame->context.uc_stack = saved_stack;
+	if (signal->siginfo.si_code > 0 &&
+	    (signal->siginfo.si_signo == SIGBUS || signal->siginfo.si_signo == SIGSEGV))
+		frame->context.uc_mcontext.fault_address = (__uptr)signal->siginfo.si_addr;
+	uk_lcpu_regs_set(execenv->regs, PC, (__uptr)action->ks_handler);
+	uk_lcpu_regs_set(execenv->regs, SP, sp);
+	uk_lcpu_regs_set(execenv->regs, X0, signal->siginfo.si_signo);
+	uk_lcpu_regs_set(execenv->regs, X1, (__uptr)&frame->info);
+	uk_lcpu_regs_set(execenv->regs, X2, (__uptr)&frame->context);
+	uk_lcpu_regs_set(execenv->regs, X29, (__uptr)&frame->previous);
+	uk_lcpu_regs_set(execenv->regs, LR, (__uptr)(action->ks_flags & SA_RESTORER ?
+		action->ks_restorer : pprocess_signal_return));
+}
+
+UK_LLSYSCALL_R_E_DEFINE(long, rt_sigreturn)
+{
+	struct arm64_signal_frame *frame = (void *)uk_lcpu_regs_get(execenv->regs, SP);
+	struct posix_thread *thread = uk_pthread_current();
+	struct posix_process *process = thread->process;
+	uk_sigset_t mask;
+
+	if (!IS_ALIGNED((__uptr)frame, UKARCH_SP_ALIGN) ||
+	    pprocess_signal_arch_get_ucontext(&frame->context, execenv)) {
+		pprocess_exit(process, POSIX_PROCESS_KILLED, SIGSEGV);
+		uk_sched_thread_exit();
+	}
+	memcpy(&mask, &frame->context.uc_sigmask, sizeof(mask));
+	uk_sigdelset(&mask, SIGKILL);
+	uk_sigdelset(&mask, SIGSTOP);
+	uk_mutex_lock(&pprocess_mutex);
+	thread->signal->mask = mask;
+	if ((thread->signal->sigqueue.pending | process->signal->sigqueue.pending) & ~mask)
+		uk_store_n(&thread->signal->notification, true);
+	uk_mutex_unlock(&pprocess_mutex);
+	pprocess_signal_restore_altstack(&frame->context.uc_stack,
+		uk_lcpu_regs_get(execenv->regs, SP));
+	return uk_lcpu_regs_get(execenv->regs, X0);
 }

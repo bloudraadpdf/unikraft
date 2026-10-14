@@ -2,7 +2,6 @@
 #include <errno.h>
 #include <uk/arch/ctx.h>
 #include <uk/event.h>
-#include <uk/isr/string.h>
 #include <uk/lcpu.h>
 #include <uk/plat/common/sections.h>
 #include <uk/plat/config.h>
@@ -65,25 +64,6 @@ static void application_syscall_return(struct uk_syscall_exit_ctx *ctx)
 uk_syscall_exittab_prio(application_syscall_return, UK_PRIO_LATEST);
 
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
-void __noreturn pprocess_signal_handler_enter(
-	struct pprocess_signal_handler_ctx *handler,
-	struct ukarch_execenv *original, __uptr kernel_sp,
-	__uptr kernel_fp, __uptr return_pc)
-{
-	struct ukarch_execenv execenv;
-
-	memcpy_isr(&execenv, original, sizeof(execenv));
-	uk_lcpu_regs_set(execenv.regs, PC, (__uptr)handler->handler_fn);
-	uk_lcpu_regs_set(execenv.regs, SP, (__uptr)handler->handler_sp);
-	uk_lcpu_regs_set(execenv.regs, X0, handler->signo);
-	uk_lcpu_regs_set(execenv.regs, X1, (__uptr)handler->siginfo);
-	uk_lcpu_regs_set(execenv.regs, X2, (__uptr)handler->ucontext);
-	uk_lcpu_regs_set(execenv.regs, X21, kernel_sp);
-	uk_lcpu_regs_set(execenv.regs, X29, kernel_fp);
-	uk_lcpu_regs_set(execenv.regs, LR, return_pc);
-	pprocess_execenv_load((long)&execenv);
-}
-
 void pprocess_signal_notify(struct posix_thread *thread)
 {
 	uk_store_n(&thread->signal->notification, true);
