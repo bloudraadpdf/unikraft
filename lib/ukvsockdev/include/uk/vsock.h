@@ -92,6 +92,8 @@ struct uk_vsock {
 	__sz max_buf_size;
 	/** The local socket address */
 	struct uk_vsockaddr local_addr;
+	/** Preserve wildcard bind intent while the wire address uses a concrete CID. */
+	__bool bound_any;
 	/** The socket address of the peer */
 	struct uk_vsockaddr peer_addr;
 	/** Entry for the sockets tracking data structure */

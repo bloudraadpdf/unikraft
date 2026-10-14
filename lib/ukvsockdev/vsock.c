@@ -730,7 +730,7 @@ int uk_vsockets_term(void)
 			/* Bound/listening sockets are fine as long as they
 			 * don't listen on a specific CID.
 			 */
-			if (sock->local_addr.cid == VMADDR_CID_ANY) {
+			if (sock->bound_any) {
 				uk_pr_debug("sock=%p bound to CID_ANY, skipping\n",
 					    sock);
 				continue;
@@ -741,7 +741,9 @@ int uk_vsockets_term(void)
 		}
 
 		uk_pr_debug("closing sock=%p\n", sock);
-		rc = uk_vsock_close(sock, 1, __true);
+		rc = uk_vsock_close(sock,
+			sock->state == UK_VSOCK_STATE_WAIT_CONNECT ||
+			sock->state == UK_VSOCK_STATE_OPEN, __true);
 		if (unlikely(rc)) {
 			uk_pr_err("Failed to close sock %p: %d\n", sock, rc);
 			ret = rc;
@@ -945,6 +947,7 @@ static int vsock_bind(posix_sock *sock, const struct sockaddr *addr,
 	}
 
 	vsock->local_addr.cid = svm_cid;
+	vsock->bound_any = svm->svm_cid == VMADDR_CID_ANY;
 	vsock->peer_addr.cid = VMADDR_CID_ANY;
 	vsock->peer_addr.port = VMADDR_PORT_ANY;
 
