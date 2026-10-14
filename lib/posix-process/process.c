@@ -300,6 +300,10 @@ struct posix_process *pprocess_create(struct uk_alloc *a,
 	}
 #endif /* CONFIG_LIBPOSIX_PROCESS_SIGNAL */
 
+	ret = pprocess_vm_init(pprocess, parent_pprocess);
+	if (ret)
+		goto err_free_pprocess;
+
 	uk_waitq_init(&pprocess->child_wait);
 	uk_semaphore_init(&pprocess->exit_semaphore, 0);
 
@@ -368,6 +372,7 @@ struct posix_process *pprocess_create(struct uk_alloc *a,
 	return pprocess;
 
 err_free_pprocess:
+	pprocess_vm_put(pprocess->vm_context);
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 	pprocess_signal_pdesc_free(pprocess);
 #endif /* CONFIG_LIBPOSIX_PROCESS_SIGNAL */
@@ -433,6 +438,7 @@ pid_t uk_posix_process_run(uk_posix_process_mainlike_func fn,
 {
 	struct posix_process_execve_event_data execve_data;
 	struct posix_process *child_process;
+	struct posix_vm_context *vm_new = NULL;
 	struct uk_sched *s = uk_sched_current();
 	struct uk_thread *parent;
 	struct uk_thread *child;
@@ -469,6 +475,12 @@ pid_t uk_posix_process_run(uk_posix_process_mainlike_func fn,
 		goto err_free_thread;
 	}
 
+	vm_new = pprocess_vm_alloc(child_process->_a);
+	if (!vm_new) {
+		ret = -ENOMEM;
+		goto err_free_thread;
+	}
+
 	/* Raise the execve event */
 	execve_data = (struct posix_process_execve_event_data) {
 		.thread = child,
@@ -480,6 +492,9 @@ pid_t uk_posix_process_run(uk_posix_process_mainlike_func fn,
 		uk_pr_err("exeve event error (%d)\n", ret);
 		goto err_free_thread;
 	}
+
+	pprocess_vm_replace(child_process, vm_new);
+	vm_new = NULL;
 
 	/* Schedule the process */
 	uk_thread_container_init_fn2(child,
@@ -497,6 +512,7 @@ pid_t uk_posix_process_run(uk_posix_process_mainlike_func fn,
 	return pid;
 
 err_free_thread:
+	pprocess_vm_put(vm_new);
 	/* also issues exit events */
 	uk_thread_release(child);
 
@@ -528,6 +544,7 @@ void pprocess_release(struct posix_process *pprocess)
 	pprocess_signal_pdesc_free(pprocess);
 #endif /* CONFIG_LIBPOSIX_PROCESS_SIGNAL */
 
+	pprocess_vm_put(pprocess->vm_context);
 	pid = pprocess->pid;
 
 	pid_process[pid] = NULL;

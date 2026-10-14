@@ -36,7 +36,7 @@
 #include <stdlib.h>
 #include <limits.h>
 #include <string.h>
-#include <sys/membarrier.h>
+#include <uk/arch/util.h>
 #include <uk/plat/config.h>
 #include <uk/plat/time.h>
 #include <uk/alloc.h>
@@ -582,51 +582,67 @@ UK_SYSCALL_R_DEFINE(int, sched_setaffinity, int, pid, long, cpusetsize,
 	return 0;
 }
 
-#define MEMBARRIER_SUPPORTED_CMDS (\
-	MEMBARRIER_CMD_GLOBAL | \
-	MEMBARRIER_CMD_GLOBAL_EXPEDITED | \
-	MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED | \
-	MEMBARRIER_CMD_PRIVATE_EXPEDITED | \
-	MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED | \
-	MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE | \
-	MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE)
-
-UK_LLSYSCALL_R_DEFINE(int, membarrier, int, cmd, unsigned int, flags,
-		      int __unused, cpu_id)
+static void sched_membarrier_local(bool sync_core)
 {
-	/*
-	 * membarrier is intended as an optimized alternative to using SMP-safe
-	 * memory barriers in threads that might run in parallel.
-	 * In essence, it allows threads in the fast path to proceed without
-	 * barriers, while providing a safe option to trigger a barrier between
-	 * running threads on demand with the `membarrier` syscall.
-	 * Only threads actively executing on different cores are affected,
-	 * since sleeping threads are implicitly already "barriered".
-	 *
-	 * Without SMP support membarrier is a no-op, since only a single thread
-	 * -- the one calling membarrier -- can run at one time.
-	 * With SMP support, membarrier needs to force (a subset of) cores on
-	 * the system to execute memory barriers.
-	 */
-	if (unlikely(flags))
-		return -EINVAL;
-	switch (cmd) {
-	case MEMBARRIER_CMD_QUERY:
-		return MEMBARRIER_SUPPORTED_CMDS;
-	case MEMBARRIER_CMD_GLOBAL:
-	case MEMBARRIER_CMD_GLOBAL_EXPEDITED:
-	case MEMBARRIER_CMD_PRIVATE_EXPEDITED:
-	case MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE:
-		/* TODO: implement real cross-core barrier when SMP supported */
-		return 0;
-	case MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED:
-	case MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED:
-	case MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE:
-		/* Registrations not supported; no-op */
-		return 0;
-	default:
-		return -EINVAL;
+	uk_arch_mb();
+	if (!sync_core)
+		return;
+#if CONFIG_ARCH_ARM_64
+	uk_arch_arm64_isb();
+#elif CONFIG_ARCH_X86_64
+	__u32 eax, ebx, ecx, edx;
+
+	uk_arch_x86_64_cpuid(0, 0, &eax, &ebx, &ecx, &edx);
+#endif
+	uk_arch_mb();
+}
+
+#if CONFIG_HAVE_SMP
+struct sched_membarrier_call {
+	bool sync_core;
+	unsigned int completed;
+};
+
+static void sched_membarrier_remote(struct uk_lcpu_regs *regs __unused,
+				   void *arg)
+{
+	struct sched_membarrier_call *call = arg;
+
+	sched_membarrier_local(call->sync_core);
+	__atomic_store_n(&call->completed, 1, __ATOMIC_RELEASE);
+}
+#endif
+
+int uk_sched_membarrier(bool sync_core)
+{
+	uk_arch_mb();
+#if CONFIG_HAVE_SMP
+	struct sched_membarrier_call call = { .sync_core = sync_core };
+	struct uk_lcpu_func fn = {
+		.fn = sched_membarrier_remote, .user = &call
+	};
+	__u64 current = uk_pcpuvar_current_get(uk_pcpuvar_cpu_idx);
+	struct uk_sched *s;
+	unsigned int count;
+	int rc;
+
+	UK_ASSERT(!uk_lcpu_irqs_disabled());
+	for (s = uk_sched_head; s; s = s->next) {
+		__u64 target = s->cpu_index;
+
+		if (!s->is_started || target == current)
+			continue;
+		call.completed = 0;
+		count = 1;
+		rc = uk_lcpu_run(&target, &count, &fn, 0);
+		if (rc)
+			return rc;
+		while (!__atomic_load_n(&call.completed, __ATOMIC_ACQUIRE))
+			uk_arch_spinwait();
 	}
+#endif
+	sched_membarrier_local(sync_core);
+	return 0;
 }
 
 struct uk_sched *uk_sched_select(void)

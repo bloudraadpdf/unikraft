@@ -12,6 +12,7 @@
 #include <uk/process.h>
 #include <uk/syscall.h>
 #include <uk/thread.h>
+#include <uk/sched.h>
 
 #include "process.h"
 
@@ -68,9 +69,11 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 {
 	struct posix_process_execve_event_data event_data;
 	struct uk_binfmt_loader_args loader_args;
+	struct posix_vm_context *vm_new = NULL;
 	struct ukarch_execenv *execenv_new;
 	struct uk_thread *this_thread;
 	struct ukarch_ctx ctx_old;
+	struct uk_alloc *stack_allocator;
 	void *stack_old;
 	void *stack_new;
 	int rc = 0;
@@ -84,6 +87,10 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 
 	this_thread = uk_thread_current();
 	UK_ASSERT(this_thread);
+
+	stack_allocator = this_thread->_mem.stack_a;
+	if (!stack_allocator)
+		stack_allocator = uk_sched_current()->a_stack;
 
 	loader_args.argv = (const char **)argv;
 	loader_args.envp = (const char **)envp;
@@ -104,10 +111,16 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 	 * corrupting it or wasting space. Use the threads's
 	 * stack allocator for the new stack.
 	 */
-	stack_new = uk_malloc(this_thread->_mem.stack_a, STACK_SIZE);
+	stack_new = uk_malloc(stack_allocator, STACK_SIZE);
 	if (unlikely(!stack_new)) {
 		uk_pr_err("Could not allocate stack\n");
 		return -ENOMEM;
+	}
+
+	vm_new = pprocess_vm_alloc(uk_pprocess_current()->_a);
+	if (!vm_new) {
+		rc = -ENOMEM;
+		goto err_free_stack_new;
 	}
 
 	loader_args.stack_size = STACK_SIZE;
@@ -172,6 +185,8 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 	uk_pr_debug("%s: Old stack at %p - %p\n", loader_args.progname,
 		    stack_old, (void *)((uintptr_t)stack_old + STACK_SIZE));
 
+	pprocess_vm_replace(uk_pprocess_current(), vm_new);
+	this_thread->_mem.stack_a = stack_allocator;
 	this_thread->_mem.stack = stack_new;
 	this_thread->ctx = loader_args.ctx;
 
@@ -184,7 +199,8 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 	UK_BUG(); /* noreturn */
 
 err_free_stack_new:
-	uk_free(this_thread->_mem.stack_a, stack_new);
+	pprocess_vm_put(vm_new);
+	uk_free(stack_allocator, stack_new);
 
 	return rc;
 }

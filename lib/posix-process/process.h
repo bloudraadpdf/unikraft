@@ -55,6 +55,19 @@ enum posix_process_state {
 	POSIX_PROCESS_KILLED,         /* terminated by signal */
 };
 
+struct posix_vm_context {
+	struct uk_alloc *allocator;
+	unsigned int references;
+	unsigned int membarrier_registered;
+#if CONFIG_LIBPOSIX_PROCESS_BRK
+	struct {
+		struct uk_mutex mtx;
+		void *base;
+		__sz pos;
+	} brk;
+#endif
+};
+
 struct posix_process {
 	pid_t pid;
 	struct posix_process *parent;
@@ -62,6 +75,7 @@ struct posix_process {
 	struct uk_list_head child_list_entry;
 	struct uk_list_head threads;
 	struct uk_alloc *_a;
+	struct posix_vm_context *vm_context;
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 	struct uk_signal_pdesc *signal;
 #endif /* CONFIG_LIBPOSIX_PROCESS_SIGNAL */
@@ -70,13 +84,7 @@ struct posix_process {
 	enum posix_process_state state;
 	__u64 exit_signal;
 	int exit_status;
-#if CONFIG_LIBPOSIX_PROCESS_BRK
-	struct {
-		struct uk_mutex mtx;
-		void *base;
-		__sz pos;
-	} brk_ctx;
-#endif /* CONFIG_LIBPOSIX_PROCESS_BRK */
+
 
 	/* TODO: Mutex */
 };
@@ -97,6 +105,15 @@ struct posix_thread {
 };
 
 extern struct posix_process *pid_process[TIDMAP_SIZE];
+struct posix_vm_context *pprocess_vm_alloc(struct uk_alloc *allocator);
+int pprocess_vm_init(struct posix_process *process, struct posix_process *parent);
+void pprocess_vm_put(struct posix_vm_context *state);
+void pprocess_vm_replace(struct posix_process *process,
+			struct posix_vm_context *state);
+#if CONFIG_LIBPOSIX_PROCESS_BRK
+int pprocess_brk_init(struct posix_vm_context *state);
+void pprocess_brk_free(struct posix_vm_context *state);
+#endif
 extern struct uk_mutex pprocess_mutex;
 
 extern __uk_tls struct posix_thread *pthread_self;

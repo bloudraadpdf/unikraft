@@ -6,16 +6,13 @@
 
 #include <string.h>
 #include <uk/alloc.h>
-#include <uk/event.h>
 #include <uk/paging.h>
 #include <uk/print.h>
-#include <uk/prio.h>
 #include <uk/process.h>
 #include <uk/syscall.h>
 #if CONFIG_LIBUKVMEM
 #include <uk/vmem.h>
 #endif /* CONFIG_LIBUKVMEM */
-#include <uk/process/events.h>
 #include "process.h"
 
 #define HEAP_PAGES							\
@@ -24,7 +21,7 @@
 	(UK_PAGING_PAGE_SIZE * HEAP_PAGES)
 
 #if CONFIG_LIBUKVMEM
-static inline int pprocess_brk_init_zone(struct posix_process *pprocess)
+static inline int pprocess_brk_init_zone(struct posix_vm_context *state)
 {
 	__vaddr_t va = UK_PAGING_VADDR_ANY;
 	int rc;
@@ -34,126 +31,48 @@ static inline int pprocess_brk_init_zone(struct posix_process *pprocess)
 	if (unlikely(rc))
 		return rc;
 
-	pprocess->brk_ctx.base = (void *)va;
+	state->brk.base = (void *)va;
 
 	return 0;
 }
 #else /* !CONFIG_LIBUKVMEM */
-static inline int pprocess_brk_init_zone(struct posix_process *pprocess)
+static inline int pprocess_brk_init_zone(struct posix_vm_context *state)
 {
 	/* Take a big enough region from the global allocator. */
-	pprocess->brk_ctx.base = uk_palloc(pprocess->_a, HEAP_PAGES);
-	if (unlikely(!pprocess->brk_ctx.base))
+	state->brk.base = uk_palloc(state->allocator, HEAP_PAGES);
+	if (unlikely(!state->brk.base))
 		return -ENOMEM;
 
 	return 0;
 }
 #endif /* !CONFIG_LIBUKVMEM */
 
-static int pprocess_brk_init(void *arg)
+int pprocess_brk_init(struct posix_vm_context *state)
 {
-	struct posix_process_clone_event_data *event_data;
-	struct posix_process *pprocess;
 	int rc;
 
-	UK_ASSERT(arg);
-
-	event_data = (struct posix_process_clone_event_data *)arg;
-
-	/**
-	 * Handler is meant to just initialize per-process brk once, at the
-	 * beginning. If this is not a process creation-related clone call
-	 * then ignore.
-	 */
-	if (!(event_data->cl_args->flags & CLONE_VFORK))
-		return 0;
-
-	pprocess = pid2pprocess(event_data->pid);
-
-	UK_ASSERT(!pprocess->brk_ctx.base);
-
-	rc = pprocess_brk_init_zone(pprocess);
-	if (unlikely(rc)) {
-		uk_pr_err("Failed to create brk space (%lu KiB).\n",
-			  (__u64)HEAP_LEN / 1024);
+	rc = pprocess_brk_init_zone(state);
+	if (rc)
 		return rc;
-	}
-
-	pprocess->brk_ctx.pos = 0;
-
-	/* Needs to be recursive because sbrk() also needs early access. */
-	uk_mutex_init_config(&pprocess->brk_ctx.mtx,
-			     UK_MUTEX_CONFIG_RECURSE);
-
-	uk_pr_debug("New brk heap region: %p-%p\n",
-		    pprocess->brk_ctx.base,
-		    (__u8 *)pprocess->brk_ctx.base + HEAP_LEN);
-
+	uk_mutex_init_config(&state->brk.mtx, UK_MUTEX_CONFIG_RECURSE);
 	return 0;
 }
 
-POSIX_PROCESS_CLONE_HANDLER(CLONE_VFORK, pprocess_brk_init);
+void pprocess_brk_free(struct posix_vm_context *state)
+{
+	int rc;
 
 #if CONFIG_LIBUKVMEM
-static inline int pprocess_brk_free_zone(struct posix_process *pprocess)
-{
-	return uk_vma_unmap(uk_vas_get_active(),
-			    (__vaddr_t)pprocess->brk_ctx.base, HEAP_LEN, 0);
-}
-#else /* !CONFIG_LIBUKVMEM */
-static inline int pprocess_brk_free_zone(struct posix_process *pprocess)
-{
-	uk_pfree(pprocess->_a, pprocess->brk_ctx.base, HEAP_PAGES);
-	return 0;
-}
-#endif /* !CONFIG_LIBUKVMEM */
-
-static int pprocess_brk_free(void *arg)
-{
-	struct posix_process_ppexit_event_data *event_data;
-	struct posix_process *pprocess;
-	int rc;
-
-	UK_ASSERT(arg);
-
-	event_data = (struct posix_process_ppexit_event_data *)arg;
-	pprocess = pid2pprocess(event_data->pid);
-
-	UK_ASSERT(pprocess->brk_ctx.base);
-
-	/**
-	 * The process is exiting and if there is any thread currently holding
-	 * the brk mutex, we don't really care if we are releasing the brk area,
-	 * but in the ukvmem DONTNEED case there might be some issues.
-	 * Technically, in the ukvmem case, the unmapping might become
-	 * blocking in the future in combination with that other thread
-	 * attempting a DONTNEED, causing this thread to also block on it.
-	 * However, when the other thread wakes up to finish its DONTNEED,
-	 * its POSIX resources would have supposedly already died, as this
-	 * handler can only run after POSIX thread resources have been released,
-	 * possibly resulting in an invalid state.
-	 * At this point in time, ukvmem is not synchronized yet though, so
-	 * it's something for later.
-	 *
-	 * TODO: Reconsider synchronization approach when ukvmem API might lead
-	 * to thread yielding.
-	 */
-	uk_pr_debug("Freeing brk heap region: %p-%p\n",
-		    pprocess->brk_ctx.base,
-		    (__u8 *)pprocess->brk_ctx.base + HEAP_LEN);
-
-	rc = pprocess_brk_free_zone(pprocess);
-	if (unlikely(rc))
+	rc = uk_vma_unmap(uk_vas_get_active(), (__vaddr_t)state->brk.base,
+			  HEAP_LEN, 0);
+#else
+	uk_pfree(state->allocator, state->brk.base, HEAP_PAGES);
+	rc = 0;
+#endif
+	if (rc)
 		UK_CRASH("Failed to free brk space (%lu KiB).\n",
 			 (__u64)HEAP_LEN / 1024);
-
-	pprocess->brk_ctx.pos = 0;
-	pprocess->brk_ctx.base = __NULL;
-
-	return 0;
 }
-
-POSIX_PROCESS_PPEXIT_HANDLER(pprocess_brk_free);
 
 #if CONFIG_LIBPOSIX_PROCESS_BRK_INC_MEMZERO
 #if CONFIG_LIBUKVMEM && CONFIG_LIBPOSIX_PROCESS_BRK_DEC_DONTNEED
@@ -270,14 +189,14 @@ UK_LLSYSCALL_R_DEFINE(void *, brk, void *, addr)
 	pprocess = uk_pprocess_current();
 	UK_ASSERT(pprocess);
 
-	uk_mutex_lock(&pprocess->brk_ctx.mtx);
+	uk_mutex_lock(&pprocess->vm_context->brk.mtx);
 
-	base = (__uptr)pprocess->brk_ctx.base;
-	cur_brk = base + pprocess->brk_ctx.pos;
+	base = (__uptr)pprocess->vm_context->brk.base;
+	cur_brk = base + pprocess->vm_context->brk.pos;
 	addr_arg = (__uptr)addr;
 
 	if (addr_arg == cur_brk) {
-		uk_mutex_unlock(&pprocess->brk_ctx.mtx);
+		uk_mutex_unlock(&pprocess->vm_context->brk.mtx);
 		return addr;
 	}
 
@@ -285,14 +204,14 @@ UK_LLSYSCALL_R_DEFINE(void *, brk, void *, addr)
 		uk_pr_debug("0x%lx outside PID %d's brk range 0x%lx-0x%lx, keep brk @ 0x%lx\n",
 			    addr_arg, pprocess->pid,
 			    base, base + HEAP_LEN, cur_brk);
-		uk_mutex_unlock(&pprocess->brk_ctx.mtx);
+		uk_mutex_unlock(&pprocess->vm_context->brk.mtx);
 		return (void *)cur_brk;
 	}
 
 #if CONFIG_LIBPOSIX_PROCESS_BRK_INC_MEMZERO
 	rc = memzero_brk_inrange(cur_brk, addr_arg);
 	if (unlikely(rc)) {
-		uk_mutex_unlock(&pprocess->brk_ctx.mtx);
+		uk_mutex_unlock(&pprocess->vm_context->brk.mtx);
 		return (void *)cur_brk;
 	}
 #endif /* CONFIG_LIBPOSIX_PROCESS_BRK_INC_MEMZERO */
@@ -300,9 +219,9 @@ UK_LLSYSCALL_R_DEFINE(void *, brk, void *, addr)
 	uk_pr_debug("PID %d brk @ 0x%lx (brk heap region: 0x%lx-0x%lx)\n",
 		    pprocess->pid, addr_arg, base, base + HEAP_LEN);
 
-	pprocess->brk_ctx.pos = addr_arg - base;
+	pprocess->vm_context->brk.pos = addr_arg - base;
 
-	uk_mutex_unlock(&pprocess->brk_ctx.mtx);
+	uk_mutex_unlock(&pprocess->vm_context->brk.mtx);
 
 	return addr;
 }
@@ -336,14 +255,14 @@ void *sbrk(intptr_t inc)
 	pprocess = uk_pprocess_current();
 	UK_ASSERT(pprocess);
 
-	uk_mutex_lock(&pprocess->brk_ctx.mtx);
+	uk_mutex_lock(&pprocess->vm_context->brk.mtx);
 
 	/* We are increasing or reducing our range */
-	prev_brk = (__uptr)pprocess->brk_ctx.base + pprocess->brk_ctx.pos;
+	prev_brk = (__uptr)pprocess->vm_context->brk.base + pprocess->vm_context->brk.pos;
 
 	/* Check for 0 and overflow/underflow */
 	if (!inc) {
-		uk_mutex_unlock(&pprocess->brk_ctx.mtx);
+		uk_mutex_unlock(&pprocess->vm_context->brk.mtx);
 		return (void *)prev_brk;
 	} else if (inc > 0) {
 		if (unlikely(prev_brk + (__uptr)inc < prev_brk))
@@ -358,11 +277,11 @@ void *sbrk(intptr_t inc)
 	if (unlikely((__uptr)new_brk < req_brk))
 		goto err;
 
-	uk_mutex_unlock(&pprocess->brk_ctx.mtx);
+	uk_mutex_unlock(&pprocess->vm_context->brk.mtx);
 	return (void *)prev_brk;
 
 err:
-	uk_mutex_unlock(&pprocess->brk_ctx.mtx);
+	uk_mutex_unlock(&pprocess->vm_context->brk.mtx);
 	errno = ENOMEM;
 	return (void *)-1;
 }

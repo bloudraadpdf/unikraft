@@ -53,6 +53,7 @@ struct uk_sched;
 
 struct uk_sched *uk_sched_select(void);
 int uk_sched_get_cpu_mask(size_t size, unsigned long *mask);
+int uk_sched_membarrier(bool sync_core);
 
 static inline struct uk_sched *uk_sched_current(void)
 {
