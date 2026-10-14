@@ -220,6 +220,9 @@ void ukarch_ctx_init_ehtrampo(struct ukarch_ctx *ctx,
 	uk_lcpu_ectx_store((struct uk_lcpu_ectx *)ee->ectx);
 
 	uk_lcpu_sysctx_store((struct uk_lcpu_sysctx *)ee->sysctx);
+#ifdef UK_LCPU_X86_64_REGS_OFFSETOF_GSBASE
+	uk_lcpu_sysctx_set(ee->sysctx, GSBASE, uk_lcpu_regs_get(r, GSBASE));
+#endif
 
 	memcpy_isr(ee->regs, r, UK_LCPU_REGS_SIZE);
 

@@ -266,6 +266,25 @@ static struct uk_event *trap_event_table[] = {
 		UK_EVENT_PTR(UK_PLAT_NATIVE_EXCEPT_EVENT_ERR_SECURITY),
 };
 
+static void except_gs_load(__u64 gsbase)
+{
+	__barrier();
+	uk_arch_x86_64_wrmsrl(UK_ARCH_X86_64_MSR_GS_BASE, gsbase);
+	__barrier();
+}
+
+static void except_enter(struct uk_plat_native_regs *regs)
+{
+	struct uk_arch_x86_64_desc_table_ptr64 idtptr;
+	__uptr idx;
+
+	regs->gsbase = uk_arch_x86_64_rdmsrl(UK_ARCH_X86_64_MSR_GS_BASE);
+	/* Per-CPU IDTs remain stable across GS changes and SWAPGS. */
+	asm volatile ("sidt %0" : "=m" (idtptr) : : "memory");
+	idx = (idtptr.base - (__uptr)cpu_idt) / sizeof(cpu_idt[0]);
+	except_gs_load(idx * (__uptr)_uk_pcpuvar_tmpl_size_ptr);
+}
+
 void uk_plat_native_except_err_handler(int trapnr,
 				       struct uk_plat_native_regs *regs,
 				       __u64 error_code)
@@ -273,6 +292,7 @@ void uk_plat_native_except_err_handler(int trapnr,
 	struct uk_plat_native_except_err_ctx ctx;
 	int rc;
 
+	except_enter(regs);
 	ctx = (struct uk_plat_native_except_err_ctx){
 		.regs = regs,
 		.trapnr = trapnr,
@@ -285,8 +305,10 @@ void uk_plat_native_except_err_handler(int trapnr,
 	rc = uk_raise_event_ptr(trap_event_table[trapnr], &ctx);
 	if (unlikely(rc < 0))
 		uk_pr_crit("event handler returned error: %d\n", rc);
-	else if (rc != UK_EVENT_NOT_HANDLED)
+	else if (rc != UK_EVENT_NOT_HANDLED) {
+		except_gs_load(regs->gsbase);
 		return;
+	}
 
 	if (trap_event_table[trapnr] ==
 		UK_EVENT_PTR(UK_PLAT_NATIVE_EXCEPT_EVENT_UNHANDLED))
@@ -312,15 +334,19 @@ void uk_plat_native_except_irq_handler(struct uk_plat_native_regs *regs,
 				       __u32 irq)
 {
 	struct uk_plat_native_except_irq_ctx ctx;
+	int rc;
 #if CONFIG_LIBUKPLAT_NATIVE_ECTX_ISR_ASSERTIONS
 	__sz ectx_align = UK_PLAT_NATIVE_ECTX_ALIGN;
 	__u8 ectxbuf[UK_PLAT_NATIVE_ECTX_SIZE + ectx_align];
 	struct uk_plat_native_ectx *ectx = (struct uk_plat_native_ectx *)
 					ALIGN_UP((__uptr)ectxbuf, ectx_align);
 
-	uk_plat_native_ectx_init(ectx);
 #endif /* CONFIG_LIBUKPLAT_NATIVE_ECTX_ISR_ASSERTIONS */
-	int rc;
+
+	except_enter(regs);
+#if CONFIG_LIBUKPLAT_NATIVE_ECTX_ISR_ASSERTIONS
+	uk_plat_native_ectx_init(ectx);
+#endif
 
 	ctx.regs = regs;
 	ctx.irq = irq;
@@ -331,6 +357,7 @@ void uk_plat_native_except_irq_handler(struct uk_plat_native_regs *regs,
 #if CONFIG_LIBUKPLAT_NATIVE_ECTX_ISR_ASSERTIONS
 	uk_plat_native_ectx_assert_equal(ectx);
 #endif /* CONFIG_LIBUKPLAT_NATIVE_ECTX_ISR_ASSERTIONS */
+	except_gs_load(regs->gsbase);
 }
 
 static inline void idt_fillgate(unsigned int num, void *fun, unsigned int ist,

@@ -8,6 +8,8 @@
 #error "Do not include this header directly"
 #endif
 
+#define UK_PAL_X86_64_REGS_OFFSETOF_GSBASE				\
+	UK_PLAT_NATIVE_X86_64_REGS_OFFSETOF_GSBASE
 #define UK_PAL_X86_64_REGS_OFFSETOF_R15					\
 	UK_PLAT_NATIVE_X86_64_REGS_OFFSETOF_R15
 #define UK_PAL_X86_64_REGS_OFFSETOF_R14					\

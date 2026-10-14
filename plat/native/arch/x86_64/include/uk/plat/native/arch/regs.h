@@ -18,8 +18,7 @@
  * including C headers.
  */
 
-/* Padding to ensure 16-byte alignment */
-#define UK_PLAT_NATIVE_X86_64_REGS_PAD_SIZE		8
+#define UK_PLAT_NATIVE_X86_64_REGS_OFFSETOF_GSBASE		0
 
 /* General-purpose registers */
 #define UK_PLAT_NATIVE_X86_64_REGS_OFFSETOF_R15		8
@@ -93,8 +92,7 @@ extern "C" {
  *   1. Software-saved registers (R15-RDI, ORIG_RAX)
  *   2. Hardware-saved exception frame (RIP, CS, RFLAGS, RSP, SS)
  *
- * The 8-byte padding ensures the structure size is a multiple of 16,
- * required for proper stack alignment.
+ * Native exception entry saves the interrupted GS base in the first slot.
  *
  * Register grouping:
  *   - Callee-saved: RBP, RBX, R12-R15
@@ -102,7 +100,7 @@ extern "C" {
  *   - Special: ORIG_RAX (syscall number, 0 or error), RIP, CS, RFLAGS, RSP, SS
  */
 struct uk_plat_native_regs {
-	__u64 pad;
+	__u64 gsbase;
 	__u64 r15;
 	__u64 r14;
 	__u64 r13;
@@ -130,6 +128,8 @@ struct uk_plat_native_regs {
 
 /* Compile-time verification of register offsets */
 UK_CTASSERT(sizeof(struct uk_plat_native_regs) == UK_PLAT_NATIVE_REGS_SIZE);
+UK_CTASSERT(__offsetof(struct uk_plat_native_regs, gsbase) ==
+	    UK_PLAT_NATIVE_X86_64_REGS_OFFSETOF_GSBASE);
 UK_CTASSERT(__offsetof(struct uk_plat_native_regs, r15) ==
 	    UK_PLAT_NATIVE_X86_64_REGS_OFFSETOF_R15);
 UK_CTASSERT(__offsetof(struct uk_plat_native_regs, r14) ==

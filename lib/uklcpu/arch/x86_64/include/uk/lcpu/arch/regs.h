@@ -8,6 +8,10 @@
 #error "Do not include this header directly"
 #endif
 
+#ifdef UK_PAL_X86_64_REGS_OFFSETOF_GSBASE
+#define UK_LCPU_X86_64_REGS_OFFSETOF_GSBASE				\
+	UK_PAL_X86_64_REGS_OFFSETOF_GSBASE
+#endif
 #define UK_LCPU_X86_64_REGS_OFFSETOF_R15				\
 	UK_PAL_X86_64_REGS_OFFSETOF_R15
 #define UK_LCPU_X86_64_REGS_OFFSETOF_R14				\
