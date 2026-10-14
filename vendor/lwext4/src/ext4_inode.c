@@ -87,12 +87,14 @@ void ext4_inode_set_mode(struct ext4_sblock *sb, struct ext4_inode *inode,
 
 uint32_t ext4_inode_get_uid(struct ext4_inode *inode)
 {
-	return to_le32(inode->uid);
+	return to_le16(inode->uid) |
+	       ((uint32_t)to_le16(inode->osd2.linux2.uid_high) << 16);
 }
 
 void ext4_inode_set_uid(struct ext4_inode *inode, uint32_t uid)
 {
-	inode->uid = to_le32(uid);
+	inode->uid = to_le16(uid);
+	inode->osd2.linux2.uid_high = to_le16(uid >> 16);
 }
 
 uint64_t ext4_inode_get_size(struct ext4_sblock *sb, struct ext4_inode *inode)
@@ -175,11 +177,13 @@ void ext4_inode_set_del_time(struct ext4_inode *inode, uint32_t time)
 
 uint32_t ext4_inode_get_gid(struct ext4_inode *inode)
 {
-	return to_le32(inode->gid);
+	return to_le16(inode->gid) |
+	       ((uint32_t)to_le16(inode->osd2.linux2.gid_high) << 16);
 }
 void ext4_inode_set_gid(struct ext4_inode *inode, uint32_t gid)
 {
-	inode->gid = to_le32(gid);
+	inode->gid = to_le16(gid);
+	inode->osd2.linux2.gid_high = to_le16(gid >> 16);
 }
 
 uint16_t ext4_inode_get_links_cnt(struct ext4_inode *inode)
