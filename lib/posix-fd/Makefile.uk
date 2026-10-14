@@ -2,3 +2,5 @@ $(eval $(call addlib_s,libposix_fd,$(CONFIG_LIBPOSIX_FD)))
 
 CINCLUDES-$(CONFIG_LIBPOSIX_FD) += -I$(LIBPOSIX_FD_BASE)/include
 CXXINCLUDES-$(CONFIG_LIBPOSIX_FD) += -I$(LIBPOSIX_FD_BASE)/include
+
+LIBPOSIX_FD_SRCS-y += $(LIBPOSIX_FD_BASE)/file-lock.c

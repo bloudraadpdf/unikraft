@@ -572,6 +572,17 @@ UK_LLSYSCALL_R_DEFINE(int, fcntl, int, fd,
 		switch (uk_fdtab_shim_get(fd, &sf)) {
 		case UK_SHIM_OFILE:
 			r = uk_sys_fcntl(sf.ofile, cmd, arg);
+			if (!r && (cmd == F_SETLK || cmd == F_SETLKW) &&
+			    ((struct flock *)arg)->l_type != F_UNLCK) {
+				struct uk_ofile *current = uk_fdtab_get(fd);
+				if (current != sf.ofile) {
+					uk_file_lock_release(sf.ofile->file->state,
+						uk_fdtab_lock_owner(), UK_FILE_LOCK_PROCESS);
+					r = -EBADF;
+				}
+				if (current)
+					uk_ofile_release(current);
+			}
 			uk_ofile_release(sf.ofile);
 			break;
 #if CONFIG_LIBVFSCORE

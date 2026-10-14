@@ -1,5 +1,6 @@
 menuconfig LIBPOSIX_FD
 	bool "posix-fd: Open file descriptions"
+	select LIBUKALLOC
 	select LIBUKFILE
 	select LIBUKLOCK
 	select LIBUKLOCK_MUTEX

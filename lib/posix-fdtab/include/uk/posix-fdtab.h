@@ -15,6 +15,8 @@
 #define UK_LIBPOSIX_FDTAB_INIT_PRIO	UK_PRIO_EARLIEST
 #define UK_FD_MAX INT_MAX
 
+const void *uk_fdtab_lock_owner(void);
+
 /**
  * Opens the file `f` with `mode` and associates it with a file descriptor.
  *

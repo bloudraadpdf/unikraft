@@ -165,14 +165,14 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 		.tid = ukthread2tid(this_thread),
 		.pid = ukthread2pid(this_thread),
 	};
+	rc = pprocess_stop_others(uk_pprocess_current());
+	if (rc)
+		goto err_free_stack_new;
 	rc = pprocess_raise_execve_event(&event_data);
 	if (unlikely(rc < 0)) {
 		uk_pr_err("execve event error (%d)\n", rc);
 		goto err_free_stack_new;
 	}
-	rc = pprocess_stop_others(uk_pprocess_current());
-	if (rc)
-		goto err_free_stack_new;
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 	pprocess_signal_exec(signal_actions);
 #endif

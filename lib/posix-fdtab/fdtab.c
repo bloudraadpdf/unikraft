@@ -76,6 +76,11 @@ static struct uk_fdtab *const active_fdtab = &init_fdtab;
 
 #endif /* !CONFIG_LIBPOSIX_FDTAB_MULTITAB */
 
+const void *uk_fdtab_lock_owner(void)
+{
+	return active_fdtab;
+}
+
 static int init_posix_fdtab(struct uk_init_ctx *ictx __unused)
 {
 	init_fdtab.alloc = uk_alloc_get_default();
@@ -146,6 +151,16 @@ static inline void file_rel(void *p, int flags __maybe_unused)
 	else
 #endif /* CONFIG_LIBVFSCORE */
 		uk_ofile_release((struct uk_ofile *)p);
+}
+
+static void file_close(struct uk_fdtab *tab, struct fdval value)
+{
+#if CONFIG_LIBVFSCORE
+	if (!(value.flags & UK_FDTAB_VFSCORE))
+#endif
+		uk_file_lock_release(((struct uk_ofile *)value.p)->file->state,
+				     tab, UK_FILE_LOCK_PROCESS);
+	file_rel(value.p, value.flags);
 }
 
 /* Ops */
@@ -354,7 +369,7 @@ static void fdtab_cleanup(struct uk_fdtab *tab, int all)
 
 				pp = uk_fmap_take(fmap, i);
 				UK_ASSERT(p == pp);
-				file_rel(v.p, v.flags);
+				file_close(tab, v);
 			}
 		}
 	}
@@ -367,11 +382,23 @@ void uk_fdtab_cloexec(void)
 
 #if CONFIG_LIBPOSIX_PROCESS_EXECVE
 #if CONFIG_LIBPOSIX_FDTAB_MULTITAB
+static struct uk_fdtab *fdtab_duplicate(struct uk_fdtab *tab);
+static void fdtab_free(struct uk_fdtab *tab);
+
 static int fdtab_handle_execve(void *data)
 {
 	struct posix_process_execve_event_data *edat = data;
 	struct uk_fdtab *tab = uk_thread_uktls_var(edat->thread, active_fdtab);
 
+	if (uk_refcount_read(&tab->refcnt) > 1) {
+		struct uk_fdtab *copy = fdtab_duplicate(tab);
+		if (!copy)
+			return -ENOMEM;
+		uk_thread_uktls_var(edat->thread, active_fdtab) = copy;
+		if (uk_refcount_release(&tab->refcnt))
+			fdtab_free(tab);
+		tab = copy;
+	}
 	fdtab_cleanup(tab, 0);
 	return UK_EVENT_HANDLED_CONT;
 }
@@ -545,7 +572,7 @@ int uk_sys_close(int fd)
 	if (!p)
 		return -EBADF;
 	v = fdtab_decode(p);
-	file_rel(v.p, v.flags);
+	file_close(active_fdtab, v);
 	return 0;
 }
 
@@ -577,7 +604,7 @@ int uk_sys_dup3(int oldfd, int newfd, int flags)
 	if (prevp) {
 		struct fdval prevv = fdtab_decode(prevp);
 
-		file_rel(prevv.p, prevv.flags);
+		file_close(active_fdtab, prevv);
 	}
 	return newfd;
 }

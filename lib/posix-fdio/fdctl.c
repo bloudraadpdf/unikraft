@@ -10,12 +10,19 @@
 #define _GNU_SOURCE
 #endif
 
+#include <limits.h>
 #include <sys/file.h>
 #include <sys/ioctl.h>
 
 #include <uk/atomic.h>
 #include <uk/posix-fdio.h>
 #include <uk/print.h>
+#if CONFIG_LIBPOSIX_FDTAB
+#include <uk/posix-fdtab.h>
+#endif
+#if CONFIG_LIBPOSIX_PROCESS
+#include <uk/process.h>
+#endif
 
 #include "fdio-impl.h"
 
@@ -57,6 +64,87 @@ int uk_sys_ioctl(struct uk_ofile *of, int cmd, void *arg)
 /* File flags we actually support & care about changing */
 #define _SETFL_MASK (_FCNTL_MASK & UKFD_MODE_MASK)
 
+static int file_record_lock(struct uk_ofile *of, int cmd, struct flock *flock)
+{
+	struct uk_file_lock_request request = { .file = of->file->state };
+	const int description = cmd == F_OFD_SETLK || cmd == F_OFD_SETLKW || cmd == F_OFD_GETLK;
+	const int query = cmd == F_GETLK || cmd == F_OFD_GETLK;
+	off_t base = 0;
+
+	if (!flock)
+		return -EFAULT;
+	if (of->mode & O_PATH)
+		return -EBADF;
+	if (flock->l_type != F_RDLCK && flock->l_type != F_WRLCK &&
+	    (query || flock->l_type != F_UNLCK))
+		return -EINVAL;
+	if (description && flock->l_pid)
+		return -EINVAL;
+	if (!query && ((flock->l_type == F_RDLCK && !_CAN_READ(of->mode)) ||
+		       (flock->l_type == F_WRLCK && !_CAN_WRITE(of->mode))))
+		return -EBADF;
+	switch (flock->l_whence) {
+	case SEEK_SET:
+		break;
+	case SEEK_CUR:
+		uk_mutex_lock(&of->lock);
+		if (of->pos > LLONG_MAX) {
+			uk_mutex_unlock(&of->lock);
+			return -EOVERFLOW;
+		}
+		base = of->pos;
+		uk_mutex_unlock(&of->lock);
+		break;
+	case SEEK_END: {
+		struct uk_statx stat;
+		uk_file_rlock(of->file);
+		int rc = uk_file_getstat(of->file, UK_STATX_SIZE, &stat);
+		uk_file_runlock(of->file);
+		if (rc)
+			return rc;
+		if (stat.stx_size > LLONG_MAX)
+			return -EOVERFLOW;
+		base = stat.stx_size;
+		break;
+	}
+	default:
+		return -EINVAL;
+	}
+	if (flock->l_start > 0 && base > LLONG_MAX - flock->l_start)
+		return -EOVERFLOW;
+	request.start = base + flock->l_start;
+	if (request.start < 0)
+		return -EINVAL;
+	request.end = LLONG_MAX;
+	if (flock->l_len > 0) {
+		if (flock->l_len - 1 > LLONG_MAX - request.start)
+			return -EOVERFLOW;
+		request.end = request.start + flock->l_len - 1;
+	} else if (flock->l_len < 0) {
+		if (flock->l_len < -request.start)
+			return -EINVAL;
+		request.end = request.start - 1;
+		request.start += flock->l_len;
+	}
+	request.type = flock->l_type;
+	request.kind = description ? UK_FILE_LOCK_DESCRIPTION : UK_FILE_LOCK_PROCESS;
+	if (description) {
+		request.owner = of;
+		request.pid = -1;
+	} else {
+#if CONFIG_LIBPOSIX_FDTAB
+		request.owner = uk_fdtab_lock_owner();
+#else
+		return -ENOSYS;
+#endif
+#if CONFIG_LIBPOSIX_PROCESS
+		request.pid = uk_sys_getpid();
+#endif
+	}
+	return uk_file_lock_apply(&request, query ? flock : NULL,
+				  cmd == F_SETLKW || cmd == F_OFD_SETLKW);
+}
+
 int uk_sys_fcntl(struct uk_ofile *of, int cmd, unsigned long arg)
 {
 	switch (cmd) {
@@ -75,41 +163,32 @@ int uk_sys_fcntl(struct uk_ofile *of, int cmd, unsigned long arg)
 	}
 	case F_SETLK:
 	case F_SETLKW:
-		/* We currently stub file locking; revisit if needed */
-		uk_pr_warn_once("STUB: F_SETLK(W) is NOP\n");
-		return 0;
 	case F_GETLK:
-	{
-		/* We report all file regions as immediately lockable */
-		struct flock *flk = (struct flock *)arg;
-
-		if (unlikely(!flk))
-			return -EFAULT;
-		flk->l_type = F_UNLCK;
-		uk_pr_warn_once("STUB: F_GETLK always reports unlocked\n");
-		return 0;
-	}
+	case F_OFD_SETLK:
+	case F_OFD_SETLKW:
+	case F_OFD_GETLK:
+		return file_record_lock(of, cmd, (struct flock *)arg);
 	default:
 		uk_pr_warn("STUB: fcntl(%d)\n", cmd);
 		return -EINVAL;
 	}
 }
 
-int uk_sys_flock(struct uk_ofile *of __unused, int cmd)
+int uk_sys_flock(struct uk_ofile *of, int cmd)
 {
-	/* We implement all locking ops as NOP stubs; revisit if needed */
-	switch (cmd) {
-	case LOCK_SH:
-	case LOCK_SH | LOCK_NB:
-	case LOCK_EX:
-	case LOCK_EX | LOCK_NB:
-	case LOCK_UN:
-	case LOCK_UN | LOCK_NB:
-		uk_pr_warn_once("STUB: flock always succeeds\n");
-		return 0;
-	default:
-		return -EINVAL;
+	struct uk_file_lock_request request = {
+		.file = of->file->state, .owner = of, .kind = UK_FILE_LOCK_FLOCK,
+		.start = 0, .end = LLONG_MAX, .pid = -1
+	};
+	if (of->mode & O_PATH)
+		return -EBADF;
+	switch (cmd & ~LOCK_NB) {
+	case LOCK_SH: request.type = F_RDLCK; break;
+	case LOCK_EX: request.type = F_WRLCK; break;
+	case LOCK_UN: request.type = F_UNLCK; break;
+	default: return -EINVAL;
 	}
+	return uk_file_lock_apply(&request, NULL, !(cmd & LOCK_NB));
 }
 
 int uk_sys_fsync(struct uk_ofile *of)
