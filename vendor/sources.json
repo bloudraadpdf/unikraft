@@ -8,5 +8,10 @@
     "revision": "c03d4ceb22a2b9e9799238f9c277a14284d313ad",
     "url": "https://github.com/unikraft/lib-libelf/archive/c03d4ceb22a2b9e9799238f9c277a14284d313ad.tar.gz",
     "sha256": "f707dc9c19293880c34b40de67b5aa8a831926344d07c3bcc9cfbf86369fa84e"
+  },
+  "lib-lwip": {
+    "revision": "ec55ae17618feeb57c8c10109bcf5c42723e8e95",
+    "url": "https://github.com/unikraft/lib-lwip/archive/ec55ae17618feeb57c8c10109bcf5c42723e8e95.tar.gz",
+    "sha256": "2814fb576f503f83e743ce41f2b56835e809f7df40ff01ffaef47f743308bb53"
   }
 }
