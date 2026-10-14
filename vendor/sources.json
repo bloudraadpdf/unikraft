@@ -1,0 +1,7 @@
+{
+  "app-elfloader": {
+    "revision": "0cd7a2b2c4d5ece85647c0c9903b50426e849420",
+    "url": "https://github.com/unikraft/app-elfloader/archive/0cd7a2b2c4d5ece85647c0c9903b50426e849420.tar.gz",
+    "sha256": "9fde2e4cfe283e30591688eadc4e60fbc054a6e4ab075febf8edd982b951278f"
+  }
+}
