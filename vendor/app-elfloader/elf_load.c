@@ -138,19 +138,15 @@ static int elf_load_parse(struct elf_prog *elf_prog, Elf *elf)
 		ret = -ENOEXEC;
 		goto err_out;
 	}
-	/* Executable type
-	 * NOTE: We support only position-independent binaries for now:
-	 * https://www.openwall.com/lists/musl/2015/06/01/12
-	 * These binaries are type ET_DYN
-	 */
 	uk_pr_debug("%s: ELF object type: %"PRIu16"\n",
 		    elf_prog->name, ehdr.e_type);
-	if (unlikely(ehdr.e_type != ET_DYN)) {
-		uk_pr_err("%s: ELF executable is not position-independent!\n",
+	if (unlikely(ehdr.e_type != ET_DYN && ehdr.e_type != ET_EXEC)) {
+		uk_pr_err("%s: ELF executable type is unsupported!\n",
 			  elf_prog->name);
 		ret = -ENOEXEC;
 		goto err_out;
 	}
+	elf_prog->fixed_address = ehdr.e_type == ET_EXEC;
 
 	/*
 	 * Scan program headers
@@ -231,6 +227,12 @@ static int elf_load_parse(struct elf_prog *elf_prog, Elf *elf)
 	elf_prog->phdr.num = ehdr.e_phnum;
 	elf_prog->phdr.entsize = ehdr.e_phentsize;
 	elf_prog->valen = UK_PAGING_PAGE_ALIGN_UP(elf_prog->upperl);
+	if (elf_prog->fixed_address) {
+		elf_prog->lowerl = UK_PAGING_PAGE_ALIGN_DOWN(elf_prog->lowerl);
+		if (!elf_prog->lowerl)
+			return -ENOEXEC;
+		elf_prog->valen -= elf_prog->lowerl;
+	}
 	return 0;
 
 err_out:
@@ -275,6 +277,8 @@ static int elf_load_imgcpy(struct elf_prog *elf_prog, Elf *elf,
 	int ret;
 
 	UK_ASSERT(elf_prog->align && UK_PAGING_PAGE_ALIGNED(elf_prog->align));
+	if (elf_prog->fixed_address)
+		return -ENOTSUP;
 
 	if (unlikely(gelf_getehdr(elf, &ehdr) == NULL)) {
 		elferr_err("%s: Failed to get executable header",
@@ -285,6 +289,7 @@ static int elf_load_imgcpy(struct elf_prog *elf_prog, Elf *elf,
 
 	elf_prog->vabase = uk_memalign(elf_prog->a, elf_prog->align,
 				       elf_prog->valen);
+	elf_prog->load_bias = (uintptr_t)elf_prog->vabase;
 	if (unlikely(!elf_prog->vabase)) {
 		uk_pr_debug("%s: Not enough memory to load image (failed to allocate %"PRIu64" bytes)\n",
 			    elf_prog->name, (uint64_t) elf_prog->valen);
@@ -304,7 +309,7 @@ static int elf_load_imgcpy(struct elf_prog *elf_prog, Elf *elf,
 		goto err_free_img;
 	}
 
-	elf_prog->entry = (uintptr_t) elf_prog->vabase + ehdr.e_entry;
+	elf_prog->entry = elf_prog->load_bias + ehdr.e_entry;
 	for (phi = 0; phi < phnum; ++phi) {
 		if (gelf_getphdr(elf, phi, &phdr) != &phdr) {
 			elferr_warn("%s: Failed to get program header %"PRIu64"\n",
@@ -314,7 +319,7 @@ static int elf_load_imgcpy(struct elf_prog *elf_prog, Elf *elf,
 		if (phdr.p_type != PT_LOAD)
 			continue;
 
-		vastart = phdr.p_vaddr + (uintptr_t)elf_prog->vabase;
+		vastart = phdr.p_vaddr + elf_prog->load_bias;
 		vaend   = vastart + phdr.p_filesz;
 		if (!elf_prog->start || (vastart < elf_prog->start))
 			elf_prog->start = vastart;
@@ -418,33 +423,27 @@ static int do_elf_load_fdphdr_0(struct elf_prog *elf_prog,
 	UK_ASSERT(!(phdr->p_vaddr & (phdr->p_align - 1)));
 	UK_ASSERT(!(phdr->p_paddr & (phdr->p_align - 1)));
 
-	mmap_len = elf_prog->valen + elf_prog->align;
-
-	/* Do a first dummy mmap to pre-allocate a large enough contiguous
-	 * mapping.
-	 */
-	vastart = (uintptr_t)mmap(NULL, mmap_len,
-				  get_phdr_mmap_prot(phdr),
-				  MAP_PRIVATE | MAP_ANONYMOUS,
-				  -1, 0);
-	if (unlikely(vastart == (uintptr_t)MAP_FAILED)) {
-		uk_pr_err("Failed to mmap dummy area\n");
-		return (int)vastart;
+	if (elf_prog->fixed_address) {
+		vastart = (uintptr_t)mmap((void *)elf_prog->lowerl, elf_prog->valen,
+			PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+		if (vastart == (uintptr_t)MAP_FAILED)
+			return -errno;
+		elf_prog->load_bias = 0;
+	} else {
+		mmap_len = elf_prog->valen + elf_prog->align;
+		vastart = (uintptr_t)mmap(NULL, mmap_len,
+			get_phdr_mmap_prot(phdr), MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		if (vastart == (uintptr_t)MAP_FAILED)
+			return -errno;
+		rc = munmap((void *)vastart, mmap_len);
+		if (rc)
+			return rc;
+		vastart = ALIGN_UP(vastart, elf_prog->align);
+		elf_prog->load_bias = vastart;
 	}
-
-	/* Now unmap dummy area, since we've fetched the base address of the
-	 * large enough memory area
-	 */
-	rc = munmap((void *)vastart, mmap_len);
-	if (unlikely(rc)) {
-		uk_pr_err("Failed to unmap dummy area\n");
-		return rc;
-	}
-
-	vastart = ALIGN_UP(vastart, elf_prog->align);
 	elf_prog->vabase = (void *)vastart;
 	/* We got ehdr.e_entry added initially at the start of elf_load_fd() */
-	elf_prog->entry += (uintptr_t)elf_prog->vabase;
+	elf_prog->entry += elf_prog->load_bias;
 
 	uk_pr_debug("%s: Program/Library memory region: 0x%"PRIx64"-0x%"PRIx64"\n",
 		    elf_prog->name,
@@ -452,7 +451,7 @@ static int do_elf_load_fdphdr_0(struct elf_prog *elf_prog,
 		    (uint64_t)elf_prog->vabase + elf_prog->valen);
 
 
-	vastart = (uintptr_t)mmap((void *)vastart + phdr->p_vaddr,
+	vastart = (uintptr_t)mmap((void *)(elf_prog->load_bias + phdr->p_vaddr),
 				  phdr->p_filesz,
 				  get_phdr_mmap_prot(phdr),
 				  MAP_PRIVATE | MAP_FIXED,
@@ -510,8 +509,7 @@ static int do_elf_load_fdphdr_not0(struct elf_prog *elf_prog,
 	delta_p_offset = phdr->p_vaddr -
 			 UK_PAGING_PAGE_ALIGN_DOWN(phdr->p_vaddr);
 
-	addr = (void *)UK_PAGING_PAGE_ALIGN_DOWN((phdr->p_vaddr +
-						 (uintptr_t)elf_prog->vabase));
+	addr = (void *)UK_PAGING_PAGE_ALIGN_DOWN(phdr->p_vaddr + elf_prog->load_bias);
 
 	uk_pr_debug("%s: Memory mapping 0x%"PRIx64" - 0x%"PRIx64" to 0x%"PRIx64" - 0x%"PRIx64"\n",
 		    elf_prog->name,
@@ -599,7 +597,7 @@ static int elf_load_fdphdr(struct elf_prog *elf_prog, GElf_Phdr *phdr, int fd)
 	uintptr_t vastart, vaend;
 	int ret;
 
-	vastart = phdr->p_vaddr + (uintptr_t)elf_prog->vabase;
+	vastart = phdr->p_vaddr + elf_prog->load_bias;
 	vaend   = vastart + phdr->p_filesz;
 	if (!elf_prog->start || (vastart < elf_prog->start))
 		elf_prog->start = vastart;
@@ -657,8 +655,11 @@ static int elf_load_fd(struct elf_prog *elf_prog, Elf *elf, int fd)
 	 */
 	elf_prog->entry = ehdr.e_entry;
 #else /* !CONFIG_LIBPOSIX_MMAP */
+	if (elf_prog->fixed_address)
+		return -ENOTSUP;
 	elf_prog->vabase = uk_memalign(elf_prog->a, elf_prog->align,
 				       elf_prog->valen);
+	elf_prog->load_bias = (uintptr_t)elf_prog->vabase;
 	if (unlikely(!elf_prog->vabase)) {
 		uk_pr_debug("%s: Not enough memory to load image (failed to allocate %"PRIu64" bytes)\n",
 			    elf_prog->name, (uint64_t)elf_prog->valen);
@@ -675,7 +676,7 @@ static int elf_load_fd(struct elf_prog *elf_prog, Elf *elf, int fd)
 	 * Unlike in the mmap case, here we already know the vabase, so update
 	 * it now.
 	 */
-	elf_prog->entry = (uintptr_t)elf_prog->vabase + ehdr.e_entry;
+	elf_prog->entry = elf_prog->load_bias + ehdr.e_entry;
 #endif /* !CONFIG_LIBPOSIX_MMAP */
 
 	if (unlikely(elf_getphnum(elf, &phnum) == 0)) {
@@ -785,7 +786,7 @@ static int elf_load_ptprotect(struct elf_prog *elf_prog, Elf *elf)
 		if (phdr.p_type != PT_LOAD)
 			continue;
 
-		vastart = phdr.p_vaddr + (uintptr_t)elf_prog->vabase;
+		vastart = phdr.p_vaddr + elf_prog->load_bias;
 		vaend   = vastart + phdr.p_memsz;
 		vastart = UK_PAGING_PAGE_ALIGN_DOWN(vastart);
 		vaend   = UK_PAGING_PAGE_ALIGN_UP(vaend);

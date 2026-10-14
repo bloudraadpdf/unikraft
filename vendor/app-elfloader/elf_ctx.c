@@ -327,7 +327,7 @@ void elf_ctx_init(struct ukarch_ctx *ctx, struct elf_prog *prog,
 		{ AT_RANDOM, (uintptr_t) rand },
 		{ AT_PHENT, prog->phdr.entsize },
 		{ AT_PHNUM, prog->phdr.num },
-		{ AT_PHDR, (__uptr)prog->vabase + prog->phdr.off },
+		{ AT_PHDR, prog->load_bias + prog->phdr.off },
 #if CONFIG_APPELFLOADER_VDSO
 		/* TODO: This must also be pushed and copied
 		 * or mapped to information block. Move it to infoblk_auxv

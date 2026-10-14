@@ -48,6 +48,8 @@ struct elf_prog {
 	const char *name;
 	const char *path; /* path to executable */
 	void *vabase;	/* base address of loaded image in virtual memory */
+	uintptr_t load_bias;
+	bool fixed_address;
 	size_t valen;	/* length of loaded image in virtual memory */
 
 	/* Needed by elf_ctx_init(): */
