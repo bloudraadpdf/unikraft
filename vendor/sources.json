@@ -23,5 +23,10 @@
     "revision": "ebb370ca83af193212df4dcbadcc5d87bc0de2f0",
     "url": "https://github.com/lz4/lz4/archive/ebb370ca83af193212df4dcbadcc5d87bc0de2f0.tar.gz",
     "sha256": "eb1a93e934d4fd29df6e2061ba0bf447568561764d758f4a5662c0e29370ffa9"
+  },
+  "lwip-source": {
+    "revision": "bef26c44236a078d4352e76392ef16f019bea501",
+    "url": "https://github.com/unikraft/fork-lwip/archive/bef26c44236a078d4352e76392ef16f019bea501.zip",
+    "sha256": "0e7de8cd81d29194b6eb587968d11b9d30f74f0230351e63a4178a72cd307cac"
   }
 }
