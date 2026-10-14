@@ -14,6 +14,9 @@
 #include <uk/lcpu/pm.h>
 #include <uk/pcpuvar.h>
 #include <uk/prio.h>
+#if CONFIG_HAVE_PAGING
+#include <uk/paging.h>
+#endif
 
 #if CONFIG_LIBUKBOOT
 #include <uk/boot/earlytab.h>
@@ -23,6 +26,10 @@
 #include <x86/delay.h>
 
 #if CONFIG_HAVE_SMP
+#if CONFIG_HAVE_PAGING
+__uk_pcpuvar __paddr_t uk_plat_native_lcpu_start_pt;
+#endif
+
 static inline void x2apic_send_sipi(__vaddr_t addr, int dest)
 {
 	__u32 eax;
@@ -179,6 +186,11 @@ UK_BOOT_EARLYTAB_ENTRY(boot_memregion_alloc_sipi_vect, UK_PRIO_EARLIEST);
 
 static int plat_native_lcpu_start(__u64 idx)
 {
+#if CONFIG_HAVE_PAGING
+	uk_pcpuvar_lval(idx, uk_plat_native_lcpu_start_pt) =
+		uk_paging_pt_read_base();
+	uk_arch_wmb();
+#endif
 	/* Send INIT IPI */
 	apic_send_iipi(uk_pcpuvar_lval(idx, uk_pcpuvar_cpu_id));
 

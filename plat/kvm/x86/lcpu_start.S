@@ -371,6 +371,19 @@ no_pku:
 no_avx512:
 #endif /* !__AVX512F__ */
 
+#if CONFIG_HAVE_SMP && CONFIG_HAVE_PAGING
+	movq	UK_PCPUVAR_X86_64_GSREL(uk_plat_native_lcpu_start_pt), %rdi
+	testq	%rdi, %rdi
+	jz	1f
+	/* Runtime mappings use NX and include the secondary CPU's stack. */
+	movl	$UK_ARCH_X86_64_MSR_EFER, %ecx
+	rdmsr
+	orl	$UK_ARCH_X86_64_EFER_NXE, %eax
+	wrmsr
+	movq	%rdi, %cr3
+1:
+#endif
+
 	movq	UK_PCPUVAR_X86_64_GSREL(UK_LCPU_SARG_SYM), %rdi
 	movq	UK_PCPUVAR_X86_64_GSREL(UK_LCPU_SENTRY_SYM), %rax
 	movq	UK_PCPUVAR_X86_64_GSREL(UK_LCPU_SSTACKP_SYM), %rsp

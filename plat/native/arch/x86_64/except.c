@@ -333,8 +333,6 @@ void uk_plat_native_except_irq_handler(struct uk_plat_native_regs *regs,
 #endif /* CONFIG_LIBUKPLAT_NATIVE_ECTX_ISR_ASSERTIONS */
 }
 
-static struct uk_arch_x86_64_desc_table_ptr64 idtptr;
-
 static inline void idt_fillgate(unsigned int num, void *fun, unsigned int ist,
 				__u32 idx)
 {
@@ -354,10 +352,12 @@ static inline void idt_fillgate(unsigned int num, void *fun, unsigned int ist,
 	desc->p		= 1;
 }
 
-static void idt_init(void)
+static void idt_init(__u32 idx)
 {
-	/* Ensure that traps_table_init has been called */
-	UK_ASSERT(idtptr.limit != 0);
+	struct uk_arch_x86_64_desc_table_ptr64 idtptr = {
+		.limit = sizeof(cpu_idt[idx]) - 1,
+		.base = (__u64)&cpu_idt[idx],
+	};
 
 	uk_arch_x86_64_lidt(&idtptr);
 }
@@ -633,9 +633,6 @@ static void traps_table_init(__u32 idx)
 	FILL_IRQ_GATE(221, 1);
 	FILL_IRQ_GATE(222, 1);
 	FILL_IRQ_GATE(223, 1);
-
-	idtptr.limit = sizeof(cpu_idt) - 1;
-	idtptr.base = (__u64)&cpu_idt;
 }
 
 static void uk_plat_native_traps_init(void)
@@ -645,7 +642,7 @@ static void uk_plat_native_traps_init(void)
 	traps_table_init(idx);
 	gdt_init(idx);
 	tss_init(idx);
-	idt_init();
+	idt_init(idx);
 }
 
 __isr __uptr uk_plat_native_except_get_except_stack_base(void)
@@ -716,6 +713,75 @@ int uk_plat_native_except_send_ipi(__u64 id, __u32 irq)
 }
 #endif /* CONFIG_HAVE_SMP */
 
+#if CONFIG_HAVE_SYSCALL
+/* syscall entrance provided by platform library */
+void _ukplat_syscall(void);
+
+/* syscall_init is derived from hermitux: `processor.c`:
+ *
+ * Copyright (c) 2010, Stefan Lankes, RWTH Aachen University
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in the
+ *      documentation and/or other materials provided with the distribution.
+ *    * Neither the name of the University nor the names of its contributors
+ *      may be used to endorse or promote products derived from this
+ *      software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE FOR ANY
+ * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+static void syscall_init(void)
+{
+	__u32 eax, ebx, ecx, edx;
+	int have_syscall = 0;
+
+	/* Check for availability of extended features */
+	uk_arch_x86_64_cpuid(0x80000000, 0, &eax, &ebx, &ecx, &edx);
+	if (eax >= 0x80000001) {
+		uk_arch_x86_64_cpuid(0x80000001, 0, &eax, &ebx, &ecx, &edx);
+		have_syscall = (edx & UK_ARCH_X86_64_CPUID3_SYSCALL);
+	}
+
+	if (!have_syscall)
+		UK_CRASH("CPU does not support SYSCALL/SYSRET!\n");
+
+	/* Enable and program syscall/sysret */
+	uk_arch_x86_64_wrmsrl(UK_ARCH_X86_64_MSR_EFER,
+			      uk_arch_x86_64_rdmsrl(UK_ARCH_X86_64_MSR_EFER) |
+			      UK_ARCH_X86_64_EFER_LMA |
+			      UK_ARCH_X86_64_EFER_LME |
+			      UK_ARCH_X86_64_EFER_SCE);
+	uk_arch_x86_64_wrmsrl(UK_ARCH_X86_64_MSR_STAR,
+			      (0x08ULL << 48) | (0x08ULL << 32));
+	uk_arch_x86_64_wrmsrl(UK_ARCH_X86_64_MSR_LSTAR,
+			      (__uptr)_ukplat_syscall);
+
+	/* Clear IF flag during an interrupt */
+	uk_arch_x86_64_wrmsrl(UK_ARCH_X86_64_MSR_SYSCALL_MASK,
+			      UK_ARCH_X86_64_RFLAGS_TF |
+			      UK_ARCH_X86_64_RFLAGS_DF |
+			      UK_ARCH_X86_64_RFLAGS_IF |
+			      UK_ARCH_X86_64_RFLAGS_AC |
+			      UK_ARCH_X86_64_RFLAGS_NT);
+}
+#endif /* CONFIG_HAVE_SYSCALL */
+
 __isr int uk_plat_native_except_init(void)
 {
 	int rc __maybe_unused;
@@ -727,6 +793,9 @@ __isr int uk_plat_native_except_init(void)
 #endif /* CONFIG_HAVE_SMP */
 
 	uk_plat_native_traps_init();
+#if CONFIG_HAVE_SYSCALL
+	syscall_init();
+#endif
 
 	return 0;
 }

@@ -55,9 +55,18 @@ contents, directory ownership and cleanup. CPIO extraction restores archive
 UID/GID values without following symbolic links.
 
 ARM64 and AMD64 metadata layouts, snapshot discovery and entropy setup are
-selected by architecture. AMD64 has not yet been built from the combined
-vendor tree.
+selected by architecture. The AMD64 vendor kernel builds with one or eight
+CPU slots. Application checks pass with 1, 2, 4 and 8 CPUs. Each CPU reads
+random bytes and the monotonic clock, faults an anonymous page, and has its
+own interrupt descriptor table. An eight-CPU snapshot resumes the waiting
+threads after a new vsock connection and completes the same checks. The
+two-CPU filesystem probe verifies 32 records and directory operations.
 
-Tokoloshe still consumes its original patch set. Move its source pin and
-remove those patch files together after the complete fork passes the guest
-integration checks.
+AMD64 secondary CPUs load the active page table and initialise their syscall
+registers before application execution. Spinlock acquisition and release
+constrain compiler memory ordering; a missing acquisition barrier previously
+allowed thread flags to be read before the scheduler lock.
+
+Tokoloshe pins this repository and exports its source in release archives.
+Its guest feature contracts and architecture-specific acceptance checks
+remain the authority for supported launches.
