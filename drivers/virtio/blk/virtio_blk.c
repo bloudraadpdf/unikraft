@@ -86,8 +86,6 @@ struct virtio_blk_device {
 	__u32 max_segments;
 	/* Maximum size of a segment */
 	__u32 max_size_segment;
-	/* If it is set then flush request is allowed */
-	__u8 writeback;
 };
 
 struct uk_blkdev_queue {
@@ -247,7 +245,7 @@ static int virtio_blkdev_request_flush(struct uk_blkdev_queue *queue,
 	UK_ASSERT(virtio_blk_req);
 
 	vbdev = queue->vbd;
-	if (!vbdev->writeback)
+	if (!vbdev->blkdev.capabilities.flush_supported)
 		return -ENOTSUP;
 
 	if (virtio_blk_req->virtio_blk_outhdr.sector) {
@@ -886,7 +884,7 @@ static int virtio_blkdev_feature_negotiate(struct virtio_blk_device *vbdev)
 	vbdev->max_vqueue_pairs = num_queues;
 	vbdev->max_segments = max_segments;
 	vbdev->max_size_segment = max_size_segment;
-	vbdev->writeback = VIRTIO_FEATURE_HAS(host_features,
+	cap->flush_supported = VIRTIO_FEATURE_HAS(host_features,
 				VIRTIO_BLK_F_FLUSH);
 
 	/**

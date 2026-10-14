@@ -238,6 +238,7 @@ struct uk_blkdev_cap {
 	__sector max_sectors_per_req;
 	/* Alignment (number of bytes) for data used in future requests */
 	uint16_t ioalign;
+	__u8 flush_supported;
 };
 
 /**

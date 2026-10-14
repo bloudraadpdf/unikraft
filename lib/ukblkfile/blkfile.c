@@ -130,8 +130,9 @@ static int block_control(const struct uk_file *file, int family, int request,
 		if (block->readonly)
 			return 0;
 		uk_mutex_lock(&block->lock);
-		result = uk_blkdev_sync_io(block->device, 0, UK_BLKREQ_FFLUSH,
-					 0, 0, NULL);
+		result = uk_blkdev_capabilities(block->device)->flush_supported ?
+			uk_blkdev_sync_io(block->device, 0, UK_BLKREQ_FFLUSH,
+					 0, 0, NULL) : 0;
 		uk_mutex_unlock(&block->lock);
 		return result;
 	}
