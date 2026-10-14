@@ -39,6 +39,8 @@
 #ifndef LWIP_HDR_SOCKETS_H
 #define LWIP_HDR_SOCKETS_H
 
+#include <uk/config.h>
+
 #include "lwip/opt.h"
 
 #if LWIP_SOCKET /* don't build if not configured for use in lwipopts.h */
@@ -438,6 +440,7 @@ typedef struct ipv6_mreq {
 #define F_SETFL 4
 #endif
 
+#ifndef CONFIG_HAVE_LIBC
 /* File status flags and file access modes for fnctl,
    these are bits in an int. */
 #ifndef O_NONBLOCK
@@ -455,6 +458,7 @@ typedef struct ipv6_mreq {
 #ifndef O_RDWR
 #define O_RDWR      (O_RDONLY|O_WRONLY)
 #endif
+#endif /* CONFIG_HAVE_LIBC */
 
 #ifndef SHUT_RD
   #define SHUT_RD   0
