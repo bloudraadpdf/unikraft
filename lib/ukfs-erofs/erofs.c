@@ -300,7 +300,7 @@ static int node_lookup(struct erofs_node *node, const char *path, size_t len,
 		size_t *consumed)
 {
 	struct erofs_inode inode;
-	struct erofs_node *found;
+	struct erofs_node *found = NULL;
 	size_t length = 0;
 	int result;
 

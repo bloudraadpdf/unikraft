@@ -98,3 +98,4 @@ $(eval $(call import_lib,$(CONFIG_UK_BASE)/lib/ukhttplisten))
 $(eval $(call import_lib,$(CONFIG_UK_BASE)/lib/ukfs-erofs))
 
 $(eval $(call import_lib,$(CONFIG_UK_BASE)/lib/ukblkfile))
+$(eval $(call import_lib,$(CONFIG_UK_BASE)/lib/ukfs-ext4))

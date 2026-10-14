@@ -1,0 +1,9 @@
+config LIBUKFS_EXT4
+	bool "ukfs-ext4: ext4 block filesystems"
+	select LIBUKFS
+	select LIBUKALLOC
+	select LIBUKLOCK
+	select LIBUKBLKFILE
+	select LIBPOSIX_USER
+	select LIBPOSIX_TIME
+	select LIBNOLIBC if !HAVE_LIBC
