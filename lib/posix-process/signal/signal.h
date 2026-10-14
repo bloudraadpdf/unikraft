@@ -334,12 +334,14 @@ void pprocess_signal_arch_jmp_handler(struct ukarch_execenv *execenv,
 				      ucontext_t *ctx,
 				      void *handler, void *sp);
 
+void pprocess_signal_restore_altstack(const stack_t *stack, __uptr sp);
+
 /* Populate POSIX u_context from ukarch_execenv */
 void pprocess_signal_arch_set_ucontext(struct ukarch_execenv *execenv,
 				       ucontext_t *ucontext);
 
 /* Populate ukarch_execenv from POSIX u_context */
-void pprocess_signal_arch_get_ucontext(ucontext_t *ucontext,
+int pprocess_signal_arch_get_ucontext(ucontext_t *ucontext,
 				       struct ukarch_execenv *execenv);
 
 /* Checks whether a signal can be delivered to a given thread, depending

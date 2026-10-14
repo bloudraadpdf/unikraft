@@ -55,7 +55,7 @@ void pprocess_signal_arch_set_ucontext(struct ukarch_execenv *execenv,
 	/* TODO Populate the rest of the context */
 }
 
-void pprocess_signal_arch_get_ucontext(ucontext_t *ucontext,
+int pprocess_signal_arch_get_ucontext(ucontext_t *ucontext,
 				       struct ukarch_execenv *execenv)
 {
 	UK_ASSERT(ucontext);
@@ -97,5 +97,5 @@ void pprocess_signal_arch_get_ucontext(ucontext_t *ucontext,
 			 ucontext->uc_mcontext.gregs[REG_RIP]);
 
 	/* TODO Populate the rest of the context */
+	return 0;
 }
-

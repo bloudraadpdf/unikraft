@@ -4,6 +4,8 @@
  * You may not use this file except in compliance with the License.
  */
 
+#include <string.h>
+
 #include <uk/arch/ctx.h>
 #include <uk/essentials.h>
 #include <uk/plat/config.h>
@@ -82,10 +84,10 @@ bool pprocess_signal_is_deliverable(struct posix_thread *pthread, int signum)
 }
 
 static void handle_self(struct uk_signal *sig, const struct kern_sigaction *ks,
-			struct ukarch_execenv *execenv)
+			struct ukarch_execenv *execenv, uk_sigset_t *saved_mask)
 {
 	struct pprocess_signal_handler_ctx handler_ctx;
-	ucontext_t ucontext;
+	ucontext_t ucontext = {0};
 	struct posix_thread *this_thread;
 	stack_t saved_stack;
 	bool switched_stack;
@@ -139,8 +141,16 @@ static void handle_self(struct uk_signal *sig, const struct kern_sigaction *ks,
 		handler_ctx.ucontext = &ucontext;
 
 		pprocess_signal_arch_set_ucontext(execenv, &ucontext);
+		memcpy(&ucontext.uc_sigmask, saved_mask, sizeof(*saved_mask));
+		ucontext.uc_stack = saved_stack;
+		ucontext.uc_stack.ss_flags &= ~SS_ONSTACK;
 		pprocess_signal_jmp_handler(&handler_ctx, execenv);
-		pprocess_signal_arch_get_ucontext(&ucontext, execenv);
+		if (pprocess_signal_arch_get_ucontext(&ucontext, execenv))
+			uk_sigact_term(SIGSEGV);
+		memcpy(saved_mask, &ucontext.uc_sigmask, sizeof(*saved_mask));
+		uk_sigdelset(saved_mask, SIGKILL);
+		uk_sigdelset(saved_mask, SIGSTOP);
+		saved_stack = ucontext.uc_stack;
 	} else {
 		handler_ctx.siginfo = __NULL;
 		handler_ctx.ucontext = __NULL;
@@ -148,8 +158,8 @@ static void handle_self(struct uk_signal *sig, const struct kern_sigaction *ks,
 		pprocess_signal_jmp_handler(&handler_ctx, execenv);
 	}
 
-	if (switched_stack)
-		*altstack = saved_stack;
+	pprocess_signal_restore_altstack(&saved_stack,
+		uk_lcpu_regs_get(execenv->regs, SP));
 }
 
 /* Deliver a signal to a thread. The caller must check that the signal
@@ -157,7 +167,8 @@ static void handle_self(struct uk_signal *sig, const struct kern_sigaction *ks,
  * default disposition.
  */
 static void do_deliver(struct posix_thread *pthread, struct uk_signal *sig,
-		       struct ukarch_execenv *execenv)
+		       struct ukarch_execenv *execenv,
+		       const uk_sigset_t *restore_mask)
 {
 	struct posix_process *pproc;
 	uk_sigset_t saved_mask;
@@ -174,11 +185,9 @@ static void do_deliver(struct posix_thread *pthread, struct uk_signal *sig,
 	signum = sig->siginfo.si_signo;
 	uk_mutex_lock(&pprocess_mutex);
 	action = *KERN_SIGACTION(pproc, signum);
-	if (action.ks_handler == SIG_IGN) {
-		uk_mutex_unlock(&pprocess_mutex);
-		return;
-	}
-	saved_mask = pthread->signal->mask;
+	saved_mask = restore_mask ? *restore_mask : pthread->signal->mask;
+	if (action.ks_handler == SIG_IGN)
+		goto out_restore_mask;
 	if (action.ks_handler != SIG_DFL) {
 		uk_sigorset(&pthread->signal->mask, &action.ks_mask);
 		if (!(action.ks_flags & SA_NODEFER))
@@ -208,12 +217,14 @@ static void do_deliver(struct posix_thread *pthread, struct uk_signal *sig,
 			/* Real-time signals: SIG_TERM by default */
 			uk_sigact_term(signum);
 		}
-		return;
+		uk_mutex_lock(&pprocess_mutex);
+		goto out_restore_mask;
 	}
 
-	handle_self(sig, &action, execenv);
+	handle_self(sig, &action, execenv, &saved_mask);
 
 	uk_mutex_lock(&pprocess_mutex);
+out_restore_mask:
 	pthread->signal->mask = saved_mask;
 #if CONFIG_ARCH_ARM_64
 	if ((pthread->signal->sigqueue.pending | pproc->signal->sigqueue.pending) &
@@ -243,7 +254,7 @@ static void deliver_pending(struct posix_thread *thread, bool process_queue,
 				break;
 			delivery.siginfo = sig->siginfo;
 			uk_signal_free(alloc, sig);
-			do_deliver(thread, &delivery, execenv);
+			do_deliver(thread, &delivery, execenv, NULL);
 		}
 	}
 }
@@ -267,12 +278,7 @@ static void deliver_waited(struct posix_thread *thread,
 	td->wait_pending = false;
 	td->restore_mask = false;
 	uk_mutex_unlock(&pprocess_mutex);
-	do_deliver(thread, &sig, execenv);
-	if (restore_mask) {
-		uk_mutex_lock(&pprocess_mutex);
-		td->mask = saved_mask;
-		uk_mutex_unlock(&pprocess_mutex);
-	}
+	do_deliver(thread, &sig, execenv, restore_mask ? &saved_mask : NULL);
 }
 
 void pprocess_signal_deliver(struct ukarch_execenv *execenv)
@@ -362,7 +368,7 @@ void sys_error_handler(struct ukarch_execenv *ee __unused, long arg)
 	set_siginfo_kill(error->signum, &sig.siginfo);
 
 	/* Execute standard delivery path */
-	do_deliver(pthread, &sig, ee);
+	do_deliver(pthread, &sig, ee, NULL);
 
 	return;
 
