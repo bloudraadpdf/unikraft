@@ -11,6 +11,18 @@ licence requirement. Their BSD-licensed interface headers are retained.
 
 The extent and extended-attribute replacements are imported from FreeBSD.
 Their source files retain the BSD licence notices. `../sources.json` records
-the FreeBSD revision, original paths and file digests. Adaptation to the
-retained block and journal interfaces is in progress; the complete filesystem
-cannot yet be built.
+the FreeBSD revision, original paths and file digests. The extent code uses
+the retained block, allocator and journal interfaces. Extended-attribute
+adaptation is in progress; the complete filesystem cannot yet be built.
+
+The native Linux extent check uses a real ext4 image and journal. It covers
+sparse multilevel trees, contiguous extents, partial removal and conversion
+of unwritten preallocated blocks. Each stage closes the filesystem and runs
+`e2fsck`. Run it with an unused build directory:
+
+```sh
+make -f lib/ukfs-ext4/tests/Makefile CC=gcc BUILD="$PWD/build/ext4-tests" test
+```
+
+This check excludes the unfinished extended-attribute source. It does not
+qualify guest integration, snapshot restore or interrupted-write recovery.

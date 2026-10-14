@@ -29,8 +29,9 @@ Local dependency changes follow their imports as separate source commits.
 | `vendor/ext4` | Selected BSD filesystem components |
 
 The [ext4 import notes](vendor/ext4/README.md) identify the excluded GPL
-implementations. Extent and extended-attribute replacements remain unfinished.
-Do not enable `CONFIG_LIBUKFS_EXT4` until these replacements are complete.
+implementations. The FreeBSD extent port passes the native ARM64 filesystem
+check. Extended-attribute adaptation remains unfinished. Do not enable
+`CONFIG_LIBUKFS_EXT4` until that replacement is complete.
 
 ## Build and verification status
 
