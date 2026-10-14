@@ -187,6 +187,11 @@ config LWIP_NETIF_STATUS_PRINT
 	help
 		Print netif status changes to standard console
 
+config LWIP_SOCKET_TIMEOUTS
+	bool "Socket receive and send timeouts"
+	depends on LWIP_SOCKET
+	default n
+
 config LWIP_RCVBUF
 	bool "Use receive buffers"
 	default y

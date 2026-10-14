@@ -219,6 +219,11 @@ void sys_free(void *ptr);
 #define LWIP_SO_RCVBUF 1
 #endif
 
+#if CONFIG_LWIP_SOCKET_TIMEOUTS
+#define LWIP_SO_RCVTIMEO 1
+#define LWIP_SO_SNDTIMEO 1
+#endif
+
 #if CONFIG_LWIP_LINGER
 #define LWIP_SO_LINGER 1
 #endif
