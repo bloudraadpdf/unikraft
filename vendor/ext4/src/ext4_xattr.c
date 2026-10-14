@@ -132,8 +132,7 @@ static uint32_t block_checksum(struct ext4_inode_ref *inode, uint64_t number,
 	size_t offset = offsetof(struct ext2fs_extattr_header, h_checksum);
 	uint64_t disk_number = to_le64(number);
 	uint32_t zero = 0;
-	uint32_t crc = ext4_crc32c(EXT4_CRC32_INIT, inode->fs->sb.uuid,
-				   sizeof(inode->fs->sb.uuid));
+	uint32_t crc = ext4_sb_csum_seed(&inode->fs->sb);
 
 	crc = ext4_crc32c(crc, &disk_number, sizeof(disk_number));
 	crc = ext4_crc32c(crc, data, offset);

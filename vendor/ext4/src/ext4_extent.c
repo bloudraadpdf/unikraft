@@ -150,8 +150,7 @@ static uint32_t node_checksum(struct ext4_inode_ref *inode,
 {
 	uint32_t number = to_le32(inode->index);
 	uint32_t generation = to_le32(ext4_inode_get_generation(inode->inode));
-	uint32_t crc = ext4_crc32c(EXT4_CRC32_INIT, inode->fs->sb.uuid,
-				   sizeof(inode->fs->sb.uuid));
+	uint32_t crc = ext4_sb_csum_seed(&inode->fs->sb);
 
 	crc = ext4_crc32c(crc, &number, sizeof(number));
 	crc = ext4_crc32c(crc, &generation, sizeof(generation));

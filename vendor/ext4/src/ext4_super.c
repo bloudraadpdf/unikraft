@@ -48,6 +48,19 @@
 #include <ext4_super.h>
 #include <ext4_crc32.h>
 
+_Static_assert(sizeof(struct ext4_sblock) == EXT4_SUPERBLOCK_SIZE,
+	       "ext4 superblock size");
+_Static_assert(offsetof(struct ext4_sblock, checksum_seed) == 0x270,
+	       "ext4 checksum seed offset");
+
+uint32_t ext4_sb_csum_seed(struct ext4_sblock *s)
+{
+	if (ext4_sb_feature_incom(s, EXT4_FINCOM_CSUM_SEED))
+		return ext4_get32(s, checksum_seed);
+
+	return ext4_crc32c(EXT4_CRC32_INIT, s->uuid, sizeof(s->uuid));
+}
+
 uint32_t ext4_block_group_cnt(struct ext4_sblock *s)
 {
 	uint64_t blocks_count = ext4_sb_get_blocks_cnt(s);

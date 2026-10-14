@@ -25,6 +25,10 @@ directory:
 make -f lib/ukfs-ext4/tests/Makefile CC=gcc BUILD="$PWD/build/ext4-tests" test
 ```
 
+The `test-seeded` target runs the same checks and journal recovery with
+`metadata_csum_seed`. It changes the image UUID before the checks, retaining
+the stored checksum seed. Use a separate build directory for this target.
+
 The optional `shared-attributes` target requires Linux mount privileges. It
 uses Linux to create three files that share an attribute block, changes one
 file through this implementation, and deletes the other two. It checks the

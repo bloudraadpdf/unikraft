@@ -2,6 +2,11 @@ ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../../..)
 LIBRARY := $(ROOT)/vendor/ext4
 BUILD ?= $(ROOT)/build/ext4-tests
 BLOCK_SIZE ?= 1024
+CHECKSUM_SEED ?= 0
+FEATURES := ^metadata_csum_seed,^orphan_file
+ifeq ($(CHECKSUM_SEED),1)
+FEATURES := metadata_csum_seed,^orphan_file
+endif
 SOURCES := $(wildcard $(LIBRARY)/src/*.c)
 HEADERS := $(wildcard $(LIBRARY)/include/*.h)
 CFLAGS := -std=gnu11 -O1 -g -DCONFIG_USE_DEFAULT_CFG=1 -DCONFIG_DEBUG_PRINTF=0 -DCONFIG_HAVE_OWN_ASSERT=0
@@ -10,7 +15,10 @@ CFLAGS := -std=gnu11 -O1 -g -DCONFIG_USE_DEFAULT_CFG=1 -DCONFIG_DEBUG_PRINTF=0 -
 test: $(BUILD)/extents
 	test ! -e $(BUILD)/extents.ext4
 	truncate -s 32M $(BUILD)/extents.ext4
-	mke2fs -q -t ext4 -b $(BLOCK_SIZE) -O ^metadata_csum_seed,^orphan_file $(BUILD)/extents.ext4
+	mke2fs -q -t ext4 -b $(BLOCK_SIZE) -O $(FEATURES) $(BUILD)/extents.ext4
+ifeq ($(CHECKSUM_SEED),1)
+	python3 $(ROOT)/lib/ukfs-ext4/tests/checksum-seed.py $(BUILD)/extents.ext4
+endif
 	$(BUILD)/extents $(BUILD)/extents.ext4 create
 	e2fsck -fn $(BUILD)/extents.ext4
 	$(BUILD)/extents $(BUILD)/extents.ext4 truncate
@@ -32,6 +40,10 @@ test: $(BUILD)/extents
 $(BUILD)/extents: $(ROOT)/lib/ukfs-ext4/tests/extents.c $(SOURCES) $(HEADERS)
 	mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) -I$(LIBRARY)/include $< $(SOURCES) -o $@
+
+.PHONY: test-seeded
+test-seeded:
+	$(MAKE) -f $(firstword $(MAKEFILE_LIST)) CHECKSUM_SEED=1 test recovery
 
 .PHONY: shared-attributes
 shared-attributes: $(BUILD)/extents

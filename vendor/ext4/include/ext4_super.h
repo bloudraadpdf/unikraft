@@ -200,6 +200,7 @@ uint32_t ext4_inodes_in_group_cnt(struct ext4_sblock *s, uint32_t bgid);
  * @return  Standard error code */
 int ext4_sb_write(struct ext4_blockdev *bdev, struct ext4_sblock *s);
 void ext4_sb_set_csum(struct ext4_sblock *s);
+uint32_t ext4_sb_csum_seed(struct ext4_sblock *s);
 
 /**@brief   Superblock read.
  * @param   bdev block device descriptor.
