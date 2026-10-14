@@ -1801,6 +1801,9 @@ int uk_sys_umount(const char *targetpath, int flags __unused)
 				ret = -EBUSY;
 				goto out;
 			}
+		ret = uk_fs_sync(target);
+		if (unlikely(ret))
+			goto out;
 		/* unmount & release */
 		ret = uk_fs_mountat(mtab.tab[mntidx].point, &prev);
 		if (unlikely(ret))

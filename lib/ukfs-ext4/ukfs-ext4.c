@@ -27,12 +27,13 @@
 #include <uk/mutex.h>
 #include <uk/posix-time.h>
 #include <uk/syscall.h>
-#include "inode-io.h"
+#include "file-pages.h"
 
 struct disk_node;
 struct disk_volume {
 	struct disk_volume *next;
-	int claimed;
+	int claimed, closing;
+	unsigned int users;
 	struct ext4_fs fs;
 	struct ext4_blockdev device;
 	struct ext4_blockdev_iface interface;
@@ -49,7 +50,9 @@ struct disk_node {
 	struct disk_volume *volume;
 	struct disk_node *next;
 	struct uk_file_state state;
+	struct ukext4_pages pages;
 	uint32_t inode;
+	size_t size;
 	unsigned int type, references;
 	char *link;
 	size_t link_length;
@@ -60,14 +63,39 @@ UK_FS_TMPL_LIVE_OPS(ext4, struct disk_node *);
 static struct uk_mutex mounted_lock = UK_MUTEX_INITIALIZER(mounted_lock);
 static struct disk_volume *mounted_volumes;
 
+static int volume_finish(struct disk_volume *volume);
+static int inode_delete(struct ext4_inode_ref *inode);
+static void inode_touch(struct ext4_inode_ref *inode, int modify);
+
 static int volume_claim(struct disk_volume *volume)
 {
 	uk_mutex_lock(&mounted_lock);
-	for (struct disk_volume *current = mounted_volumes; current; current = current->next)
-		if (current->source == volume->source) {
+	struct disk_volume **entry = &mounted_volumes;
+	while (*entry) {
+		struct disk_volume *current = *entry;
+		if (current->source != volume->source) {
+			entry = &current->next;
+			continue;
+		}
+		uk_mutex_lock(&current->lock);
+		if (current->users || current->closing) {
+			uk_mutex_unlock(&current->lock);
 			uk_mutex_unlock(&mounted_lock);
 			return EBUSY;
 		}
+		current->closing = 1;
+		uk_mutex_unlock(&current->lock);
+		int result = volume_finish(current);
+		if (result) {
+			current->closing = 0;
+			uk_mutex_unlock(&mounted_lock);
+			return result;
+		}
+		*entry = current->next;
+		uk_file_release(current->source);
+		free(current);
+		break;
+	}
 	volume->next = mounted_volumes;
 	mounted_volumes = volume;
 	volume->claimed = 1;
@@ -176,12 +204,60 @@ static int node_update_end(struct disk_node *node, struct ext4_inode_ref *ref,
 	uk_mutex_unlock(&node->volume->lock);
 	return result;
 }
+static int node_writeback(struct disk_node *node)
+{
+	struct disk_volume *volume = node->volume;
+	struct ext4_inode_ref inode;
+	int changed = 0, deleting = 0;
+	int result;
+
+	if ((!node->pages.head && node->references) || volume->fs.read_only)
+		return 0;
+	result = transaction_begin(volume);
+	if (!result) {
+		result = ext4_fs_get_inode_ref(&volume->fs, node->inode, &inode);
+		if (!result) {
+			if (!node->references && !ext4_inode_get_links_cnt(inode.inode)) {
+				deleting = 1;
+				result = inode_delete(&inode);
+			}
+			else
+				result = ukext4_pages_writeback(&node->pages, &inode, &changed);
+			if (changed)
+				inode_touch(&inode, 1);
+			result = inode_put(&inode, result);
+		}
+	}
+	result = transaction_end(volume, result);
+	if (result && deleting)
+		volume->error = result;
+	return result;
+}
+static void node_free(struct disk_node *node)
+{
+	ukext4_pages_clear(&node->pages);
+	free(node->link);
+	free(node);
+}
 static int sync_locked(struct disk_volume *volume)
 {
 	int result = volume->error;
 
 	if (result || volume->fs.read_only)
 		return result;
+	struct disk_node **entry = &volume->nodes;
+	while (*entry) {
+		struct disk_node *node = *entry;
+		result = node_writeback(node);
+		if (result)
+			return result;
+		if (node->references)
+			entry = &node->next;
+		else {
+			*entry = node->next;
+			node_free(node);
+		}
+	}
 	if (volume->fs.jbd_journal)
 		jbd_journal_purge_cp_trans(&volume->journal, true, false);
 	result = ext4_block_cache_flush(&volume->device);
@@ -200,9 +276,11 @@ static int volume_sync(struct disk_node *node)
 	uk_mutex_unlock(&node->volume->lock);
 	return -result;
 }
-static void volume_close(struct disk_volume *volume)
+static int volume_finish(struct disk_volume *volume)
 {
 	int result = sync_locked(volume);
+	if (result)
+		return result;
 
 	if (volume->fs.jbd_journal) {
 		int stopped = jbd_journal_stop(&volume->journal);
@@ -214,11 +292,25 @@ static void volume_close(struct disk_volume *volume)
 		result = ext4_fs_fini(&volume->fs);
 	if (!result)
 		result = disk_flush(&volume->device);
-	if (result)
-		uk_pr_err("ext4 volume close: %d\n", result);
+	if (result) {
+		volume->error = result;
+		return result;
+	}
 	ext4_bcache_cleanup(&volume->cache);
 	ext4_bcache_fini_dynamic(&volume->cache);
 	ext4_block_fini(&volume->device);
+	return 0;
+}
+static void volume_close(struct disk_volume *volume)
+{
+	int result = volume_finish(volume);
+	if (result) {
+		uk_pr_err("ext4 volume close: %d\n", result);
+		uk_mutex_lock(&volume->lock);
+		volume->closing = 0;
+		uk_mutex_unlock(&volume->lock);
+		return;
+	}
 	volume_unclaim(volume);
 	uk_file_release(volume->source);
 	free(volume);
@@ -245,38 +337,31 @@ static void node_acquire(struct disk_node *node)
 {
 	uk_mutex_lock(&node->volume->lock);
 	node->references++;
+	node->volume->users++;
 	uk_mutex_unlock(&node->volume->lock);
 }
 static void node_release(struct disk_node *node)
 {
 	struct disk_volume *volume = node->volume;
 	struct disk_node **entry;
-	struct ext4_inode_ref inode;
 	int result;
 
 	uk_mutex_lock(&volume->lock);
+	volume->users--;
 	if (--node->references) {
 		uk_mutex_unlock(&volume->lock);
 		return;
 	}
 	for (entry = &volume->nodes; *entry != node; entry = &(*entry)->next)
 		;
-	*entry = node->next;
-	result = ext4_fs_get_inode_ref(&volume->fs, node->inode, &inode);
+	result = node_writeback(node);
 	if (!result) {
-		if (!ext4_inode_get_links_cnt(inode.inode)) {
-			result = transaction_begin(volume);
-			if (!result)
-				result = inode_delete(&inode);
-		}
-		result = inode_put(&inode, result);
-		result = transaction_end(volume, result);
+		*entry = node->next;
+		node_free(node);
 	}
-	if (result)
-		volume->error = result;
-	free(node->link);
-	free(node);
-	int empty = !volume->nodes;
+	int empty = !volume->users;
+	if (empty)
+		volume->closing = 1;
 	uk_mutex_unlock(&volume->lock);
 	if (empty)
 		volume_close(volume);
@@ -290,6 +375,7 @@ static struct disk_node *node_get(struct disk_volume *volume, uint32_t number)
 	for (node = volume->nodes; node; node = node->next)
 		if (node->inode == number) {
 			node->references++;
+			volume->users++;
 			return node;
 		}
 	result = ext4_fs_get_inode_ref(&volume->fs, number, &inode);
@@ -303,6 +389,7 @@ static struct disk_node *node_get(struct disk_volume *volume, uint32_t number)
 	node->volume = volume;
 	node->inode = number;
 	node->type = ext4_inode_type(&volume->fs.sb, inode.inode);
+	node->size = ext4_inode_get_size(&volume->fs.sb, inode.inode);
 	node->references = 1;
 	node->state = (struct uk_file_state)UK_FILE_STATE_INITIALIZER(node->state);
 	if (node->type == S_IFLNK) {
@@ -336,6 +423,7 @@ out:
 		return ERR2PTR(-result);
 	}
 	uk_file_state_event_set(&node->state, POLLIN | POLLOUT);
+	volume->users++;
 	node->next = volume->nodes;
 	volume->nodes = node;
 	return node;
@@ -480,17 +568,14 @@ static ssize_t node_io(struct disk_node *node, const struct iovec *iov,
 		goto end;
 	for (size_t i = 0; i < count; i++) {
 		size_t done = 0;
-		if (write)
-			result = ukext4_inode_write(&inode, iov[i].iov_base,
-						   iov[i].iov_len, offset, &done);
-		else
-			result = ukext4_inode_read(&inode, iov[i].iov_base,
-						  iov[i].iov_len, offset, &done);
+		result = ukext4_pages_io(&node->pages, &inode, iov[i].iov_base,
+					  iov[i].iov_len, offset, &done, write);
 		total += done;
 		offset += done;
 		if (result || done < iov[i].iov_len)
 			break;
 	}
+	node->size = ext4_inode_get_size(&volume->fs.sb, inode.inode);
 	if (write && total)
 		inode_touch(&inode, 1);
 	result = inode_put(&inode, result);
@@ -511,12 +596,38 @@ static ssize_t node_write(struct disk_node *node, const struct iovec *iov,
 {
 	return node_io(node, iov, count, offset, mount, 1);
 }
-static ssize_t node_mem(struct disk_node *node __unused,
-		enum uk_file_mem_op op __unused, size_t offset __unused,
-		size_t length __unused, struct iovec *iov __unused,
-		size_t count __unused, unsigned long flags __unused)
+static ssize_t node_mem(struct disk_node *node, enum uk_file_mem_op op,
+		size_t offset, size_t length, struct iovec *iov,
+		size_t count, unsigned long flags)
 {
-	return -EOPNOTSUPP;
+	struct disk_volume *volume = node->volume;
+	struct ext4_inode_ref inode;
+	ssize_t result;
+
+	if (node->type != S_IFREG)
+		return -ENODEV;
+	if (op == UKFILE_MEM_RETRIEVE && ((flags & MS_RDONLY) || volume->fs.read_only))
+		return -EROFS;
+	uk_mutex_lock(&volume->lock);
+	if (op == UKFILE_MEM_RELEASE) {
+		ukext4_pages_release(&node->pages, offset, length, node->size);
+		uk_mutex_unlock(&volume->lock);
+		return 0;
+	}
+	result = ext4_fs_get_inode_ref(&volume->fs, node->inode, &inode);
+	if (!result) {
+		result = ukext4_pages_mem(&node->pages, &inode, op, offset, length, iov, count);
+		int released = inode_put(&inode, 0);
+		if (released && result >= 0) {
+			if (op == UKFILE_MEM_ACQUIRE && result)
+				ukext4_pages_release(&node->pages, offset, result, node->size);
+			result = -released;
+		}
+	} else {
+		result = -result;
+	}
+	uk_mutex_unlock(&volume->lock);
+	return result;
 }
 static int node_stat(struct disk_node *node, unsigned int mask __unused,
 		struct uk_statx *stat, unsigned long flags __unused)
@@ -623,8 +734,11 @@ static int node_control(struct disk_node *node, int family, int request,
 	if (result)
 		return -result;
 	result = ukext4_inode_resize(&ref, arg1);
-	if (!result)
+	if (!result) {
+		node->size = arg1;
+		ukext4_pages_zero(&node->pages, arg1);
 		inode_touch(&ref, 1);
+	}
 	return -node_update_end(node, &ref, result);
 }
 static int volume_stat(struct disk_node *node, struct statfs *stat)

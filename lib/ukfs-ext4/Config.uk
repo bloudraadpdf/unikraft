@@ -4,6 +4,8 @@ config LIBUKFS_EXT4
 	select LIBUKALLOC
 	select LIBUKLOCK
 	select LIBUKBLKFILE
+	select LIBUKPOD
+	select LIBUKSPARSEBUF
 	select LIBPOSIX_USER
 	select LIBPOSIX_TIME
 	select LIBNOLIBC if !HAVE_LIBC
