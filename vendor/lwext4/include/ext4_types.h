@@ -583,7 +583,7 @@ struct ext4_dir_entry_tail {
 
 #define EXT4_GOOD_OLD_FIRST_INO 11
 #define EXT_MAX_BLOCKS (ext4_lblk_t) (-1)
-#define IN_RANGE(b, first, len)	((b) >= (first) && (b) <= (first) + (len) - 1)
+#define EXT4_IN_RANGE(b, first, len)	((b) >= (first) && (b) <= (first) + (len) - 1)
 
 
 /******************************************************************************/
