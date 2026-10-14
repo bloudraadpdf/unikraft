@@ -13,5 +13,10 @@
     "revision": "ec55ae17618feeb57c8c10109bcf5c42723e8e95",
     "url": "https://github.com/unikraft/lib-lwip/archive/ec55ae17618feeb57c8c10109bcf5c42723e8e95.tar.gz",
     "sha256": "2814fb576f503f83e743ce41f2b56835e809f7df40ff01ffaef47f743308bb53"
+  },
+  "erofs-utils": {
+    "revision": "5fcb2f76f7b95df87f5c6d3a580e4d756ceaa1c8",
+    "url": "https://github.com/erofs/erofs-utils/archive/5fcb2f76f7b95df87f5c6d3a580e4d756ceaa1c8.tar.gz",
+    "sha256": "98fe9bbeec4d55c258ea3e03a1c784bbd00671ee83a8975573cb540477da91b0"
   }
 }
