@@ -44,7 +44,11 @@ static void __noreturn execve_ctx_switch(long arg0, long arg1)
 	if (stack_old)
 		uk_free(this_thread->_mem.stack_a, stack_old);
 
+#if CONFIG_ARCH_ARM_64
+	pprocess_execenv_load((long)execenv_new);
+#else
 	ukarch_execenv_load((long)execenv_new);
+#endif
 }
 
 UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,

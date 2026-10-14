@@ -5,6 +5,7 @@
  */
 
 #include <uk/syscall.h>
+#include <uk/asm.h>
 
 /*
  * NOTE: We need to replicate this assembly libc wrapper in our
@@ -76,3 +77,8 @@ clone:
 
 	ret
 #endif /* UK_LIBC_SYSCALLS */
+
+ENTRY(pprocess_exit_trampoline)
+	svc	#0
+	brk	#0
+END(pprocess_exit_trampoline)

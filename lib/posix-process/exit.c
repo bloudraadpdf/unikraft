@@ -186,26 +186,28 @@ bool uk_posix_process_exit_requested(void)
 	return thread && pprocess_thread_exit_requested(thread);
 }
 
-static void exit_at_boundary(void)
+void pprocess_enter_application(void)
 {
 	struct posix_thread *thread = uk_pthread_current();
 	if (!thread)
 		return;
 	uk_store_n(&thread->user_started, true);
-	if (pprocess_thread_exit_requested(thread))
+	if (pprocess_thread_exit_requested(thread)) {
+		uk_lcpu_enable_irq();
 		uk_sched_thread_exit();
+	}
 }
 
 static void process_syscall_enter(struct uk_syscall_enter_ctx *ctx)
 {
 	if (ctx->execenv && (ctx->flags & UK_SYSCALL_ENTER_CTX_BINARY_SYSCALL))
-		exit_at_boundary();
+		pprocess_enter_application();
 }
 
 static void process_syscall_exit(struct uk_syscall_exit_ctx *ctx)
 {
 	if (ctx->execenv && (ctx->flags & UK_SYSCALL_EXIT_CTX_BINARY_SYSCALL))
-		exit_at_boundary();
+		pprocess_enter_application();
 }
 
 uk_syscall_entertab_prio(process_syscall_enter, UK_PRIO_EARLIEST);
