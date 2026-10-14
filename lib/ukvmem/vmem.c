@@ -1087,6 +1087,25 @@ static int vmem_advise(struct uk_vas *vas, __vaddr_t vaddr, __sz len,
 	return vmem_vma_advise(vma, vaddr, vend - vaddr, advice);
 }
 
+int uk_vma_populate_page(struct uk_vas *vas, __vaddr_t vaddr)
+{
+	struct uk_vma *vma;
+	unsigned long previous;
+	unsigned int level;
+	int rc = -ENOENT;
+
+	previous = vmem_mutation_begin(vas);
+	vma = vmem_vma_find(vas, vaddr, 0);
+	if (vma) {
+		level = MAX(vma->page_lvl, UK_PAGING_PAGE_LEVEL);
+		rc = vmem_vma_advise(vma,
+			UK_PAGING_PAGE_Lx_ALIGN_DOWN(vaddr, level),
+			UK_PAGING_PAGE_Lx_SIZE(level), UK_VMA_ADV_WILLNEED);
+	}
+	vmem_mutation_end(vas, previous);
+	return rc;
+}
+
 int uk_vma_advise(struct uk_vas *vas, __vaddr_t vaddr, __sz len,
 		  unsigned long advice, unsigned long flags)
 {
@@ -1233,6 +1252,9 @@ static int vmem_pagefault_locked(struct uk_vas *vas, __vaddr_t vaddr,
 			return 0;
 		lvl = UK_PAGING_PAGE_LEVEL;
 	}
+
+	if (ctx.vma->ops->fault_can_block)
+		return (type & UK_VMA_FAULT_NONPRESENT) ? -EAGAIN : -EFAULT;
 
 	/* Find the page level at which we want to page-in. If the VMA does not
 	 * enforce a specific page size and the configuration allows to page-in

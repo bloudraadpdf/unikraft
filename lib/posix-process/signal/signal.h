@@ -214,6 +214,8 @@ struct uk_signal_tdesc {
 	bool restore_mask;
 };
 
+void sys_error_handler(struct ukarch_execenv *execenv, long arg);
+
 /* System error descriptor passed to handler */
 struct sys_error_desc {
 	int signum;

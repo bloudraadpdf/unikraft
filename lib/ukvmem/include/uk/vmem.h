@@ -291,6 +291,7 @@ struct uk_vma_ops {
 	 *   0 on success, a negative errno error otherwise
 	 */
 	int (*fault)(struct uk_vma *vma, struct uk_vm_fault *fault);
+	unsigned int fault_can_block;
 
 	/** Release a prepared page if another CPU supplied the mapping. */
 	void (*fault_discard)(struct uk_vma *vma, struct uk_vm_fault *fault);
@@ -647,6 +648,8 @@ int uk_vma_set_attr(struct uk_vas *vas, __vaddr_t vaddr, __sz len,
 #define UK_VMA_ADV_EXTF_BITS		UK_VMA_ADV_EXTF_SHIFT
 #define UK_VMA_ADV_EXTF_MASK						\
 	((1UL << UK_VMA_ADV_EXTF_BITS) - 1)
+
+int uk_vma_populate_page(struct uk_vas *vas, __vaddr_t vaddr);
 
 /**
  * Gives the virtual memory system advice about the specified address range.

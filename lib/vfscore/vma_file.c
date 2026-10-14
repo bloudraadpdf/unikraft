@@ -253,6 +253,7 @@ const struct uk_vma_ops uk_vma_file_ops = {
 	.new		= vma_op_file_new,
 	.destroy	= vma_op_file_destroy,
 	.fault		= vma_op_file_fault,
+	.fault_can_block = 1,
 	.fault_discard	= uk_vma_op_fault_discard,
 	.unmap		= uk_vma_op_unmap,	/* default */
 	.split		= vma_op_file_split,

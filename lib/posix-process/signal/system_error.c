@@ -12,8 +12,6 @@
 
 #include "signal.h"
 
-void sys_error_handler(struct ukarch_execenv *ee __unused, long arg);
-
 /* Jumps away from exeption context to the actual handler.
  *
  * Notice: isr-safe calls here only
