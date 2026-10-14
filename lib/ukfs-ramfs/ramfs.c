@@ -26,6 +26,7 @@
 #include <uk/fs/driver.h>
 #include <uk/fs/template/live.h>
 #include <uk/init.h>
+#include <uk/mutex.h>
 #include <uk/posix-fd.h>
 #include <uk/posix-time.h>
 #include <uk/spinlock.h>
@@ -60,6 +61,7 @@ void ramfs_obj_free(void *p)
  */
 
 struct ramfs_node;
+static struct uk_mutex namespace_lock = UK_MUTEX_INITIALIZER(namespace_lock);
 
 union ramfs_dentry_target {
 	struct ramfs_node *node;
@@ -409,6 +411,7 @@ void ramfs_node_touch(struct ramfs_node *n, enum ramfs_touch_op op,
 }
 
 static void ramfs_live_release(struct ramfs_node *n);
+static void ramfs_node_release(struct ramfs_node *n, int namespace_locked);
 static void ramfs_node_release_weak(struct ramfs_node *n);
 
 static
@@ -460,7 +463,7 @@ void ramfs_dentry_release_target(struct ramfs_dentry *dp)
 	switch (dp->type) {
 	case RAMFS_DENT_NODE:
 		ramfs_node_unlink(dp->target.node);
-		ramfs_live_release(dp->target.node);
+		ramfs_node_release(dp->target.node, 1);
 		break;
 	case RAMFS_DENT_FILE:
 		uk_file_release(dp->target.file);
@@ -497,16 +500,25 @@ void ramfs_node_free(struct ramfs_node *n)
 }
 
 static
+void ramfs_node_release(struct ramfs_node *n, int namespace_locked)
+{
+	if (uk_refcount_release(&n->refcnt.strong)) {
+		int lock_directory = !namespace_locked &&
+			ramfs_live_nodekind(n, UK_FS_TMPL_DIR);
+
+		if (lock_directory)
+			uk_mutex_lock(&namespace_lock);
+		ramfs_node_free(n);
+		if (lock_directory)
+			uk_mutex_unlock(&namespace_lock);
+	}
+	ramfs_node_release_weak(n);
+}
+
+static
 void ramfs_live_release(struct ramfs_node *n)
 {
-	int r;
-
-	r = uk_swrefcount_release(&n->refcnt);
-	if (r & UK_SWREFCOUNT_LAST_STRONG) {
-		ramfs_node_free(n);
-		if (r & UK_SWREFCOUNT_LAST_REF)
-			ramfs_obj_free(n);
-	}
+	ramfs_node_release(n, 0);
 }
 
 static
@@ -540,6 +552,7 @@ struct ramfs_node *ramfs_live_vopen(union uk_fs_vopen_vol vol __unused,
 	if (unlikely(!rootnode))
 		return ERR2PTR(-ENOMEM);
 	ramfs_init_dir(rootnode, 0777);
+	rootnode->statx.stx_nlink = 1;
 	return rootnode;
 }
 
@@ -1198,7 +1211,7 @@ int ramfs_linkin(struct ramfs_node *n, const char *name, size_t namelen,
 }
 
 static
-struct ramfs_node *ramfs_live_fs_create(struct ramfs_node *n,
+struct ramfs_node *ramfs_live_fs_create_locked(struct ramfs_node *n,
 	const char *name, size_t namelen, unsigned int mode, int flags,
 	union UK_FS_TMPL_LIVE_CREATE_TARGET(ramfs) target,
 	unsigned long mntflags)
@@ -1206,6 +1219,9 @@ struct ramfs_node *ramfs_live_fs_create(struct ramfs_node *n,
 	union ramfs_link newlink;
 	unsigned char dtype;
 	int err;
+
+	if (!n->statx.stx_nlink)
+		return ERR2PTR(-ENOENT);
 
 	/* refuse to operate on "." and ".." */
 	if (unlikely(!(flags & O_TMPFILE) &&
@@ -1244,7 +1260,7 @@ struct ramfs_node *ramfs_live_fs_create(struct ramfs_node *n,
 				   newlink, mode, flags);
 		if (unlikely(err)) {
 			if (dtype == RAMFS_DENT_NODE)
-				ramfs_live_release(newlink.node);
+				ramfs_node_release(newlink.node, 1);
 			return ERR2PTR(err);
 		}
 		ramfs_node_touch(n, RAMFS_TOUCH_MODIFY, mntflags);
@@ -1254,10 +1270,28 @@ struct ramfs_node *ramfs_live_fs_create(struct ramfs_node *n,
 }
 
 static
-int ramfs_live_fs_unlink(struct ramfs_node *n, const char *name, size_t len,
+struct ramfs_node *ramfs_live_fs_create(struct ramfs_node *n,
+	const char *name, size_t namelen, unsigned int mode, int flags,
+	union UK_FS_TMPL_LIVE_CREATE_TARGET(ramfs) target,
+	unsigned long mntflags)
+{
+	struct ramfs_node *result;
+
+	uk_mutex_lock(&namespace_lock);
+	result = ramfs_live_fs_create_locked(n, name, namelen, mode, flags,
+					   target, mntflags);
+	uk_mutex_unlock(&namespace_lock);
+	return result;
+}
+
+static
+int ramfs_live_fs_unlink_locked(struct ramfs_node *n, const char *name, size_t len,
 			 unsigned int flags, unsigned long mntflags)
 {
 	struct ramfs_dentry *dp;
+
+	if (!n->statx.stx_nlink)
+		return -ENOENT;
 
 	/* refuse to operate on '.' and '..' */
 	if (unlikely(uk_fs_path_isdot(name, len) ||
@@ -1283,6 +1317,18 @@ int ramfs_live_fs_unlink(struct ramfs_node *n, const char *name, size_t len,
 	ramfs_obj_free(dp);
 	ramfs_node_touch(n, RAMFS_TOUCH_MODIFY, mntflags);
 	return 0;
+}
+
+static
+int ramfs_live_fs_unlink(struct ramfs_node *n, const char *name, size_t len,
+			 unsigned int flags, unsigned long mntflags)
+{
+	int result;
+
+	uk_mutex_lock(&namespace_lock);
+	result = ramfs_live_fs_unlink_locked(n, name, len, flags, mntflags);
+	uk_mutex_unlock(&namespace_lock);
+	return result;
 }
 
 /* TODO: import these into nolibc */
@@ -1379,7 +1425,7 @@ int ramfs_dentry_newname(struct ramfs_dentry *sd, const char *name, size_t len,
 }
 
 static
-int ramfs_live_fs_rename(struct ramfs_node *n,
+int ramfs_live_fs_rename_locked(struct ramfs_node *n,
 			 const char *name, size_t nlen,
 			 struct ramfs_node *dest,
 			 const char *dname, size_t dlen,
@@ -1389,6 +1435,9 @@ int ramfs_live_fs_rename(struct ramfs_node *n,
 	struct ramfs_dentry *sd;
 	struct ramfs_dentry *dd;
 	int ret = 0;
+
+	if (!n->statx.stx_nlink || !dest->statx.stx_nlink)
+		return -ENOENT;
 
 	if (unlikely(flags & RENAME_WHITEOUT))
 		return -EINVAL;
@@ -1436,6 +1485,21 @@ int ramfs_live_fs_rename(struct ramfs_node *n,
 			ramfs_node_touch(dest, RAMFS_TOUCH_MODIFY, mntflags);
 	}
 	return ret;
+}
+
+static
+int ramfs_live_fs_rename(struct ramfs_node *n,
+	const char *name, size_t nlen, struct ramfs_node *dest,
+	const char *dname, size_t dlen, unsigned int flags,
+	unsigned long mntflags)
+{
+	int result;
+
+	uk_mutex_lock(&namespace_lock);
+	result = ramfs_live_fs_rename_locked(n, name, nlen, dest, dname, dlen,
+					   flags, mntflags);
+	uk_mutex_unlock(&namespace_lock);
+	return result;
 }
 
 /* Sym ops */
