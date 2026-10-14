@@ -64,6 +64,37 @@ static uk_pollevent signal_file_poll(const struct uk_file *f, uk_pollevent mask)
 	return 0;
 }
 
+#if CONFIG_LIBUKFILE_CHAINUPDATE
+bool uk_posix_signal_file_poll_register(const struct uk_file *file,
+		struct uk_posix_signal_file_poll *poll,
+		struct uk_poll_chain *tick, uk_pollevent *events)
+{
+	struct uk_signal_file *sigf;
+	struct posix_process *process;
+
+	if (!FILE_IS_SIGNAL(file))
+		return false;
+	sigf = uk_file_to_signal_file(file);
+	process = uk_pprocess_current();
+	poll->file = file;
+	poll->tick = tick;
+	UK_ASSERT(tick->type == UK_POLL_CHAINTYPE_CALLBACK);
+	uk_mutex_lock(&pprocess_mutex);
+	uk_list_add_tail(&poll->process_link, &process->signal->sigfiles_ctx.polls);
+	uk_list_add_tail(&poll->file_link, &sigf->polls);
+	*events = signal_file_poll(file, tick->mask);
+	uk_mutex_unlock(&pprocess_mutex);
+	return true;
+}
+
+void uk_posix_signal_file_poll_unregister(struct uk_posix_signal_file_poll *poll)
+{
+	uk_mutex_lock(&pprocess_mutex);
+	uk_signal_file_poll_unlink(poll);
+	uk_mutex_unlock(&pprocess_mutex);
+}
+#endif
+
 /* Convert internal siginfo_t to signalfd_siginfo structure */
 static void si_to_ssi(const siginfo_t *si, struct signalfd_siginfo *ssi)
 {
@@ -224,6 +255,9 @@ const struct uk_file *signal_file_create(struct uk_alloc *a,
 	};
 
 	sigf->mask = signal_file_mask(mask);
+#if CONFIG_LIBUKFILE_CHAINUPDATE
+	UK_INIT_LIST_HEAD(&sigf->polls);
+#endif
 	pproc = uk_pprocess_current();
 	uk_mutex_lock(&pprocess_mutex);
 	uk_signal_files_ctx_add(&pproc->signal->sigfiles_ctx, sigf);
@@ -272,6 +306,12 @@ static int signalfd_set_mask(int fd, const uk_sigset_t *new_mask)
 	uk_mutex_lock(&pprocess_mutex);
 	uk_store_n(&sigf->mask, signal_file_mask(new_mask));
 	uk_file_event_set(&sigf->f, UKFD_POLLIN);
+#if CONFIG_LIBUKFILE_CHAINUPDATE
+	struct uk_posix_signal_file_poll *poll;
+
+	uk_list_for_each_entry(poll, &sigf->polls, file_link)
+		uk_signal_file_poll_notify(poll);
+#endif
 	uk_mutex_unlock(&pprocess_mutex);
 	uk_ofile_release(of);
 	return fd;

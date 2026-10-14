@@ -23,6 +23,9 @@
 #include <uk/syscall.h>
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 #include <uk/posix-signal-wait.h>
+#if CONFIG_LIBPOSIX_PROCESS_SIGNALFD
+#include <uk/posix-signal-file.h>
+#endif
 #endif
 
 #if CONFIG_LIBVFSCORE
@@ -68,6 +71,10 @@ struct epoll_entry {
 	union {
 		struct {
 			struct uk_poll_chain tick;
+#if CONFIG_LIBPOSIX_PROCESS_SIGNALFD
+			bool signal_file;
+			struct uk_posix_signal_file_poll signal_poll;
+#endif
 			uk_pollevent revents;
 			struct uk_file_finalize_cb fin;
 		};
@@ -92,6 +99,17 @@ union epoll_shim_file {
 	struct vfscore_file *vfile;
 };
 
+static void epoll_unregister_poll(struct epoll_entry *ent)
+{
+#if CONFIG_LIBPOSIX_PROCESS_SIGNALFD
+	if (ent->signal_file) {
+		uk_posix_signal_file_poll_unregister(&ent->signal_poll);
+		return;
+	}
+#endif
+	uk_pollq_unregister(&ent->f->state->pollq, &ent->tick);
+}
+
 static void epoll_unregister_entry(struct epoll_entry *ent)
 {
 #if CONFIG_LIBVFSCORE
@@ -103,7 +121,7 @@ static void epoll_unregister_entry(struct epoll_entry *ent)
 #endif /* CONFIG_LIBVFSCORE */
 	{
 		uk_file_finalizer_unregister(ent->f, &ent->fin);
-		uk_pollq_unregister(&ent->f->state->pollq, &ent->tick);
+		epoll_unregister_poll(ent);
 		uk_file_release_weak(ent->f);
 	}
 }
@@ -255,8 +273,13 @@ static void epoll_register(const struct uk_file *epf, struct epoll_entry *ent,
 	UK_ASSERT(!ent->legacy);
 #endif /* CONFIG_LIBVFSCORE */
 
-	ev = uk_pollq_poll_register(&ent->f->state->pollq, &ent->tick, 1,
-				    ent->f);
+#if CONFIG_LIBPOSIX_PROCESS_SIGNALFD
+	ent->signal_file = uk_posix_signal_file_poll_register(ent->f,
+				&ent->signal_poll, &ent->tick, &ev);
+	if (!ent->signal_file)
+#endif
+		ev = uk_pollq_poll_register(&ent->f->state->pollq, &ent->tick, 1,
+					    ent->f);
 	if (register_finalizer)
 		uk_file_finalizer_register(ent->f, &ent->fin);
 	if (ev) {
@@ -356,7 +379,7 @@ static void epoll_entry_mod(const struct uk_file *epf, struct epoll_entry *ent,
 	UK_ASSERT(!ent->legacy);
 #endif /* CONFIG_LIBVFSCORE */
 
-	uk_pollq_unregister(&ent->f->state->pollq, &ent->tick);
+	epoll_unregister_poll(ent);
 	ent->event = *event;
 	ent->tick.mask = events2mask(event->events);
 	ent->revents = 0;
@@ -633,7 +656,15 @@ int uk_sys_epoll_pwait2(const struct uk_file *epf, struct epoll_event *events,
 
 			revents = uk_exchange_n(revp, 0);
 			if (revents) {
-				if (!IS_EDGEPOLL(p)) {
+				if (!IS_EDGEPOLL(p)
+#if CONFIG_LIBPOSIX_PROCESS_SIGNALFD
+#if CONFIG_LIBVFSCORE
+				    || (!p->legacy && p->signal_file)
+#else
+				    || p->signal_file
+#endif
+#endif
+				) {
 					unsigned int mask;
 
 					mask = events2mask(p->event.events);
@@ -650,8 +681,10 @@ int uk_sys_epoll_pwait2(const struct uk_file *epf, struct epoll_event *events,
 					if (!revents)
 						continue;
 
-					lvlev = 1;
-					(void)uk_or(revp, revents);
+					if (!IS_EDGEPOLL(p)) {
+						lvlev = 1;
+						(void)uk_or(revp, revents);
+					}
 				}
 
 				events[nout].events = revents;

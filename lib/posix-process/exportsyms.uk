@@ -62,3 +62,5 @@ sched_getaffinity
 uk_posix_signal_wait_init
 uk_posix_signal_wait_check
 uk_posix_signal_wait_end
+uk_posix_signal_file_poll_register
+uk_posix_signal_file_poll_unregister
