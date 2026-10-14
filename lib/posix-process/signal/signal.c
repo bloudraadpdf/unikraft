@@ -6,7 +6,9 @@
 
 #include <uk/process.h>
 #include <uk/refcount.h>
+#include <string.h>
 #include <uk/plat/time.h>
+#include <uk/posix-signal-wait.h>
 
 #include "process.h"
 #include "sigset.h"
@@ -21,6 +23,18 @@
  * deliver to every process.
  */
 #define signal_check_perm(_target_process) true
+
+static void signal_wake_waiter(struct posix_thread *thread)
+{
+	struct uk_posix_signal_wait *wait = thread->signal->poll_wait;
+
+	if (wait) {
+		uk_store_n(&wait->interrupted, 1);
+		uk_waitq_wake_up(wait->queue);
+	} else {
+		uk_waitq_wake_up(&thread->signal->waitq);
+	}
+}
 
 /* Enqueue signal for a thread or a process
  *
@@ -51,11 +65,11 @@ static int pprocess_signal_enqueue(struct posix_process *pproc,
 	if (!rc) {
 		if (pthread) {
 			if (pthread->state == POSIX_THREAD_BLOCKED_SIGNAL)
-				uk_waitq_wake_up(&pthread->signal->waitq);
+				signal_wake_waiter(pthread);
 		} else {
 			uk_pprocess_foreach_pthread(pproc, thread, next)
 				if (thread->state == POSIX_THREAD_BLOCKED_SIGNAL)
-					uk_waitq_wake_up(&thread->signal->waitq);
+					signal_wake_waiter(thread);
 		}
 	}
 	uk_mutex_unlock(&pprocess_mutex);
@@ -135,6 +149,75 @@ static int signal_take_locked(struct posix_thread *thread,
 		}
 	}
 	return 0;
+}
+
+int uk_posix_signal_wait_init(struct uk_posix_signal_wait *wait,
+			      struct uk_waitq *queue,
+			      const sigset_t *mask, size_t size)
+{
+	struct posix_thread *thread = uk_pthread_current();
+	struct uk_signal_tdesc *td;
+
+	if (mask && size != sizeof(uk_sigset_t))
+		return -EINVAL;
+	*wait = (struct uk_posix_signal_wait){
+		.thread = thread, .queue = queue, .masked = mask != NULL
+	};
+	if (!thread)
+		return mask ? -ENOSYS : 0;
+	td = thread->signal;
+	uk_mutex_lock(&pprocess_mutex);
+	UK_ASSERT(!td->poll_wait);
+	if (mask) {
+		wait->saved_mask = td->mask;
+		memcpy(&td->mask, mask, sizeof(td->mask));
+		uk_sigdelset(&td->mask, SIGKILL);
+		uk_sigdelset(&td->mask, SIGSTOP);
+	}
+	td->poll_wait = wait;
+	thread->state = POSIX_THREAD_BLOCKED_SIGNAL;
+	uk_mutex_unlock(&pprocess_mutex);
+	return 0;
+}
+
+int uk_posix_signal_wait_check(struct uk_posix_signal_wait *wait)
+{
+	struct uk_signal_tdesc *td;
+	int rc = 0;
+
+	if (!wait->thread)
+		return 0;
+	td = wait->thread->signal;
+	uk_mutex_lock(&pprocess_mutex);
+	uk_store_n(&wait->interrupted, 0);
+	if (signal_take_locked(wait->thread, NULL, &td->wait_info)) {
+		td->wait_pending = true;
+		rc = -EINTR;
+	}
+	uk_mutex_unlock(&pprocess_mutex);
+	return rc;
+}
+
+void uk_posix_signal_wait_end(struct uk_posix_signal_wait *wait, int result)
+{
+	struct uk_signal_tdesc *td;
+
+	if (!wait->thread)
+		return;
+	td = wait->thread->signal;
+	uk_mutex_lock(&pprocess_mutex);
+	UK_ASSERT(td->poll_wait == wait);
+	td->poll_wait = NULL;
+	if (wait->masked) {
+		if (result == -EINTR) {
+			td->saved_mask = wait->saved_mask;
+			td->restore_mask = true;
+		} else {
+			td->mask = wait->saved_mask;
+		}
+	}
+	wait->thread->state = POSIX_THREAD_RUNNING;
+	uk_mutex_unlock(&pprocess_mutex);
 }
 
 int pprocess_signal_wait_locked(struct posix_thread *thread,
@@ -441,6 +524,7 @@ int pprocess_signal_tdesc_init(struct posix_thread *thread)
 	td->wait_pending = false;
 	td->restore_mask = false;
 	td->saved_mask = 0;
+	td->poll_wait = NULL;
 	uk_sigemptyset(&td->mask);
 	uk_sigemptyset(&td->sigqueue.pending);
 

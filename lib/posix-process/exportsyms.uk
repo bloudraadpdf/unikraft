@@ -59,3 +59,6 @@ signalfd
 uk_posix_process_create_pthread
 uk_posix_process_run
 sched_getaffinity
+uk_posix_signal_wait_init
+uk_posix_signal_wait_check
+uk_posix_signal_wait_end

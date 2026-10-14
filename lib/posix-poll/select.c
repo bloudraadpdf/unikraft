@@ -54,10 +54,8 @@ int uk_sys_pselect(int nfds, fd_set *restrict readfds,
 		uk_pr_warn("STUB: select fd_set too small (req %d)\n", nfds);
 		return -EINVAL;
 	}
-	if (unlikely(sigset && sigset->ss)) {
-		uk_pr_warn_once("STUB: pselect no sigmask support\n");
-		return -ENOSYS;
-	}
+	if (sigset && sigset->ss && sigset->ss_len != sizeof(unsigned long))
+		return -EINVAL;
 
 	ef = uk_epollfile_create();
 	if (unlikely(!ef))

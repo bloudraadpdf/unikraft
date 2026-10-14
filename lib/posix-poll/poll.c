@@ -42,14 +42,12 @@ int uk_sys_ppoll(struct pollfd *fds, nfds_t nfds,
 	int ret;
 	int monitored;
 
-	if (unlikely(!fds))
+	if (unlikely(nfds && !fds))
 		return -EFAULT;
 	if (timeout && uk_time_spec_to_nsec(timeout) < 0)
 		return -EINVAL;
-	if (unlikely(sigmask)) {
-		uk_pr_warn_once("STUB: ppoll no sigmask support\n");
-		return -ENOSYS;
-	}
+	if (sigmask && sigsetsize != sizeof(unsigned long))
+		return -EINVAL;
 
 	ef = uk_epollfile_create();
 	if (unlikely(!ef))

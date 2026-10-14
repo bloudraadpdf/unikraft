@@ -20,6 +20,9 @@
 #include <uk/posix-poll.h>
 #include <uk/timeutil.h>
 #include <uk/syscall.h>
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+#include <uk/posix-signal-wait.h>
+#endif
 
 #if CONFIG_LIBVFSCORE
 #include <vfscore/file.h>
@@ -554,12 +557,43 @@ int uk_sys_epoll_ctl(const struct uk_file *epf, int op, int fd,
 	return ret;
 }
 
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+static int epoll_wait_events(const struct uk_file *file, __nsec deadline,
+			    struct uk_posix_signal_wait *wait)
+{
+	struct uk_pollq *q = &file->state->pollq;
+	int rc;
+
+	for (;;) {
+		if (uk_file_poll_immediate(file, UKFD_POLLIN))
+			return 1;
+		rc = uk_posix_signal_wait_check(wait);
+		if (rc)
+			return rc;
+		if (deadline && ukplat_monotonic_clock() >= deadline)
+			return 0;
+		uk_rwlock_rlock(&q->waitlock);
+		(void)uk_or(&q->waitmask, UKFD_POLLIN);
+		uk_waitq_set_cookie(UKFD_POLLIN);
+		uk_waitq_wait_event_deadline_locked(&q->waitq,
+			(uk_load_n(&q->events) & UKFD_POLLIN) ||
+			uk_load_n(&wait->interrupted), deadline,
+			uk_rwlock_rlock, uk_rwlock_runlock, &q->waitlock);
+		uk_rwlock_runlock(&q->waitlock);
+	}
+}
+#endif
+
 int uk_sys_epoll_pwait2(const struct uk_file *epf, struct epoll_event *events,
 			int maxevents, const struct timespec *timeout,
-			const sigset_t *sigmask, size_t sigsetsize __unused)
+			const sigset_t *sigmask, size_t sigsetsize __maybe_unused)
 {
 	struct epoll_entry **list;
 	__nsec deadline;
+	int ret;
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+	struct uk_posix_signal_wait wait;
+#endif
 
 	if (unlikely(epf->vol != EPOLL_VOLID))
 		return -EINVAL;
@@ -567,10 +601,10 @@ int uk_sys_epoll_pwait2(const struct uk_file *epf, struct epoll_event *events,
 		return -EFAULT;
 	if (unlikely(maxevents <= 0))
 		return -EINVAL;
-	if (unlikely(sigmask)) {
-		uk_pr_warn_once("STUB: epoll_pwait no sigmask support\n");
+#if !CONFIG_LIBPOSIX_PROCESS_SIGNAL
+	if (unlikely(sigmask))
 		return -ENOSYS;
-	}
+#endif
 
 	list = (struct epoll_entry **)epf->node;
 
@@ -584,13 +618,27 @@ int uk_sys_epoll_pwait2(const struct uk_file *epf, struct epoll_event *events,
 		deadline = 0;
 	}
 
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+	ret = uk_posix_signal_wait_init(&wait, &epf->state->pollq.waitq,
+					sigmask, sigsetsize);
+	if (ret)
+		return ret;
+#endif
 #if CONFIG_LIBPOSIX_POLL_YIELD
 	uk_sched_yield();
 #endif /* CONFIG_LIBPOSIX_POLL_YIELD */
 
-	while (uk_file_poll_until(epf, UKFD_POLLIN, deadline)) {
+	for (;;) {
 		int lvlev = 0;
 		int nout = 0;
+
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+		ret = epoll_wait_events(epf, deadline, &wait);
+#else
+		ret = !!uk_file_poll_until(epf, UKFD_POLLIN, deadline);
+#endif
+		if (ret <= 0)
+			break;
 
 		uk_file_event_clear(epf, UKFD_POLLIN);
 		uk_file_rlock(epf);
@@ -643,12 +691,15 @@ int uk_sys_epoll_pwait2(const struct uk_file *epf, struct epoll_event *events,
 		if (lvlev || nout == maxevents)
 			uk_file_event_set(epf, UKFD_POLLIN);
 
-		if (nout)
-			return nout;
-		/* If nout == 0 loop back around */
+		if (nout) {
+			ret = nout;
+			break;
+		}
 	}
-	/* Timeout */
-	return 0;
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+	uk_posix_signal_wait_end(&wait, ret);
+#endif
+	return ret;
 }
 
 /* Userspace Syscalls */

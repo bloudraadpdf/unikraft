@@ -203,6 +203,7 @@ struct uk_signal_tdesc {
 	uk_sigset_t mask;
 	struct uk_signal_queue sigqueue;
 	struct uk_waitq waitq;
+	struct uk_posix_signal_wait *poll_wait;
 	siginfo_t wait_info;
 	uk_sigset_t saved_mask;
 	bool wait_pending;
