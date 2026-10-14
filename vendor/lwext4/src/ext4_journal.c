@@ -813,7 +813,7 @@ jbd_iterate_block_table(struct jbd_fs *jbd_fs,
 			void *__tag_start,
 			int32_t tag_tbl_size,
 			void (*func)(struct jbd_fs * jbd_fs,
-				     struct tag_info *tag_info,
+				     struct tag_info *tag_info __unused,
 				     void *arg),
 			void *arg)
 {
@@ -852,7 +852,7 @@ jbd_iterate_block_table(struct jbd_fs *jbd_fs,
 }
 
 static void jbd_display_block_tags(struct jbd_fs *jbd_fs,
-				   struct tag_info *tag_info,
+				   struct tag_info *tag_info __unused,
 				   void *arg)
 {
 	uint32_t *iblock = arg;
@@ -877,7 +877,7 @@ jbd_revoke_entry_lookup(struct recover_info *info, ext4_fsblk_t block)
  * @param  jbd_fs jbd filesystem
  * @param  tag_info tag_info of the logged block.*/
 static void jbd_replay_block_tags(struct jbd_fs *jbd_fs,
-				  struct tag_info *tag_info,
+				  struct tag_info *tag_info __unused,
 				  void *__arg)
 {
 	int r;
