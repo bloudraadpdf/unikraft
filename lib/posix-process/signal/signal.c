@@ -125,7 +125,7 @@ struct uk_signal *pprocess_signal_dequeue(struct posix_process *pproc,
 	return sig;
 }
 
-static int signal_take_locked(struct posix_thread *thread,
+int pprocess_signal_take_locked(struct posix_thread *thread,
 			      const uk_sigset_t *set, siginfo_t *info)
 {
 	struct posix_process *proc = thread->process;
@@ -190,7 +190,7 @@ int uk_posix_signal_wait_check(struct uk_posix_signal_wait *wait)
 	td = wait->thread->signal;
 	uk_mutex_lock(&pprocess_mutex);
 	uk_store_n(&wait->interrupted, 0);
-	if (signal_take_locked(wait->thread, NULL, &td->wait_info)) {
+	if (pprocess_signal_take_locked(wait->thread, NULL, &td->wait_info)) {
 		td->wait_pending = true;
 		rc = -EINTR;
 	}
@@ -229,9 +229,9 @@ int pprocess_signal_wait_locked(struct posix_thread *thread,
 
 	UK_ASSERT(!td->wait_pending);
 	for (;;) {
-		if (set && (rc = signal_take_locked(thread, set, info)))
+		if (set && (rc = pprocess_signal_take_locked(thread, set, info)))
 			break;
-		if (signal_take_locked(thread, NULL, &td->wait_info)) {
+		if (pprocess_signal_take_locked(thread, NULL, &td->wait_info)) {
 			td->wait_pending = true;
 			rc = -EINTR;
 			break;
@@ -548,6 +548,11 @@ void pprocess_signal_pdesc_free(struct posix_process *process)
 		while ((sig = pprocess_signal_dequeue(process, NULL, signum)))
 			uk_signal_free(process->_a, sig);
 
+#if CONFIG_LIBPOSIX_PROCESS_SIGNALFD
+	uk_mutex_lock(&pprocess_mutex);
+	uk_signal_files_ctx_clear(&process->signal->sigfiles_ctx);
+	uk_mutex_unlock(&pprocess_mutex);
+#endif
 	pprocess_signal_sigaction_release(process->signal->sigaction);
 
 	uk_free(process->_a, process->signal);

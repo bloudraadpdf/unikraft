@@ -45,6 +45,7 @@ static uk_pollevent signal_file_poll(const struct uk_file *f, uk_pollevent mask)
 	struct posix_thread *pthread;
 	struct posix_process *pproc;
 	__sz sn;
+	uk_sigset_t signals;
 
 	if (unlikely(!(mask & UKFD_POLLIN)))
 		return 0;
@@ -52,9 +53,10 @@ static uk_pollevent signal_file_poll(const struct uk_file *f, uk_pollevent mask)
 	sigf = uk_file_to_signal_file(f);
 	pthread = uk_pthread_current();
 	pproc = uk_pprocess_current();
+	signals = uk_load_n(&sigf->mask);
 
 	pprocess_signal_foreach(sn)
-		if (uk_sigismember(&sigf->mask, sn) &&
+		if (uk_sigismember(&signals, sn) &&
 		    (IS_PENDING(pthread->signal->sigqueue, sn) ||
 		     IS_PENDING(pproc->signal->sigqueue, sn)))
 			return UKFD_POLLIN;
@@ -119,11 +121,11 @@ static ssize_t signal_file_read(const struct uk_file *f,
 {
 	size_t iovlen_total, iovlen_wr, iovi, cur;
 	struct posix_thread *pthread;
-	struct posix_process *pproc;
 	struct uk_signal_file *sigf;
 	struct signalfd_siginfo ssi;
-	struct uk_signal *sig;
-	__sz sn;
+	siginfo_t info;
+	uk_sigset_t mask;
+	int signum;
 
 	if (unlikely(off))
 		return -EINVAL;
@@ -141,40 +143,21 @@ static ssize_t signal_file_read(const struct uk_file *f,
 	sigf = uk_file_to_signal_file(f);
 
 	pthread = uk_pthread_current();
-	pproc = uk_pprocess_current();
+	mask = uk_load_n(&sigf->mask);
 
 	iovlen_wr = 0;
 	iovi = 0;
 	cur = 0;
-	pprocess_signal_foreach(sn) {
-		if (!uk_sigismember(&sigf->mask, sn))
-			continue;
-
-		/*
-		 * Proceed like Linux and always prioritize dequeueing
-		 * signal from the specific target thread and only fallback
-		 * to dequeueing from the containing process if it also happens
-		 * to have this signal queued.
-		 */
-		if (IS_PENDING(pthread->signal->sigqueue, sn))
-			sig = pprocess_signal_dequeue(pproc, pthread, sn);
-		else if (IS_PENDING(pproc->signal->sigqueue, sn))
-			sig = pprocess_signal_dequeue(pproc, NULL, sn);
-		else
-			continue;
-
-		if (!sig)
-			continue;
-
-		si_to_ssi(&sig->siginfo, &ssi);
-		uk_signal_free(pthread->_a, sig);
+	while (iovlen_total - iovlen_wr >= sizeof(ssi)) {
+		uk_mutex_lock(&pprocess_mutex);
+		signum = pprocess_signal_take_locked(pthread, &mask, &info);
+		uk_mutex_unlock(&pprocess_mutex);
+		if (!signum)
+			break;
+		si_to_ssi(&info, &ssi);
 		iovlen_wr += uk_iov_scatter(iov, iovcnt,
 					    (const char *)&ssi, sizeof(ssi),
 					    &iovi, &cur);
-
-		/* Have we reached the end? */
-		if (iovlen_total - iovlen_wr < sizeof(ssi))
-			break;
 	}
 
 	/* No pending signals were queued - try again */
@@ -195,17 +178,25 @@ static const struct uk_file_ops signal_file_ops = {
 
 static void signal_file_release(const struct uk_file *f, int what)
 {
-	struct posix_process *pproc;
 	struct uk_signal_file *sigf;
-
-	pproc = uk_pprocess_current();
 
 	if (what & UK_FILE_RELEASE_OBJ) {
 		/* Free */
 		sigf = uk_file_to_signal_file(f);
-		pprocess_signal_file_del(pproc, sigf);
+		uk_mutex_lock(&pprocess_mutex);
+		uk_list_del_init(&sigf->sigf_head);
+		uk_mutex_unlock(&pprocess_mutex);
 		uk_free(sigf->a, sigf);
 	}
+}
+
+static uk_sigset_t signal_file_mask(const uk_sigset_t *mask)
+{
+	uk_sigset_t value = *mask;
+
+	uk_sigdelset(&value, SIGKILL);
+	uk_sigdelset(&value, SIGSTOP);
+	return value;
 }
 
 const struct uk_file *signal_file_create(struct uk_alloc *a,
@@ -232,17 +223,11 @@ const struct uk_file *signal_file_create(struct uk_alloc *a,
 		._release = signal_file_release,
 	};
 
-	/*
-	 * It is not possible to receive SIGKILL or SIGSTOP signals via a
-	 * signal file descriptor; these signals are silently ignored if
-	 * specified in mask.
-	 */
-	uk_sigcopyset(&sigf->mask, mask);
-	uk_sigdelset(&sigf->mask, SIGKILL);
-	uk_sigdelset(&sigf->mask, SIGSTOP);
-
+	sigf->mask = signal_file_mask(mask);
 	pproc = uk_pprocess_current();
-	pprocess_signal_file_add(pproc, sigf);
+	uk_mutex_lock(&pprocess_mutex);
+	uk_signal_files_ctx_add(&pproc->signal->sigfiles_ctx, sigf);
+	uk_mutex_unlock(&pprocess_mutex);
 
 	return &sigf->f;
 }
@@ -273,38 +258,30 @@ static int signalfd_create(const uk_sigset_t *mask, int flags)
 static int signalfd_set_mask(int fd, const uk_sigset_t *new_mask)
 {
 	struct uk_signal_file *sigf;
-	struct posix_process *pproc;
 	struct uk_ofile *of;
-
-	pproc = uk_pprocess_current();
-	UK_ASSERT(pproc);
 
 	of = uk_fdtab_get(fd);
 	if (unlikely(!of))
 		return -EBADF;
 
+	if (!FILE_IS_SIGNAL(of->file)) {
+		uk_ofile_release(of);
+		return -EINVAL;
+	}
 	sigf = uk_file_to_signal_file(of->file);
-
-	/*
-	 * It is not possible to receive SIGKILL or SIGSTOP signals via a
-	 * signal file descriptor; these signals are silently ignored if
-	 * specified in mask.
-	 */
-	uk_sigcopyset(&sigf->mask, new_mask);
-	uk_sigdelset(&sigf->mask, SIGKILL);
-	uk_sigdelset(&sigf->mask, SIGSTOP);
-
-	/* Make sure we don't miss any newly added signals */
-	uk_sigorset(&pproc->signal->sigfiles_ctx.allmask, &sigf->mask);
-
+	uk_mutex_lock(&pprocess_mutex);
+	uk_store_n(&sigf->mask, signal_file_mask(new_mask));
+	uk_file_event_set(&sigf->f, UKFD_POLLIN);
+	uk_mutex_unlock(&pprocess_mutex);
 	uk_ofile_release(of);
-
-	return 0;
+	return fd;
 }
 
 static inline int uk_sys_signalfd(int fd, const uk_sigset_t *mask,
 				  size_t masksz, int flags)
 {
+	if (unlikely(flags & ~(SFD_NONBLOCK | SFD_CLOEXEC)))
+		return -EINVAL;
 	if (unlikely(masksz != sizeof(uk_sigset_t)))
 		return -EINVAL;
 

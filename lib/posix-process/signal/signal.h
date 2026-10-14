@@ -14,6 +14,7 @@
 
 #include <arch/signal.h>
 #include <uk/alloc.h>
+#include <uk/atomic.h>
 #include <uk/list.h>
 #include <uk/process.h>
 #include <uk/refcount.h>
@@ -45,15 +46,15 @@
 
 /* Check whether signal number is pending in sigqueue */
 #define IS_PENDING(_sigqueue, _signum)					\
-	uk_sigismember(&(_sigqueue).pending, (_signum))
+	!!(uk_load_n(&(_sigqueue).pending) & UK_BIT((_signum) - 1))
 
 /* Set signal number in sigqueue */
 #define SET_PENDING(_sigqueue, _signum)					\
-	uk_sigaddset(&(_sigqueue).pending, (_signum))
+	(void)uk_or(&(_sigqueue).pending, UK_BIT((_signum) - 1))
 
 /* Clear a signal from a sigqueue */
 #define RESET_PENDING(_sigqueue, _signum)				\
-	uk_sigdelset(&(_sigqueue).pending, (_signum))
+	(void)uk_and(&(_sigqueue).pending, ~UK_BIT((_signum) - 1))
 
 /* Check if posix thread masks signal number */
 #define IS_MASKED(_t, _signum)						\
@@ -279,6 +280,10 @@ void pprocess_signal_sigaction_clear(struct kern_sigaction *ks);
  */
 void pprocess_signal_clear_pending(struct posix_process *proc, int signum);
 
+/* Caller holds pprocess_mutex. */
+int pprocess_signal_take_locked(struct posix_thread *thread,
+			        const uk_sigset_t *set, siginfo_t *info);
+
 /* Caller holds pprocess_mutex once; the wait releases it while blocked. */
 int pprocess_signal_wait_locked(struct posix_thread *thread,
 			       const uk_sigset_t *set, siginfo_t *info,
@@ -328,22 +333,6 @@ void pprocess_signal_arch_get_ucontext(ucontext_t *ucontext,
 bool pprocess_signal_is_deliverable(struct posix_thread *pthread, int signum);
 
 #if CONFIG_LIBPOSIX_PROCESS_SIGNALFD
-/* Add a signal file to a process in order to track it */
-static inline
-void pprocess_signal_file_add(struct posix_process *pproc,
-			      struct uk_signal_file *sigf)
-{
-	uk_signal_files_ctx_add(&pproc->signal->sigfiles_ctx, sigf);
-}
-
-/* Remove a signal file from a process */
-static inline
-void pprocess_signal_file_del(struct posix_process *pproc,
-			      struct uk_signal_file *sigf)
-{
-	uk_signal_files_ctx_del(&pproc->signal->sigfiles_ctx, sigf);
-}
-
 /* Notify the signal files of a process */
 static inline
 void pprocess_signal_files_notify(struct posix_process *pproc, int signum)
