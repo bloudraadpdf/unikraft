@@ -273,11 +273,9 @@ int ext4_bcache_free(struct ext4_bcache *bc, struct ext4_block *b)
 
 	ext4_assert(bc && b);
 
-	/*Check if valid.*/
-	ext4_assert(b->lb_id);
-
 	/*Block should have a valid pointer to ext4_buf.*/
 	ext4_assert(buf);
+	ext4_assert(b->lb_id == buf->lba);
 
 	/*Check if someone don't try free unreferenced block cache.*/
 	ext4_assert(buf->refctr);

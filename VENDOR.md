@@ -46,8 +46,10 @@ The migrated source compiles on the ARM64 appliance with the full Tokoloshe
 configuration. A two-vCPU SQLite probe captures an open read transaction,
 then restores two VMs. Each accepts a new vsock connection and commits its
 own marker. Both disks pass `e2fsck` and SQLite integrity checks; the captured
-source disk stays unchanged. Managed shim checks and interrupted-write
-recovery remain unfinished.
+source disk stays unchanged. Native interrupted-write checks pass on 1 KiB
+and 4 KiB images through both the port and Linux recovery. They cover a
+committed allocation and an aborted transaction, with filesystem checks
+after replay. Managed shim checks remain unfinished.
 
 ARM64 and AMD64 metadata layouts, snapshot discovery and entropy setup are
 selected by architecture. AMD64 has not yet been built from the combined

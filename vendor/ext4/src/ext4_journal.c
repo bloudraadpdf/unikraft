@@ -86,6 +86,7 @@ struct recover_info {
 
 /**@brief  Journal replay internal arguments.*/
 struct replay_arg {
+	int error;
 	/**@brief  Journal replay information.*/
 	struct recover_info *info;
 
@@ -300,7 +301,7 @@ static void jbd_commit_csum_set(struct jbd_fs *jbd_fs,
 
 	header->chksum_type = 0;
 	header->chksum_size = 0;
-	header->chksum[0] = jbd_commit_csum(jbd_fs, header);
+	header->chksum[0] = to_be32(jbd_commit_csum(jbd_fs, header));
 }
 
 #if CONFIG_META_CSUM_ENABLE
@@ -334,12 +335,13 @@ static uint32_t jbd_block_csum(struct jbd_fs *jbd_fs, const void *buf,
 		checksum = ext4_crc32c(EXT4_CRC32_INIT, jbd_fs->sb.uuid,
 				       sizeof(jbd_fs->sb.uuid));
 		/* Then calculate crc32c checksum against sequence no. */
+		sequence = to_be32(sequence);
 		checksum = ext4_crc32c(checksum, &sequence,
 				sizeof(uint32_t));
 		/* Calculate crc32c checksum against tho whole block */
 		checksum = ext4_crc32c(checksum, buf,
 				block_size);
-	} else if (JBD_HAS_INCOMPAT_FEATURE(&jbd_fs->sb,
+	} else if (JBD_HAS_COMPAT_FEATURE(&jbd_fs->sb,
 				     JBD_FEATURE_COMPAT_CHECKSUM)) {
 		uint32_t block_size = jbd_get32(&jbd_fs->sb, blocksize);
 		/* Calculate crc32c checksum against tho whole block */
@@ -361,7 +363,7 @@ static void jbd_block_tag_csum_set(struct jbd_fs *jbd_fs, void *__tag,
 
 	if (ver == 2) {
 		struct jbd_block_tag *tag = __tag;
-		tag->checksum = (uint16_t)to_be32(checksum);
+		tag->checksum = to_be16((uint16_t)checksum);
 	} else {
 		struct jbd_block_tag3 *tag = __tag;
 		tag->checksum = to_be32(checksum);
@@ -887,6 +889,10 @@ static void jbd_replay_block_tags(struct jbd_fs *jbd_fs,
 	struct revoke_entry *revoke_entry;
 	struct ext4_block journal_block, ext4_block;
 	struct ext4_fs *fs = jbd_fs->inode_ref.fs;
+	uint32_t block_size = jbd_get32(&jbd_fs->sb, blocksize);
+
+	if (arg->error != EOK)
+		return;
 
 	(*this_block)++;
 	wrap(&jbd_fs->sb, *this_block);
@@ -903,13 +909,16 @@ static void jbd_replay_block_tags(struct jbd_fs *jbd_fs,
 		 tag_info->block);
 
 	r = jbd_block_get(jbd_fs, &journal_block, *this_block);
-	if (r != EOK)
+	if (r != EOK) {
+		arg->error = r;
 		return;
+	}
 
 	/* We need special treatment for ext4 superblock. */
-	if (tag_info->block) {
+	if (tag_info->block != EXT4_SUPERBLOCK_OFFSET / block_size) {
 		r = ext4_block_get_noread(fs->bdev, &ext4_block, tag_info->block);
 		if (r != EOK) {
+			arg->error = r;
 			jbd_block_set(jbd_fs, &journal_block);
 			return;
 		}
@@ -923,27 +932,29 @@ static void jbd_replay_block_tags(struct jbd_fs *jbd_fs,
 					to_be32(JBD_MAGIC_NUMBER);
 
 		ext4_bcache_set_dirty(ext4_block.buf);
-		ext4_block_set(fs->bdev, &ext4_block);
+		r = ext4_block_flush_buf(fs->bdev, ext4_block.buf);
+		int put_rc = ext4_block_set(fs->bdev, &ext4_block);
+		if (r == EOK)
+			r = put_rc;
 	} else {
 		uint16_t mount_count, state;
 		mount_count = ext4_get16(&fs->sb, mount_count);
 		state = ext4_get16(&fs->sb, state);
 
 		memcpy(&fs->sb,
-			journal_block.data + EXT4_SUPERBLOCK_OFFSET,
+			journal_block.data + EXT4_SUPERBLOCK_OFFSET % block_size,
 			EXT4_SUPERBLOCK_SIZE);
 
 		/* Mark system as mounted */
 		ext4_set16(&fs->sb, state, state);
-		r = ext4_sb_write(fs->bdev, &fs->sb);
-		if (r != EOK)
-			return;
-
-		/*Update mount count*/
 		ext4_set16(&fs->sb, mount_count, mount_count);
+		r = ext4_sb_write(fs->bdev, &fs->sb);
 	}
 
-	jbd_block_set(jbd_fs, &journal_block);
+	arg->error = r;
+	r = jbd_block_set(jbd_fs, &journal_block);
+	if (arg->error == EOK)
+		arg->error = r;
 	
 	return;
 }
@@ -1133,13 +1144,16 @@ static int jbd_iterate_log(struct jbd_fs *jbd_fs,
 					    "trans_id: %" PRIu32"\n",
 					    this_block, this_trans_id);
 			if (action == ACTION_RECOVER) {
-				struct replay_arg replay_arg;
+				struct replay_arg replay_arg = {0};
 				replay_arg.info = info;
 				replay_arg.this_block = &this_block;
 				replay_arg.this_trans_id = this_trans_id;
 
 				jbd_replay_descriptor_block(jbd_fs,
 						header, &replay_arg);
+				r = replay_arg.error;
+				if (r != EOK)
+					log_end = true;
 			} else
 				jbd_debug_descriptor_block(jbd_fs,
 						header, &this_block);
@@ -1443,7 +1457,7 @@ int jbd_journal_stop(struct jbd_journal *journal)
 		return r;
 
 	journal->start = 0;
-	journal->trans_id = 0;
+	journal->trans_id = journal->alloc_trans_id;
 	jbd_journal_write_sb(journal);
 	return jbd_write_sb(journal->jbd_fs);
 }
@@ -1781,11 +1795,12 @@ static int jbd_trans_write_commit_block(struct jbd_trans *trans)
 		return rc;
 
 	header = (struct jbd_commit_header *)block.data;
+	memset(header, 0, journal->block_size);
 	jbd_set32(&header->header, magic, JBD_MAGIC_NUMBER);
 	jbd_set32(&header->header, blocktype, JBD_COMMIT_BLOCK);
 	jbd_set32(&header->header, sequence, trans->trans_id);
 
-	if (JBD_HAS_INCOMPAT_FEATURE(&journal->jbd_fs->sb,
+	if (JBD_HAS_COMPAT_FEATURE(&journal->jbd_fs->sb,
 				JBD_FEATURE_COMPAT_CHECKSUM)) {
 		header->chksum_type = JBD_CRC32_CHKSUM;
 		header->chksum_size = JBD_CRC32_CHKSUM_SIZE;
@@ -2151,6 +2166,31 @@ static void jbd_trans_end_write(struct ext4_bcache *bc __unused,
 	}
 }
 
+static int jbd_trans_write_superblock(struct jbd_trans *trans)
+{
+	struct ext4_fs *fs = trans->journal->jbd_fs->inode_ref.fs;
+	uint32_t block_size = ext4_sb_get_block_size(&fs->sb);
+	struct ext4_block block = EXT4_BLOCK_ZERO();
+	uint8_t *data;
+	int rc, put_rc;
+
+	rc = ext4_block_get(fs->bdev, &block,
+			    EXT4_SUPERBLOCK_OFFSET / block_size);
+	if (rc != EOK)
+		return rc;
+
+	ext4_sb_set_csum(&fs->sb);
+	data = block.data + EXT4_SUPERBLOCK_OFFSET % block_size;
+
+	if (memcmp(data, &fs->sb, EXT4_SUPERBLOCK_SIZE)) {
+		rc = jbd_trans_set_block_dirty(trans, &block);
+		if (rc == EOK)
+			memcpy(data, &fs->sb, EXT4_SUPERBLOCK_SIZE);
+	}
+	put_rc = ext4_block_set(fs->bdev, &block);
+	return rc != EOK ? rc : put_rc;
+}
+
 /**@brief  Commit a transaction to the journal immediately.
  * @param  journal current journal session
  * @param  trans transaction
@@ -2163,6 +2203,10 @@ static int __jbd_journal_commit_trans(struct jbd_journal *journal,
 	struct jbd_revoke_rec *rec, *tmp;
 
 	trans->trans_id = journal->alloc_trans_id;
+	rc = jbd_trans_write_superblock(trans);
+	if (rc != EOK)
+		goto Finish;
+
 	rc = jbd_journal_prepare(journal, trans);
 	if (rc != EOK)
 		goto Finish;

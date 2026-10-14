@@ -13,6 +13,7 @@
 #include <ext4_fs.h>
 #include <ext4_inode.h>
 #include <ext4_journal.h>
+#include <ext4_misc.h>
 #include <ext4_super.h>
 #include <ext4_trans.h>
 #include <ext4_xattr.h>
@@ -42,6 +43,8 @@ static struct ext4_bcache cache;
 static struct jbd_fs journal_fs;
 static struct jbd_journal journal;
 static uint8_t sector[512];
+static uint64_t interrupt_sector = UINT64_MAX;
+static bool interrupt_commit, commit_written, recovered;
 
 static int disk_open(struct ext4_blockdev *device)
 {
@@ -65,9 +68,21 @@ static int disk_write(struct ext4_blockdev *device, const void *buffer,
 	(void)device;
 	size_t size = (size_t)count * 512;
 
-	return pwrite(disk_fd, buffer, size, block * 512) == (ssize_t)size
-		   ? 0
-		   : EIO;
+	const struct jbd_bhdr *header = buffer;
+	bool is_commit = jbd_get32(header, magic) == JBD_MAGIC_NUMBER &&
+			 jbd_get32(header, blocktype) == JBD_COMMIT_BLOCK;
+
+	if ((interrupt_commit && is_commit) ||
+	    (interrupt_sector >= block && interrupt_sector - block < count)) {
+		REQUIRE(interrupt_commit || commit_written);
+		REQUIRE(!fsync(disk_fd));
+		_exit(77);
+	}
+	ssize_t written = pwrite(disk_fd, buffer, size, block * 512);
+
+	if (written == (ssize_t)size && is_commit)
+		commit_written = true;
+	return written == (ssize_t)size ? 0 : EIO;
 }
 
 static struct ext4_blockdev_iface interface = {
@@ -110,8 +125,10 @@ static void open_image(const char *path)
 	CHECK(ext4_block_bind_bcache(&device, &cache));
 	device.fs = &fs;
 	CHECK(jbd_get_fs(&fs, &journal_fs));
-	if (ext4_sb_feature_incom(&fs.sb, EXT4_FINCOM_RECOVER))
+	if (ext4_sb_feature_incom(&fs.sb, EXT4_FINCOM_RECOVER)) {
+		recovered = jbd_get32(&journal_fs.sb, start) != 0;
 		CHECK(jbd_recover(&journal_fs));
+	}
 	CHECK(jbd_journal_start(&journal_fs, &journal));
 	fs.jbd_fs = &journal_fs;
 	fs.jbd_journal = &journal;
@@ -324,7 +341,10 @@ static void attributes_create(void)
 {
 	struct ext4_inode_ref inode;
 	unsigned char large[700], small[8];
+	size_t block_size = ext4_sb_get_block_size(&fs.sb);
+	unsigned char *oversized = calloc(1, block_size);
 
+	REQUIRE(oversized);
 	memset(large, 'A', sizeof(large));
 	memset(small, 's', sizeof(small));
 	begin();
@@ -333,7 +353,9 @@ static void attributes_create(void)
 	CHECK(ext4_xattr_set(&inode, 1, "large", 5, large, sizeof(large)));
 	CHECK(ext4_xattr_set(&inode, 1, "empty", 5, NULL, 0));
 	REQUIRE(ext4_inode_get_file_acl(inode.inode, &fs.sb));
-	REQUIRE(ext4_xattr_set(&inode, 1, "small", 5, large, 400) == ENOSPC);
+	REQUIRE(ext4_xattr_set(&inode, 1, "small", 5, oversized, block_size) ==
+		ENOSPC);
+	free(oversized);
 	expect_attribute(&inode, "small", 's', sizeof(small));
 	CHECK(ext4_fs_put_inode_ref(&inode));
 	commit();
@@ -417,6 +439,57 @@ static void attributes_shared(void)
 	commit();
 }
 
+static void interrupted_write(bool before_commit)
+{
+	struct ext4_inode_ref inode;
+	struct ext4_block block;
+	unsigned char value[700];
+	uint64_t physical;
+	uint32_t logical = 4096, count;
+
+	memset(value, 'R', sizeof(value));
+	begin();
+	CHECK(ext4_fs_get_inode_ref(&fs, lookup(), &inode));
+	interrupt_commit = before_commit;
+	interrupt_sector =
+	    before_commit
+		? UINT64_MAX
+		: inode.block.lb_id * (ext4_sb_get_block_size(&fs.sb) / 512);
+	commit_written = false;
+	CHECK(ext4_xattr_set(&inode, 1, "recovery", 8, value, sizeof(value)));
+	CHECK(ext4_extent_get_blocks(&inode, logical, 1, &physical, true,
+				     &count));
+	REQUIRE(physical && count == 1);
+	CHECK(ext4_trans_block_get(&device, &block, physical));
+	memcpy(block.data, &logical, sizeof(logical));
+	CHECK(ext4_trans_set_block_dirty(block.buf));
+	CHECK(ext4_block_set(&device, &block));
+	ext4_inode_set_size(inode.inode, (uint64_t)(logical + 1) *
+					     ext4_sb_get_block_size(&fs.sb));
+	inode.dirty = true;
+	CHECK(ext4_fs_put_inode_ref(&inode));
+	commit();
+	CHECK(ext4_block_cache_flush(&device));
+	CHECK(jbd_journal_stop(&journal));
+	REQUIRE(0);
+}
+
+static void verify_recovery(bool committed)
+{
+	struct ext4_inode_ref inode;
+	size_t length;
+
+	REQUIRE(recovered);
+	CHECK(ext4_fs_get_inode_ref(&fs, lookup(), &inode));
+	verify_block(&inode, 4096, committed);
+	if (committed)
+		expect_attribute(&inode, "recovery", 'R', 700);
+	else
+		REQUIRE(ext4_xattr_get(&inode, 1, "recovery", 8, NULL, 0,
+				       &length) == ENODATA);
+	CHECK(ext4_fs_put_inode_ref(&inode));
+}
+
 int main(int argc, char **argv)
 {
 	REQUIRE(argc == 3);
@@ -447,6 +520,14 @@ int main(int argc, char **argv)
 		attributes_clear();
 	} else if (!strcmp(argv[2], "attributes-shared")) {
 		attributes_shared();
+	} else if (!strcmp(argv[2], "interrupt-commit")) {
+		interrupted_write(false);
+	} else if (!strcmp(argv[2], "interrupt-abort")) {
+		interrupted_write(true);
+	} else if (!strcmp(argv[2], "recover-commit")) {
+		verify_recovery(true);
+	} else if (!strcmp(argv[2], "recover-abort")) {
+		verify_recovery(false);
 	} else {
 		REQUIRE(0);
 	}

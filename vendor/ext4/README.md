@@ -30,6 +30,20 @@ uses Linux to create three files that share an attribute block, changes one
 file through this implementation, and deletes the other two. It checks the
 image with `e2fsck` and reads the retained value through Linux.
 
-These native checks do not qualify guest integration, snapshot restore or
-interrupted-write recovery. Values stored in separate attribute inodes are
-unsupported; the filesystem does not admit the `ea_inode` feature.
+The `recovery` target interrupts a write before its commit record or before
+its inode reaches the home block, then checks recovery of an extent and an
+external attribute. `recovery-linux` checks the same cases through a Linux
+mount and requires mount privileges. Both targets use the image created by
+`test` and reject filesystem repair prompts. Use `BLOCK_SIZE=4096` with a
+separate build directory to check the other superblock layout.
+
+Journal checksum encoding follows the
+[JBD2 format](https://www.kernel.org/doc/html/latest/filesystems/ext4/journal.html).
+Transactions include changed filesystem superblocks, including allocation
+counters. Shutdown retains the next transaction number so stale commit
+records cannot validate later incomplete writes.
+
+The interruption checks persist earlier writes before process exit. They
+do not simulate device write reordering or power loss. Guest integration
+and snapshot checks belong to the consumer. Values stored in separate
+attribute inodes are unsupported; the filesystem does not admit `ea_inode`.
