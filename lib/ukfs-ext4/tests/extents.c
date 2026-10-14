@@ -15,6 +15,8 @@
 #include <ext4_journal.h>
 #include <ext4_super.h>
 #include <ext4_trans.h>
+#include <ext4_xattr.h>
+#include <ext4_xattr_disk.h>
 
 #define CHECK(call)                                                            \
 	do {                                                                   \
@@ -128,18 +130,23 @@ static void close_image(void)
 	REQUIRE(!fsync(disk_fd) && !close(disk_fd));
 }
 
-static uint32_t lookup(void)
+static uint32_t lookup_name(const char *name)
 {
 	struct ext4_inode_ref root;
 	struct ext4_dir_search_result result;
 	uint32_t number;
 
 	CHECK(ext4_fs_get_inode_ref(&fs, EXT4_INODE_ROOT_INDEX, &root));
-	CHECK(ext4_dir_find_entry(&result, &root, "extents", 7));
+	CHECK(ext4_dir_find_entry(&result, &root, name, strlen(name)));
 	number = ext4_dir_en_get_inode(result.dentry);
 	CHECK(ext4_dir_destroy_result(&root, &result));
 	CHECK(ext4_fs_put_inode_ref(&root));
 	return number;
+}
+
+static uint32_t lookup(void)
+{
+	return lookup_name("extents");
 }
 
 static void write_block(uint32_t number, uint32_t logical, uint32_t limit)
@@ -295,6 +302,121 @@ static void unwritten_ranges(void)
 	CHECK(ext4_fs_put_inode_ref(&inode));
 }
 
+static void expect_attribute(struct ext4_inode_ref *inode, const char *name,
+			     unsigned char value, size_t length)
+{
+	unsigned char buffer[1024];
+	size_t actual;
+
+	CHECK(ext4_xattr_get(inode, 1, name, strlen(name), NULL, 0, &actual));
+	REQUIRE(actual == length);
+	CHECK(ext4_xattr_get(inode, 1, name, strlen(name), buffer,
+			     sizeof(buffer), &actual));
+	REQUIRE(actual == length);
+	for (size_t i = 0; i < actual; i++)
+		REQUIRE(buffer[i] == value);
+	if (length)
+		REQUIRE(ext4_xattr_get(inode, 1, name, strlen(name), buffer,
+				       length - 1, &actual) == ERANGE);
+}
+
+static void attributes_create(void)
+{
+	struct ext4_inode_ref inode;
+	unsigned char large[700], small[8];
+
+	memset(large, 'A', sizeof(large));
+	memset(small, 's', sizeof(small));
+	begin();
+	CHECK(ext4_fs_get_inode_ref(&fs, lookup(), &inode));
+	CHECK(ext4_xattr_set(&inode, 1, "small", 5, small, sizeof(small)));
+	CHECK(ext4_xattr_set(&inode, 1, "large", 5, large, sizeof(large)));
+	CHECK(ext4_xattr_set(&inode, 1, "empty", 5, NULL, 0));
+	REQUIRE(ext4_inode_get_file_acl(inode.inode, &fs.sb));
+	REQUIRE(ext4_xattr_set(&inode, 1, "small", 5, large, 400) == ENOSPC);
+	expect_attribute(&inode, "small", 's', sizeof(small));
+	CHECK(ext4_fs_put_inode_ref(&inode));
+	commit();
+}
+
+static void attributes_verify(void)
+{
+	struct ext4_inode_ref inode;
+	struct ext4_xattr_list_entry list = {0};
+	size_t count;
+
+	CHECK(ext4_fs_get_inode_ref(&fs, lookup(), &inode));
+	expect_attribute(&inode, "small", 's', 8);
+	expect_attribute(&inode, "large", 'A', 700);
+	expect_attribute(&inode, "empty", 0, 0);
+	CHECK(ext4_xattr_list(&inode, &list, &count));
+	REQUIRE(count == 3);
+	for (struct ext4_xattr_list_entry *entry = list.next; entry;
+	     entry = entry->next) {
+		REQUIRE(entry->name_index == 1 && entry->name_len == 5);
+		REQUIRE(!strcmp(entry->name, "small") ||
+			!strcmp(entry->name, "large") ||
+			!strcmp(entry->name, "empty"));
+	}
+	ext4_xattr_list_free(&list);
+	REQUIRE(ext4_xattr_get(&inode, 1, "missing", 7, NULL, 0, &count) ==
+		ENODATA);
+	CHECK(ext4_fs_put_inode_ref(&inode));
+}
+
+static void attributes_clear(void)
+{
+	struct ext4_inode_ref inode;
+
+	begin();
+	CHECK(ext4_fs_get_inode_ref(&fs, lookup(), &inode));
+	CHECK(ext4_xattr_remove(&inode, 1, "large", 5));
+	REQUIRE(!ext4_inode_get_file_acl(inode.inode, &fs.sb));
+	expect_attribute(&inode, "small", 's', 8);
+	CHECK(ext4_xattr_remove(&inode, 1, "empty", 5));
+	CHECK(ext4_xattr_remove(&inode, 1, "small", 5));
+	REQUIRE(ext4_xattr_remove(&inode, 1, "small", 5) == ENODATA);
+	CHECK(ext4_fs_put_inode_ref(&inode));
+	commit();
+}
+
+static void attributes_shared(void)
+{
+	struct ext4_inode_ref a, b, c, root;
+	unsigned char value[700];
+
+	memset(value, 'B', sizeof(value));
+	begin();
+	CHECK(ext4_fs_get_inode_ref(&fs, lookup_name("peer-a"), &a));
+	CHECK(ext4_fs_get_inode_ref(&fs, lookup_name("peer-b"), &b));
+	CHECK(ext4_fs_get_inode_ref(&fs, lookup_name("peer-c"), &c));
+	uint64_t shared = ext4_inode_get_file_acl(a.inode, &fs.sb);
+
+	REQUIRE(shared && shared == ext4_inode_get_file_acl(b.inode, &fs.sb));
+	REQUIRE(shared == ext4_inode_get_file_acl(c.inode, &fs.sb));
+	expect_attribute(&a, "large", 'A', 700);
+	CHECK(ext4_xattr_set(&a, 1, "large", 5, value, sizeof(value)));
+	REQUIRE(ext4_inode_get_file_acl(a.inode, &fs.sb) != shared);
+	expect_attribute(&a, "large", 'B', 700);
+	expect_attribute(&b, "large", 'A', 700);
+	expect_attribute(&c, "large", 'A', 700);
+	CHECK(ext4_fs_put_inode_ref(&a));
+	CHECK(ext4_fs_get_inode_ref(&fs, EXT4_INODE_ROOT_INDEX, &root));
+	CHECK(ext4_dir_remove_entry(&root, "peer-b", 6));
+	CHECK(ext4_fs_free_inode(&b));
+	ext4_inode_set_links_cnt(b.inode, 0);
+	ext4_inode_set_del_time(b.inode, UINT32_MAX);
+	CHECK(ext4_fs_put_inode_ref(&b));
+	expect_attribute(&c, "large", 'A', 700);
+	CHECK(ext4_dir_remove_entry(&root, "peer-c", 6));
+	CHECK(ext4_fs_free_inode(&c));
+	ext4_inode_set_links_cnt(c.inode, 0);
+	ext4_inode_set_del_time(c.inode, UINT32_MAX);
+	CHECK(ext4_fs_put_inode_ref(&c));
+	CHECK(ext4_fs_put_inode_ref(&root));
+	commit();
+}
+
 int main(int argc, char **argv)
 {
 	REQUIRE(argc == 3);
@@ -317,6 +439,14 @@ int main(int argc, char **argv)
 		verify_file(0);
 	} else if (!strcmp(argv[2], "unwritten")) {
 		unwritten_ranges();
+	} else if (!strcmp(argv[2], "attributes-create")) {
+		attributes_create();
+		attributes_verify();
+	} else if (!strcmp(argv[2], "attributes-clear")) {
+		attributes_verify();
+		attributes_clear();
+	} else if (!strcmp(argv[2], "attributes-shared")) {
+		attributes_shared();
 	} else {
 		REQUIRE(0);
 	}

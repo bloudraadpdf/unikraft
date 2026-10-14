@@ -29,9 +29,11 @@ Local dependency changes follow their imports as separate source commits.
 | `vendor/ext4` | Selected BSD filesystem components |
 
 The [ext4 import notes](vendor/ext4/README.md) identify the excluded GPL
-implementations. The FreeBSD extent port passes the native ARM64 filesystem
-check. Extended-attribute adaptation remains unfinished. Do not enable
-`CONFIG_LIBUKFS_EXT4` until that replacement is complete.
+implementations. The FreeBSD extent and attribute ports pass the native ARM64
+filesystem checks, including shared attributes created by Linux. The ARM64
+kernel builds with `CONFIG_LIBUKFS_EXT4=y` and passes the guest VFS probe,
+including sparse writes above 64 GiB, ownership, links, rename and unmount.
+Its output disk passes `e2fsck`. SQLite snapshot qualification is in progress.
 
 ## Build and verification status
 

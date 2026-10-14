@@ -107,6 +107,14 @@
         "url": "https://raw.githubusercontent.com/freebsd/freebsd-src/9d50245a0f1333e10cc1c4dda16878cd79a7c42b/sys/fs/ext2fs/ext2_extattr.h",
         "sha256": "688258f8c080525629d5a47e1f1dd9bb3e84a338ec55c22470a0e9869c2a0408",
         "destination": "vendor/ext4/include/ext4_xattr_disk.h"
+      },
+      "ext2_csum.c": {
+        "url": "https://raw.githubusercontent.com/freebsd/freebsd-src/9d50245a0f1333e10cc1c4dda16878cd79a7c42b/sys/fs/ext2fs/ext2_csum.c",
+        "sha256": "15e77583552affbfa26abe5044341eaabb80bcc6c5932df184e5dd861e7230f8",
+        "destination": "vendor/ext4/src/ext4_xattr.c",
+        "adapted_functions": [
+          "ext2_extattr_blk_csum"
+        ]
       }
     }
   }

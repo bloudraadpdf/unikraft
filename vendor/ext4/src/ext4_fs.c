@@ -55,6 +55,7 @@
 #include <ext4_inode.h>
 #include <ext4_ialloc.h>
 #include <ext4_extent.h>
+#include <ext4_xattr.h>
 
 #include <string.h>
 
@@ -1048,16 +1049,9 @@ finish:
 	/* Mark inode dirty for writing to the physical device */
 	inode_ref->dirty = true;
 
-	/* Free block with extended attributes if present */
-	ext4_fsblk_t xattr_block =
-	    ext4_inode_get_file_acl(inode_ref->inode, &fs->sb);
-	if (xattr_block) {
-		int rc = ext4_balloc_free_block(inode_ref, xattr_block);
-		if (rc != EOK)
-			return rc;
-
-		ext4_inode_set_file_acl(inode_ref->inode, &fs->sb, 0);
-	}
+	rc = ext4_xattr_free(inode_ref);
+	if (rc != EOK)
+		return rc;
 
 	/* Free inode by allocator */
 	if (ext4_inode_is_type(&fs->sb, inode_ref->inode,
