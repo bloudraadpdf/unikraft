@@ -85,12 +85,8 @@ static int uk_intctlr_xpic_handle_irq(void *data)
 #if CONFIG_LIBUKINTCTLR_APIC
 	apic_ack_interrupt();
 
-	/* FIXME This is here because right now we only use
-	 * APIC for IPIs on SMP. This should be removed as
-	 * soon as we fully implement APIC and get rid of
-	 * PIC
-	 */
-	if (irq <= 16)
+	/* Legacy devices still use PIC interrupts. */
+	if (irq < 16)
 		pic_ack_irq(irq);
 #else   /* !CONFIG_LIBUKINTCTLR_APIC */
 	pic_ack_irq(irq);

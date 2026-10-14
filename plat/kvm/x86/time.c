@@ -44,6 +44,8 @@
 #include <kvm/tscclock.h>
 #include <uk/assert.h>
 
+static unsigned int timer_irq;
+
 /* return ns since time_init() */
 __nsec ukplat_monotonic_clock(void)
 {
@@ -71,7 +73,12 @@ void ukplat_time_init(void)
 {
 	int rc;
 
-	rc = uk_intctlr_irq_register(0, timer_handler, NULL);
+#if CONFIG_LIBUKINTCTLR_APIC
+	rc = uk_intctlr_irq_alloc(&timer_irq, 1);
+	if (rc < 0)
+		UK_CRASH("Failed to allocate timer interrupt\n");
+#endif
+	rc = uk_intctlr_irq_register(timer_irq, timer_handler, NULL);
 	if (rc < 0)
 		UK_CRASH("Failed to register timer interrupt handler\n");
 
@@ -86,5 +93,5 @@ void ukplat_time_fini(void)
 
 __u32 ukplat_time_get_irq(void)
 {
-	return 0;
+	return timer_irq;
 }

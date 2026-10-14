@@ -90,6 +90,8 @@ static void pic_mask_irq(unsigned int irq)
 {
 	__u16 port;
 
+	if (irq >= 16)
+		return;
 	port = IRQ_PORT(irq);
 	uk_arch_x86_64_outb(port, uk_arch_x86_64_inb(port) | (1 << IRQ_OFFSET(irq)));
 }
@@ -98,6 +100,8 @@ static void pic_clear_irq(unsigned int irq)
 {
 	__u16 port;
 
+	if (irq >= 16)
+		return;
 	port = IRQ_PORT(irq);
 	uk_arch_x86_64_outb(port, uk_arch_x86_64_inb(port) & ~(1 << IRQ_OFFSET(irq)));
 }

@@ -53,6 +53,8 @@
  */
 
 #include <stdint.h>
+#include <errno.h>
+#include <stdbool.h>
 
 #include <uk/arch/util.h>
 #include <uk/lcpu.h>
@@ -100,13 +102,13 @@ static __u64 rtc_epochoffset;
  * TSC clock specific.
  */
 
-/* Base time values at the last call to tscclock_monotonic(). */
-static __u64 time_base;
+/* TSC at boot; clock reads do not modify the shared origin. */
 static __u64 tsc_base;
 
 /* Multiplier for converting TSC ticks to nsecs. (0.32) fixed point. */
 static __u32 tsc_mult;
 
+#if !CONFIG_LIBUKINTCTLR_APIC
 /*
  * Multiplier for converting nsecs to PIT ticks. (1.32) fixed point.
  *
@@ -117,6 +119,13 @@ static __u32 tsc_mult;
  */
 static const __u32 pit_mult =
 	(1ULL << 63) / ((UKARCH_NSEC_PER_SEC << 31) / TIMER_HZ);
+#else
+#define APIC_TIMER_DIV16 0x3
+#define APIC_TIMER_MASKED UK_BIT(16)
+
+static __u32 apic_mult;
+__uk_pcpuvar bool tscclock_apic_timer_ready;
+#endif
 
 
 /*
@@ -200,20 +209,41 @@ static __u64 rtc_gettimeofday(void)
  */
 __u64 tscclock_monotonic(void)
 {
-	__u64 tsc_now, tsc_delta;
+	__u64 tsc_delta;
 
-	/*
-	 * Update time_base (monotonic time) and tsc_base (TSC time).
-	 */
-	tsc_now = uk_arch_x86_64_rdtsc();
-	tsc_delta = tsc_now - tsc_base;
+	uk_arch_x86_64_rmb();
+	tsc_delta = uk_arch_x86_64_rdtsc() - tsc_base;
 	if (tsc_delta >= UINT64_MAX / 2)
-		tsc_delta = 1;
-	time_base += uk_arch_x86_64_mul64_32(tsc_delta, tsc_mult);
-	tsc_base = tsc_now;
+		return 0;
 
-	return time_base;
+	return uk_arch_x86_64_mul64_32(tsc_delta, tsc_mult);
 }
+
+#if CONFIG_LIBUKINTCTLR_APIC
+static int apic_timer_calibrate(void)
+{
+	__u64 start, elapsed, ticks, mult;
+
+	uk_arch_x86_64_wrmsrl(UK_ARCH_X86_64_APIC_MSR_LVT_TIMER,
+			      APIC_TIMER_MASKED);
+	uk_arch_x86_64_wrmsrl(UK_ARCH_X86_64_APIC_MSR_TIMER_DCR,
+			      APIC_TIMER_DIV16);
+	start = tscclock_monotonic();
+	uk_arch_x86_64_wrmsrl(UK_ARCH_X86_64_APIC_MSR_TIMER_IC, UINT32_MAX);
+	i8254_delay(10000);
+	ticks = UINT32_MAX -
+		uk_arch_x86_64_rdmsrl(UK_ARCH_X86_64_APIC_MSR_TIMER_CC);
+	elapsed = tscclock_monotonic() - start;
+	uk_arch_x86_64_wrmsrl(UK_ARCH_X86_64_APIC_MSR_TIMER_IC, 0);
+	if (!elapsed || !ticks)
+		return -EINVAL;
+	mult = (ticks << 32) / elapsed;
+	if (!mult || mult > UINT32_MAX)
+		return -ERANGE;
+	apic_mult = mult;
+	return 0;
+}
+#endif
 
 /*
  * Calibrate TSC and initialise TSC clock.
@@ -267,9 +297,7 @@ int tscclock_init(void)
 	 * (0.32) tsc_mult = UKARCH_NSEC_PER_SEC (32.32) / tsc_freq (32.0)
 	 *
 	 * Warning, do not print anything between TSC calibration and the
-	 * setting of tsc_mult: if CONFIG_LIBUKDEBUG_PRINT_TIME is enabled
-	 * this will trigger a reset of tsc_base via tscclock_monotonic
-	 * and delay the clock starting point.
+	 * setting of tsc_mult, as the clock is not usable until then.
 	 *
 	 * FIXME: this will overflow with small TSC frequencies. We should
 	 * probably calculate the TSC shift dynamically like solo5/hvt does.
@@ -280,16 +308,17 @@ int tscclock_init(void)
 		   (unsigned long long) tsc_freq);
 
 	/*
-	 * Monotonic time begins at tsc_base (first read of TSC before
-	 * calibration).
-	 */
-	tscclock_monotonic();
-
-	/*
-	 * Compute RTC epoch offset by subtracting monotonic time_base from RTC
+	 * Compute RTC epoch offset by subtracting monotonic time from RTC
 	 * time at boot.
 	 */
-	rtc_epochoffset = rtc_boot - time_base;
+	rtc_epochoffset = rtc_boot - tscclock_monotonic();
+
+#if CONFIG_LIBUKINTCTLR_APIC
+	int rc = apic_timer_calibrate();
+
+	if (rc)
+		return rc;
+#endif
 
 	/*
 	 * Initialise i8254 timer channel 0 to mode 4 (one shot).
@@ -310,6 +339,29 @@ __u64 tscclock_epochoffset(void)
 	return rtc_epochoffset;
 }
 
+#if CONFIG_LIBUKINTCTLR_APIC
+static void tscclock_cpu_block(__u64 until)
+{
+	__u64 now, ticks;
+
+	UK_ASSERT(uk_lcpu_irqs_disabled());
+	if (!uk_pcpuvar_current_get(tscclock_apic_timer_ready)) {
+		uk_arch_x86_64_wrmsrl(UK_ARCH_X86_64_APIC_MSR_TIMER_DCR,
+				      APIC_TIMER_DIV16);
+		uk_arch_x86_64_wrmsrl(UK_ARCH_X86_64_APIC_MSR_LVT_TIMER,
+				      32 + ukplat_time_get_irq());
+		uk_pcpuvar_current_set(tscclock_apic_timer_ready, true);
+	}
+	now = ukplat_monotonic_clock();
+	if (now >= until)
+		return;
+	ticks = uk_arch_x86_64_mul64_32(until - now, apic_mult);
+	ticks = MIN(ticks + 1, UINT32_MAX);
+	uk_arch_x86_64_wrmsrl(UK_ARCH_X86_64_APIC_MSR_TIMER_IC, ticks);
+	uk_lcpu_halt_irq();
+	uk_arch_x86_64_wrmsrl(UK_ARCH_X86_64_APIC_MSR_TIMER_IC, 0);
+}
+#else
 /*
  * Minimum delta to sleep using PIT. Programming seems to have an overhead of
  * 3-4us, but play it safe here.
@@ -385,6 +437,7 @@ static void tscclock_cpu_block(__u64 until)
 	 */
 	uk_lcpu_halt_irq();
 }
+#endif
 
 __uk_pcpuvar unsigned long sched_have_pending_events;
 
