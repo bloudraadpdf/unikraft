@@ -5,14 +5,51 @@
  */
 
 #define _GNU_SOURCE
+#include <errno.h>
 #include <signal.h>
+#include <string.h>
+#include <uk/sched.h>
+#include <uk/plat/native/ectx.h>
+#include "../../signal/signal.h"
 
 #include <uk/arch/ctx.h>
 #include <uk/lcpu.h>
 #include <uk/syscall.h>
 
-void pprocess_signal_arch_set_ucontext(struct ukarch_execenv *execenv,
-				       ucontext_t *ucontext)
+struct x86_signal_context {
+	unsigned long uc_flags;
+	ucontext_t *uc_link;
+	stack_t uc_stack;
+	mcontext_t uc_mcontext;
+	uk_sigset_t uc_sigmask;
+};
+
+struct x86_signal_frame {
+	__uptr restorer;
+	struct x86_signal_context context;
+	siginfo_t info;
+};
+
+struct xstate_metadata {
+	__u32 magic;
+	__u32 extended_size;
+	__u64 features;
+	__u32 state_size;
+	__u32 reserved[7];
+};
+
+#define XSTATE_MAGIC 0x46505853U
+#define XSTATE_END 0x46505845U
+#define SIGNAL_RFLAGS 0x50dd5UL
+
+UK_CTASSERT(sizeof(struct xstate_metadata) == 48);
+UK_CTASSERT(sizeof(struct x86_signal_context) == 304);
+UK_CTASSERT(__offsetof(struct x86_signal_context, uc_sigmask) ==
+	    __offsetof(ucontext_t, uc_sigmask));
+UK_CTASSERT(__offsetof(struct x86_signal_frame, info) == 312);
+
+static void set_ucontext(struct ukarch_execenv *execenv,
+			 struct x86_signal_context *ucontext)
 {
 	UK_ASSERT(execenv);
 	UK_ASSERT(ucontext);
@@ -52,12 +89,18 @@ void pprocess_signal_arch_set_ucontext(struct ukarch_execenv *execenv,
 	ucontext->uc_mcontext.gregs[REG_RIP] = uk_lcpu_regs_get(execenv->regs,
 								RIP);
 
-	/* TODO Populate the rest of the context */
+	ucontext->uc_mcontext.gregs[REG_EFL] =
+		uk_lcpu_regs_get(execenv->regs, RFLAGS);
+	ucontext->uc_mcontext.gregs[REG_CSGSFS] =
+		uk_lcpu_regs_get(execenv->regs, CS) |
+		(uk_lcpu_regs_get(execenv->regs, SS) << 48);
 }
 
-int pprocess_signal_arch_get_ucontext(ucontext_t *ucontext,
-				       struct ukarch_execenv *execenv)
+static void get_ucontext(struct x86_signal_context *ucontext,
+			 struct ukarch_execenv *execenv)
 {
+	__u64 flags = uk_lcpu_regs_get(execenv->regs, RFLAGS);
+
 	UK_ASSERT(ucontext);
 	UK_ASSERT(execenv);
 
@@ -96,6 +139,113 @@ int pprocess_signal_arch_get_ucontext(ucontext_t *ucontext,
 	uk_lcpu_regs_set(execenv->regs, RIP,
 			 ucontext->uc_mcontext.gregs[REG_RIP]);
 
-	/* TODO Populate the rest of the context */
-	return 0;
+	flags = (flags & ~SIGNAL_RFLAGS) |
+		(ucontext->uc_mcontext.gregs[REG_EFL] & SIGNAL_RFLAGS);
+	uk_lcpu_regs_set(execenv->regs, RFLAGS, flags);
+}
+
+void pprocess_signal_return(void);
+
+void pprocess_signal_arch_prepare(struct uk_signal *signal,
+				  const struct kern_sigaction *action,
+				  struct ukarch_execenv *execenv,
+				  const uk_sigset_t *saved_mask)
+{
+	struct pprocess_signal_stack stack;
+	__uptr sp = uk_lcpu_regs_get(execenv->regs, SP);
+	struct x86_signal_frame *frame;
+	__sz fp_size = uk_plat_native_ectx_size();
+	__u64 features = uk_plat_native_ectx_features();
+	void *fp;
+
+	stack = pprocess_signal_stack_prepare(action, sp, 128);
+	sp = stack.sp;
+	if (sp < fp_size + 4 + sizeof(*frame) + 80)
+		goto bad_stack;
+	fp = (void *)ALIGN_DOWN(sp - fp_size - 4, 64);
+	sp = ALIGN_DOWN((__uptr)fp - sizeof(*frame), 16) - 8;
+	if (stack.on_altstack && sp < (__uptr)stack.previous.ss_sp)
+		goto bad_stack;
+	frame = (void *)sp;
+	memset(frame, 0, sizeof(*frame));
+	frame->restorer = (__uptr)(action->ks_flags & SA_RESTORER ?
+		action->ks_restorer : pprocess_signal_return);
+	frame->info = signal->siginfo;
+	set_ucontext(execenv, &frame->context);
+	frame->context.uc_sigmask = *saved_mask;
+	frame->context.uc_stack = stack.previous;
+	frame->context.uc_flags = features ? 7 : 6;
+	frame->context.uc_mcontext.fpregs = fp;
+	frame->context.uc_mcontext.gregs[REG_OLDMASK] = *saved_mask;
+	if (signal->siginfo.si_code > 0 &&
+	    (signal->siginfo.si_signo == SIGBUS ||
+	     signal->siginfo.si_signo == SIGSEGV))
+		frame->context.uc_mcontext.gregs[REG_CR2] =
+			(__uptr)signal->siginfo.si_addr;
+	uk_plat_native_ectx_export((const void *)execenv->ectx, fp);
+	if (features) {
+		struct xstate_metadata *metadata = (void *)((char *)fp + 464);
+
+		*metadata = (struct xstate_metadata){
+			.magic = XSTATE_MAGIC, .extended_size = fp_size + 4,
+			.features = features, .state_size = fp_size
+		};
+		*(__u32 *)((char *)fp + fp_size) = XSTATE_END;
+	}
+	uk_lcpu_regs_set(execenv->regs, RIP, (__uptr)action->ks_handler);
+	uk_lcpu_regs_set(execenv->regs, RSP, sp);
+	uk_lcpu_regs_set(execenv->regs, RDI, signal->siginfo.si_signo);
+	uk_lcpu_regs_set(execenv->regs, RSI, (__uptr)&frame->info);
+	uk_lcpu_regs_set(execenv->regs, RDX, (__uptr)&frame->context);
+	uk_lcpu_regs_set(execenv->regs, RAX, 0);
+	uk_lcpu_regs_set(execenv->regs, RFLAGS,
+			 uk_lcpu_regs_get(execenv->regs, RFLAGS) & ~0x10500UL);
+	return;
+
+bad_stack:
+	pprocess_exit(uk_pprocess_current(), POSIX_PROCESS_KILLED,
+		      SIGSEGV);
+	uk_sched_thread_exit();
+}
+
+static int restore_fp(struct x86_signal_context *context,
+		      struct ukarch_execenv *execenv)
+{
+	const void *fp = context->uc_mcontext.fpregs;
+	const struct xstate_metadata *metadata;
+	__sz size = 512;
+	__u64 features = 3;
+
+	if (!fp)
+		return uk_plat_native_ectx_import((void *)execenv->ectx,
+					 NULL, 0, 0);
+	metadata = (const void *)((const char *)fp + 464);
+	if (metadata->magic == XSTATE_MAGIC) {
+		size = metadata->state_size;
+		features = metadata->features;
+		if (!IS_ALIGNED((__uptr)fp, 64) || size < 576 ||
+		    size > uk_plat_native_ectx_size() ||
+		    metadata->extended_size != size + 4 ||
+		    *(__u32 *)((const char *)fp + size) != XSTATE_END)
+			return -EINVAL;
+	}
+	return uk_plat_native_ectx_import((void *)execenv->ectx, fp,
+					 size, features);
+}
+
+UK_LLSYSCALL_R_E_DEFINE(long, rt_sigreturn)
+{
+	struct x86_signal_frame *frame =
+		(void *)(uk_lcpu_regs_get(execenv->regs, SP) - 8);
+
+	if (restore_fp(&frame->context, execenv)) {
+		pprocess_exit(uk_pprocess_current(), POSIX_PROCESS_KILLED,
+			      SIGSEGV);
+		uk_sched_thread_exit();
+	}
+	get_ucontext(&frame->context, execenv);
+	pprocess_signal_restore_mask(frame->context.uc_sigmask);
+	pprocess_signal_restore_altstack(&frame->context.uc_stack,
+					 uk_lcpu_regs_get(execenv->regs, SP));
+	return uk_lcpu_regs_get(execenv->regs, RAX);
 }

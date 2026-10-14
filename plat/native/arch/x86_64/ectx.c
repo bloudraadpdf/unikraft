@@ -8,10 +8,12 @@
  */
 
 
+#include <errno.h>
 #include <uk/arch/types.h>
 #include <uk/arch/util.h>
 #include <uk/arch/x86_64.h>
 #include <uk/asm.h>
+#include <uk/plat/native/ectx.h>
 #include <uk/ctors.h>
 #include <uk/essentials.h>
 #include <uk/assert.h>
@@ -195,6 +197,8 @@ static enum x86_save_method ectx_method;
 static __sz ectx_size;
 static __sz ectx_align;
 static __bool have_mpx;
+static __u64 ectx_features;
+static __u32 ectx_mxcsr_mask;
 
 static void _init_ectx_store(void)
 {
@@ -277,6 +281,19 @@ static void _init_ectx_store(void)
 		ectx_size = sizeof(struct x86_fsave_ctx);
 		ectx_align = __alignof(struct x86_fsave_ctx);
 		uk_pr_debug("Load/store of extended CPU state: FSAVE\n");
+	}
+
+	if (ectx_method >= X86_SAVE_FXSAVE) {
+		struct x86_fxsave_ctx initial;
+
+		asm volatile("fxsave64 %0" : "=m"(initial));
+		memcpy_isr(&ectx_mxcsr_mask, initial.state + 28, 4);
+		if (!ectx_mxcsr_mask)
+			ectx_mxcsr_mask = 0xffbf;
+	}
+	if (ectx_method >= X86_SAVE_XSAVE) {
+		asm volatile("xgetbv" : "=a"(eax), "=d"(edx) : "c"(0));
+		ectx_features = ((__u64)edx << 32) | eax;
 	}
 
 	/* NOTE: In case a condition is added here that disables extregs
@@ -483,6 +500,95 @@ static inline __bool mem_iszero(const void *mem, __sz len)
 			return __false;
 
 	return __true;
+}
+
+__sz uk_plat_native_ectx_size(void)
+{
+	UK_ASSERT(ectx_method >= X86_SAVE_FXSAVE);
+	return ectx_size;
+}
+
+__u64 uk_plat_native_ectx_features(void)
+{
+	return ectx_features;
+}
+
+void uk_plat_native_ectx_export(const struct uk_plat_native_ectx *state,
+				void *buffer)
+{
+	struct x86_xsave_ctx *out = buffer;
+	__u32 eax, ebx, ecx, edx;
+	unsigned int component;
+
+	memcpy_isr(out, state, ectx_size);
+	memset_isr(out->avail, 0, sizeof(out->avail));
+	out->mxcsr_mask = ectx_mxcsr_mask;
+	if (!ectx_features)
+		return;
+	if (!(out->xsave_hdr.xstate_bv & X86_XSAVE_HDR_XSTATE_BV_X87F)) {
+		memset_isr(out->x87_state1, 0, sizeof(out->x87_state1));
+		memset_isr(out->x87_state2, 0, sizeof(out->x87_state2));
+		out->x87_state1[0] = 0x7f;
+		out->x87_state1[1] = 3;
+	}
+	if (!(out->xsave_hdr.xstate_bv & X86_XSAVE_HDR_XSTATE_BV_SSEF)) {
+		memset_isr(out->sse_state, 0, sizeof(out->sse_state));
+		out->mxcsr = 0x1f80;
+	}
+	for (component = 2; component < 64; component++) {
+		if (!(ectx_features & (1ULL << component)))
+			continue;
+		uk_arch_x86_64_cpuid(0xd, component, &eax, &ebx,
+				     &ecx, &edx);
+		UK_ASSERT(ebx <= ectx_size && eax <= ectx_size - ebx);
+		if (!(out->xsave_hdr.xstate_bv & (1ULL << component)))
+			memset_isr((char *)out + ebx, 0, eax);
+	}
+	/* Expose editable legacy fields when XSAVE omitted initial state. */
+	out->xsave_hdr.xstate_bv |= 3;
+}
+
+int uk_plat_native_ectx_import(struct uk_plat_native_ectx *state,
+			       const void *buffer, __sz size, __u64 features)
+{
+	const struct x86_xsave_ctx *in = buffer;
+	struct x86_xsave_ctx *out = (void *)state;
+	__u32 eax, ebx, ecx, edx;
+	unsigned int component;
+
+	if (!buffer) {
+		memset_isr(out, 0, ectx_size);
+		out->x87_state1[0] = 0x7f;
+		out->x87_state1[1] = 3;
+		out->mxcsr = 0x1f80;
+		return 0;
+	}
+	if (size < 512 || size > ectx_size ||
+	    (in->mxcsr & ~ectx_mxcsr_mask))
+		return -EINVAL;
+	if (size > 512) {
+		if (size < 576 || !ectx_features ||
+		    (features & ~ectx_features) ||
+		    (in->xsave_hdr.xstate_bv & ~features) ||
+		    in->xsave_hdr.xcomp_bv ||
+		    !mem_iszero(in->xsave_hdr.rsvd, sizeof(in->xsave_hdr.rsvd)))
+			return -EINVAL;
+		for (component = 2; component < 64; component++) {
+			if (!(features & (1ULL << component)))
+				continue;
+			uk_arch_x86_64_cpuid(0xd, component, &eax, &ebx,
+					     &ecx, &edx);
+			if (ebx > size || eax > size - ebx)
+				return -EINVAL;
+		}
+	}
+	memset_isr(out, 0, ectx_size);
+	memcpy_isr(out, in, size);
+	memset_isr(out->avail, 0, sizeof(out->avail));
+	out->mxcsr_mask = ectx_mxcsr_mask;
+	if (ectx_features && size == 512)
+		out->xsave_hdr.xstate_bv = 3;
+	return 0;
 }
 
 /*

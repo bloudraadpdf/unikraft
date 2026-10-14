@@ -60,6 +60,14 @@ extern "C" {
  */
 struct uk_plat_native_ectx;
 
+/* Export/import the standard XSAVE or FXSAVE layout, without ABI metadata. */
+__sz uk_plat_native_ectx_size(void);
+__u64 uk_plat_native_ectx_features(void);
+void uk_plat_native_ectx_export(const struct uk_plat_native_ectx *state,
+				void *buffer);
+int uk_plat_native_ectx_import(struct uk_plat_native_ectx *state,
+			       const void *buffer, __sz size, __u64 features);
+
 /**
  * Sanitize XSAVE header to prevent #GP on first XRSTOR.
  * Zeroes XSTATE_BV/XCOMP_BV at offset 512. Must be called on newly

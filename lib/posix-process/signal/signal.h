@@ -32,13 +32,6 @@
 
 #define SIG_ARRAY_COUNT		_NSIG /* SIGRTMAX + 1 */
 
-/* struct pprocess_signal_handler_ctx */
-#define	PPROCESS_SIGHNDL_CTX_FN_OFFS	 0/* handler_fn */
-#define	PPROCESS_SIGHNDL_CTX_SP_OFFS	 8/* handler_sp */
-#define	PPROCESS_SIGHNDL_CTX_SI_OFFS	16/* siginfo_t */
-#define	PPROCESS_SIGHNDL_CTX_UC_OFFS	24/* ucontext_t */
-#define	PPROCESS_SIGHNDL_CTX_SN_OFFS	32/* signum */
-
 #if !__ASSEMBLY__
 /* Check if signal number is valid */
 #define IS_VALID(_signum)						\
@@ -222,14 +215,6 @@ struct sys_error_desc {
 	__vaddr_t vaddr;
 };
 
-struct pprocess_signal_handler_ctx {
-	void *handler_fn;
-	void *handler_sp;
-	siginfo_t *siginfo;
-	ucontext_t *ucontext;
-	int signo;
-} __packed;
-
 void pprocess_signal_deliver(struct ukarch_execenv *execenv);
 void pprocess_signal_notify(struct posix_thread *thread);
 
@@ -316,39 +301,20 @@ int pprocess_signal_thread_do(int tgid, int tid, int signum, siginfo_t *siginfo)
 int pprocess_signal_send(struct posix_process *proc, int signum,
 			 siginfo_t *siginfo);
 
-/* Jump to signal handler
- *
- * Trampoline to jump from unikraft to userspace context.
- *
- * @param signum signal number
- * @param si     data to pass as the 2nd parameter to the handler
- *               if SA_SIGINFO is set, or NULL
- * @param ctx    user context to pass as the 3rd parameter to
- *               the handler if SA_SIGINFO is set, or NULL
- * @param sp     the user stack pointer address to switch to
- *               before calling the handler
- */
-void pprocess_signal_arch_jmp_handler(struct ukarch_execenv *execenv,
-				      int signum, siginfo_t *si,
-				      ucontext_t *ctx,
-				      void *handler, void *sp);
+struct pprocess_signal_stack {
+	stack_t previous;
+	__uptr sp;
+	bool on_altstack;
+};
 
-#if CONFIG_ARCH_ARM_64
+struct pprocess_signal_stack
+pprocess_signal_stack_prepare(const struct kern_sigaction *action,
+			      __uptr sp, __sz redzone);
 void pprocess_signal_arch_prepare(struct uk_signal *signal,
 	const struct kern_sigaction *action, struct ukarch_execenv *execenv,
 	const uk_sigset_t *saved_mask);
-void pprocess_signal_altstack_update(__uptr sp);
-#endif
-
 void pprocess_signal_restore_altstack(const stack_t *stack, __uptr sp);
-
-/* Populate POSIX u_context from ukarch_execenv */
-void pprocess_signal_arch_set_ucontext(struct ukarch_execenv *execenv,
-				       ucontext_t *ucontext);
-
-/* Populate ukarch_execenv from POSIX u_context */
-int pprocess_signal_arch_get_ucontext(ucontext_t *ucontext,
-				       struct ukarch_execenv *execenv);
+void pprocess_signal_restore_mask(uk_sigset_t mask);
 
 /* Checks whether a signal can be delivered to a given thread, depending
  * on the thread's mask, whether the process chooses to ingores this signal,

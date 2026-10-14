@@ -65,8 +65,8 @@ static int restore_extended_context(ucontext_t *ucontext,
 	return -EINVAL;
 }
 
-void pprocess_signal_arch_set_ucontext(struct ukarch_execenv *execenv,
-				       ucontext_t *ucontext)
+static void pprocess_signal_arch_set_ucontext(struct ukarch_execenv *execenv,
+					      ucontext_t *ucontext)
 {
 	UK_ASSERT(execenv);
 	UK_ASSERT(ucontext);
@@ -122,8 +122,8 @@ void pprocess_signal_arch_set_ucontext(struct ukarch_execenv *execenv,
 	ucontext->uc_mcontext.pstate = uk_lcpu_regs_get(execenv->regs, SPSR_EL1);
 }
 
-int pprocess_signal_arch_get_ucontext(ucontext_t *ucontext,
-				       struct ukarch_execenv *execenv)
+static int pprocess_signal_arch_get_ucontext(ucontext_t *ucontext,
+					     struct ukarch_execenv *execenv)
 {
 	UK_ASSERT(ucontext);
 	UK_ASSERT(execenv);
@@ -188,26 +188,16 @@ void pprocess_signal_arch_prepare(struct uk_signal *signal,
 	const struct kern_sigaction *action, struct ukarch_execenv *execenv,
 	const uk_sigset_t *saved_mask)
 {
-	struct uk_signal_tdesc *state = uk_pthread_current()->signal;
+	struct pprocess_signal_stack stack;
 	__uptr sp = uk_lcpu_regs_get(execenv->regs, SP);
 	struct arm64_signal_frame *frame;
-	stack_t saved_stack;
-	bool on_altstack;
 
-	pprocess_signal_altstack_update(sp);
-	saved_stack = state->altstack;
-	on_altstack = saved_stack.ss_flags & SS_ONSTACK;
-	if ((action->ks_flags & SA_ONSTACK) &&
-	    !(saved_stack.ss_flags & (SS_DISABLE | SS_ONSTACK))) {
-		sp = (__uptr)saved_stack.ss_sp + saved_stack.ss_size;
-		on_altstack = true;
-		if ((unsigned int)saved_stack.ss_flags & SS_AUTODISARM)
-			state->altstack = (stack_t){ .ss_flags = SS_DISABLE };
-		else
-			state->altstack.ss_flags |= SS_ONSTACK;
-	}
-	if (sp < sizeof(*frame) || (on_altstack &&
-	    ALIGN_DOWN(sp - sizeof(*frame), UKARCH_SP_ALIGN) < (__uptr)saved_stack.ss_sp)) {
+	stack = pprocess_signal_stack_prepare(action, sp, 0);
+	sp = stack.sp;
+	if (sp < sizeof(*frame) ||
+	    (stack.on_altstack &&
+	     ALIGN_DOWN(sp - sizeof(*frame), UKARCH_SP_ALIGN) <
+	     (__uptr)stack.previous.ss_sp)) {
 		pprocess_exit(uk_pprocess_current(), POSIX_PROCESS_KILLED, SIGSEGV);
 		uk_sched_thread_exit();
 	}
@@ -218,7 +208,7 @@ void pprocess_signal_arch_prepare(struct uk_signal *signal,
 	frame->info = signal->siginfo;
 	pprocess_signal_arch_set_ucontext(execenv, &frame->context);
 	memcpy(&frame->context.uc_sigmask, saved_mask, sizeof(*saved_mask));
-	frame->context.uc_stack = saved_stack;
+	frame->context.uc_stack = stack.previous;
 	if (signal->siginfo.si_code > 0 &&
 	    (signal->siginfo.si_signo == SIGBUS || signal->siginfo.si_signo == SIGSEGV))
 		frame->context.uc_mcontext.fault_address = (__uptr)signal->siginfo.si_addr;
@@ -245,13 +235,7 @@ UK_LLSYSCALL_R_E_DEFINE(long, rt_sigreturn)
 		uk_sched_thread_exit();
 	}
 	memcpy(&mask, &frame->context.uc_sigmask, sizeof(mask));
-	uk_sigdelset(&mask, SIGKILL);
-	uk_sigdelset(&mask, SIGSTOP);
-	uk_mutex_lock(&pprocess_mutex);
-	thread->signal->mask = mask;
-	if ((thread->signal->sigqueue.pending | process->signal->sigqueue.pending) & ~mask)
-		uk_store_n(&thread->signal->notification, true);
-	uk_mutex_unlock(&pprocess_mutex);
+	pprocess_signal_restore_mask(mask);
 	pprocess_signal_restore_altstack(&frame->context.uc_stack,
 		uk_lcpu_regs_get(execenv->regs, SP));
 	return uk_lcpu_regs_get(execenv->regs, X0);

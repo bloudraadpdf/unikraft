@@ -18,26 +18,6 @@
 #include "signal.h"
 #include "siginfo.h"
 
-#if !CONFIG_ARCH_ARM_64
-UK_CTASSERT(__offsetof(struct pprocess_signal_handler_ctx, handler_fn) ==
-	    PPROCESS_SIGHNDL_CTX_FN_OFFS);
-UK_CTASSERT(__offsetof(struct pprocess_signal_handler_ctx, handler_sp) ==
-	    PPROCESS_SIGHNDL_CTX_SP_OFFS);
-UK_CTASSERT(__offsetof(struct pprocess_signal_handler_ctx, signo) ==
-	    PPROCESS_SIGHNDL_CTX_SN_OFFS);
-UK_CTASSERT(__offsetof(struct pprocess_signal_handler_ctx, siginfo) ==
-	    PPROCESS_SIGHNDL_CTX_SI_OFFS);
-UK_CTASSERT(__offsetof(struct pprocess_signal_handler_ctx, ucontext) ==
-	    PPROCESS_SIGHNDL_CTX_UC_OFFS);
-
-/* Notice: We implement this in pure asm, as there is a number of issues
- *         with correctly preserving context in inline asm.
- */
-void pprocess_signal_jmp_handler(struct pprocess_signal_handler_ctx *h,
-				 struct ukarch_execenv *execenv);
-
-#endif
-
 static void uk_sigact_term(int __unused sig)
 {
 	struct posix_process *pprocess;
@@ -85,88 +65,6 @@ bool pprocess_signal_is_deliverable(struct posix_thread *pthread, int signum)
 
 	return (!IS_MASKED(pthread, signum) && !IS_IGNORED(proc, signum));
 }
-
-#if !CONFIG_ARCH_ARM_64
-static void handle_self(struct uk_signal *sig, const struct kern_sigaction *ks,
-			struct ukarch_execenv *execenv, uk_sigset_t *saved_mask)
-{
-	struct pprocess_signal_handler_ctx handler_ctx;
-	ucontext_t ucontext = {0};
-	struct posix_thread *this_thread;
-	stack_t saved_stack;
-	bool switched_stack;
-	stack_t *altstack;
-	__uptr ulsp;
-
-	UK_ASSERT(sig);
-	UK_ASSERT(ks);
-	UK_ASSERT(execenv);
-
-	/* We expect to be operating on the aux stack */
-	UK_ASSERT(SP_IN_AUXSP(uk_arch_read_sp(),
-			      uk_pcpuvar_current_get(UK_LCPU_AUXSP_SYM)));
-
-	this_thread = uk_pthread_current();
-	UK_ASSERT(this_thread);
-
-	altstack = &this_thread->signal->altstack;
-	saved_stack = *altstack;
-	switched_stack = (ks->ks_flags & SA_ONSTACK) &&
-		!(altstack->ss_flags & (SS_DISABLE | SS_ONSTACK));
-
-	uk_pr_debug("tid %d handling signal %d, handler: 0x%lx, flags: 0x%lx\n",
-		    uk_sys_gettid(), sig->siginfo.si_signo,
-		    (__u64)ks->ks_handler,
-		    ks->ks_flags);
-
-	if (switched_stack) {
-		UK_ASSERT(altstack->ss_sp);
-
-		uk_pr_debug("Using altstack, ss_sp: 0x%lx, ss_size: 0x%lx\n",
-			    (__u64)altstack->ss_sp, altstack->ss_size);
-
-		ulsp = ukarch_gen_sp(altstack->ss_sp, altstack->ss_size);
-		if ((unsigned int)altstack->ss_flags & SS_AUTODISARM)
-			*altstack = (stack_t){ .ss_flags = SS_DISABLE };
-		else
-			altstack->ss_flags |= SS_ONSTACK;
-	} else {
-		ulsp = ALIGN_DOWN(uk_lcpu_regs_get(execenv->regs, SP),
-				  UKARCH_SP_ALIGN);
-		uk_pr_debug("Using the application stack @ 0x%lx\n", ulsp);
-	}
-
-	handler_ctx.handler_fn = ks->ks_handler;
-	handler_ctx.handler_sp = (void *)ulsp;
-	handler_ctx.signo = sig->siginfo.si_signo;
-
-	if (ks->ks_flags & SA_SIGINFO) {
-		handler_ctx.siginfo = &sig->siginfo;
-		handler_ctx.ucontext = &ucontext;
-
-		pprocess_signal_arch_set_ucontext(execenv, &ucontext);
-		memcpy(&ucontext.uc_sigmask, saved_mask, sizeof(*saved_mask));
-		ucontext.uc_stack = saved_stack;
-		ucontext.uc_stack.ss_flags &= ~SS_ONSTACK;
-		pprocess_signal_jmp_handler(&handler_ctx, execenv);
-		if (pprocess_signal_arch_get_ucontext(&ucontext, execenv))
-			uk_sigact_term(SIGSEGV);
-		memcpy(saved_mask, &ucontext.uc_sigmask, sizeof(*saved_mask));
-		uk_sigdelset(saved_mask, SIGKILL);
-		uk_sigdelset(saved_mask, SIGSTOP);
-		saved_stack = ucontext.uc_stack;
-	} else {
-		handler_ctx.siginfo = __NULL;
-		handler_ctx.ucontext = __NULL;
-
-		pprocess_signal_jmp_handler(&handler_ctx, execenv);
-	}
-
-	pprocess_signal_restore_altstack(&saved_stack,
-		uk_lcpu_regs_get(execenv->regs, SP));
-}
-
-#endif
 
 /* Deliver a signal to a thread. The caller must check that the signal
  * is not masked by the handling thread or ignored by the process or its
@@ -228,12 +126,8 @@ static bool do_deliver(struct posix_thread *pthread, struct uk_signal *sig,
 		goto out_restore_mask;
 	}
 
-#if CONFIG_ARCH_ARM_64
 	pprocess_signal_arch_prepare(sig, &action, execenv, &saved_mask);
 	prepared = true;
-#else
-	handle_self(sig, &action, execenv, &saved_mask);
-#endif
 
 	uk_mutex_lock(&pprocess_mutex);
 out_restore_mask:
@@ -394,4 +288,19 @@ err_panic:
 	/* FIXME: Cascading faulting */
 	UK_CRASH("Cannot deliver signal %d for fault at 0x%lx\n",
 		 error->signum, error->vaddr);
+}
+
+void pprocess_signal_restore_mask(uk_sigset_t mask)
+{
+	struct posix_thread *thread = uk_pthread_current();
+	struct posix_process *process = thread->process;
+
+	uk_sigdelset(&mask, SIGKILL);
+	uk_sigdelset(&mask, SIGSTOP);
+	uk_mutex_lock(&pprocess_mutex);
+	thread->signal->mask = mask;
+	if ((thread->signal->sigqueue.pending |
+	     process->signal->sigqueue.pending) & ~mask)
+		uk_store_n(&thread->signal->notification, true);
+	uk_mutex_unlock(&pprocess_mutex);
 }

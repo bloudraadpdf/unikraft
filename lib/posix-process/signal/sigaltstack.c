@@ -44,12 +44,28 @@ static void update_stack_position(stack_t *stack, __uptr sp)
 		stack->ss_flags |= SS_ONSTACK;
 }
 
-#if CONFIG_ARCH_ARM_64
-void pprocess_signal_altstack_update(__uptr sp)
+struct pprocess_signal_stack
+pprocess_signal_stack_prepare(const struct kern_sigaction *action,
+			      __uptr sp, __sz redzone)
 {
-	update_stack_position(&uk_pthread_current()->signal->altstack, sp);
+	stack_t *current = &uk_pthread_current()->signal->altstack;
+	struct pprocess_signal_stack stack;
+
+	update_stack_position(current, sp);
+	stack.previous = *current;
+	stack.on_altstack = current->ss_flags & SS_ONSTACK;
+	stack.sp = sp >= redzone ? sp - redzone : 0;
+	if ((action->ks_flags & SA_ONSTACK) &&
+	    !(current->ss_flags & (SS_DISABLE | SS_ONSTACK))) {
+		stack.sp = (__uptr)current->ss_sp + current->ss_size;
+		stack.on_altstack = true;
+		if ((unsigned int)current->ss_flags & SS_AUTODISARM)
+			*current = (stack_t){ .ss_flags = SS_DISABLE };
+		else
+			current->ss_flags |= SS_ONSTACK;
+	}
+	return stack;
 }
-#endif
 
 void pprocess_signal_restore_altstack(const stack_t *stack, __uptr sp)
 {
@@ -60,22 +76,15 @@ void pprocess_signal_restore_altstack(const stack_t *stack, __uptr sp)
 	update_stack_position(current, sp);
 }
 
-#if CONFIG_ARCH_ARM_64
 UK_SYSCALL_R_E_DEFINE(int, sigaltstack, const stack_t *, ss,
 		    stack_t *, old_ss)
-#else
-UK_SYSCALL_R_DEFINE(int, sigaltstack, const stack_t *, ss,
-		    stack_t *, old_ss)
-#endif
 {
 	stack_t *current = &uk_pthread_current()->signal->altstack;
 	stack_t previous;
 	int ret;
 
-#if CONFIG_ARCH_ARM_64
 	if (execenv)
 		update_stack_position(current, uk_lcpu_regs_get(execenv->regs, SP));
-#endif
 	previous = *current;
 
 	if (ss) {
@@ -90,13 +99,8 @@ UK_SYSCALL_R_DEFINE(int, sigaltstack, const stack_t *, ss,
 
 #else /* !CONFIG_LIBPOSIX_PROCESS_SIGNAL */
 
-#if CONFIG_ARCH_ARM_64
 UK_SYSCALL_R_E_DEFINE(int, sigaltstack, const stack_t *, ss,
 		    stack_t *, old_ss)
-#else
-UK_SYSCALL_R_DEFINE(int, sigaltstack, const stack_t *, ss,
-		    stack_t *, old_ss)
-#endif
 {
 	UK_WARN_STUBBED();
 	return 0;

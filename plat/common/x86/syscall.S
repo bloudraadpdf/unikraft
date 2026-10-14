@@ -37,6 +37,7 @@
 #include <uk/arch/x86_64.h>
 #include <uk/asm.h>
 #include <uk/asm/cfi.h>
+#include <uk/bits/syscall_nrs.h>
 #include <uk/lcpu.h>
 
 ENTRY(_ukplat_syscall)
@@ -317,6 +318,12 @@ ENTRY(_ukplat_syscall)
 	popq_reg_cfi rsi
 	popq_reg_cfi rdi
 
+	/* A signal return restores RCX independently of the target RIP. */
+	cmpq	%rcx, 8(%rsp)
+	jne	1f
+	cmpq	$SYS_rt_sigreturn, (%rsp)
+	je	1f
+	.cfi_remember_state
 	movq	32(%rsp), %rsp
 	.cfi_restore rsp
 	.cfi_def_cfa rsp, 0
@@ -332,4 +339,9 @@ ENTRY(_ukplat_syscall)
 	 *     Conference on Virtual Execution Environments (VEE 2019))
 	 */
 	jmp *%rcx
+1:
+	.cfi_restore_state
+	addq	$8, %rsp /* Skip orig_rax to reach the IRET frame. */
+	.cfi_adjust_cfa_offset -8
+	iretq
 	.cfi_endproc
