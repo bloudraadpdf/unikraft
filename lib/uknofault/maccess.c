@@ -4,6 +4,7 @@
  * You may not use this file except in compliance with the License.
  */
 
+#include <errno.h>
 #include <uk/arch/limits.h>
 #include <uk/nofault.h>
 #include <uk/arch/types.h>
@@ -59,6 +60,9 @@ int __used nf_mf_handler(const struct nf_excpttab_entry *e,
 static int nf_mem_fault_handler(void *data)
 {
 	struct uk_lcpu_except_err_ctx *ctx = data;
+
+	if (uk_lcpu_except_err_ctx_get_handler_err(ctx) == -EAGAIN)
+		return UK_EVENT_NOT_HANDLED;
 
 	return nf_handle_trap(nf_regs_ip(uk_lcpu_except_err_ctx_get_regs(ctx)),
 			      ctx);

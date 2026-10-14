@@ -1,5 +1,7 @@
 menuconfig LIBPOSIX_FDIO
 	bool "posix-fdio: File I/O and control"
+	select LIBUKALLOC
+	select LIBUKNOFAULT
 	select LIBUKATOMIC
 	select LIBUKFILE
 	select LIBPOSIX_FD

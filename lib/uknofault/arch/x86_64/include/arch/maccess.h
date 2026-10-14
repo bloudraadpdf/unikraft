@@ -15,7 +15,7 @@
 		NF_EXCPTTAB_ENTRY_L(1b, cont_label, nf_mf_handler)	\
 		: /* no outputs in goto asm allowed */			\
 		: "r"(addr)						\
-		: reg : cont_label)
+		: reg, "memory" : cont_label)
 
 #define nf_probe_r(addr, type, cont_label)				\
 	do {								\
@@ -43,7 +43,7 @@
 		NF_EXCPTTAB_ENTRY_L(2b, cont_label, nf_mf_handler)	\
 		: /* no outputs in goto asm allowed */			\
 		: "r"(dst), "r"(src)					\
-		: reg : cont_label)
+		: reg, "memory" : cont_label)
 
 #define nf_memcpy(dst, src, type, cont_label)				\
 	do {								\

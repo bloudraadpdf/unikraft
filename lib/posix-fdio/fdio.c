@@ -7,6 +7,10 @@
 /* Internal syscalls for file I/O */
 
 #include <poll.h>
+#include <string.h>
+#include <uk/alloc.h>
+#include <uk/arch/limits.h>
+#include <uk/nofault.h>
 
 #include <uk/posix-fdio.h>
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
@@ -101,9 +105,103 @@ static int fdio_wait(const struct uk_file *file, uk_pollevent events)
 #endif
 }
 
+
+struct fdio_buffer {
+	struct iovec *user;
+	struct iovec *io;
+	void *data;
+	int count;
+};
+
+static ssize_t fdio_buffer_copy(struct fdio_buffer *buffer, size_t length,
+			       int write)
+{
+	size_t done = 0;
+
+	for (int i = 0; i < buffer->count && done < length; i++) {
+		size_t size = MIN(buffer->user[i].iov_len, length - done);
+		char *user = buffer->user[i].iov_base;
+		char *kernel = buffer->io[i].iov_base;
+		size_t copied = uk_nofault_memcpy(write ? kernel : user,
+				write ? user : kernel, size, 0);
+
+		done += copied;
+		if (copied != size)
+			return done ? (ssize_t)done : -EFAULT;
+	}
+	return done;
+}
+
+static void fdio_buffer_free(struct fdio_buffer *buffer)
+{
+	uk_free(uk_alloc_get_default(), buffer->data);
+	uk_free(uk_alloc_get_default(), buffer->user);
+}
+
+static int fdio_buffer_init(struct fdio_buffer *buffer, const struct iovec *iov,
+			    int count, int write)
+{
+	struct uk_alloc *a = uk_alloc_get_default();
+	size_t total = 0;
+	size_t offset = 0;
+	size_t metadata;
+	int rc = -EFAULT;
+
+	memset(buffer, 0, sizeof(*buffer));
+	if (count < 0 || count > 1024)
+		return -EINVAL;
+	if (!count)
+		return 0;
+	metadata = (size_t)count * sizeof(*iov);
+	buffer->user = uk_malloc(a, 2 * metadata);
+	if (!buffer->user)
+		return -ENOMEM;
+	buffer->io = buffer->user + count;
+	buffer->count = count;
+	if (uk_nofault_memcpy((char *)buffer->user, (const char *)iov,
+			      metadata, 0) != metadata)
+		goto fail;
+	for (int i = 0; i < count; i++) {
+		if (buffer->user[i].iov_len > __SSZ_MAX - total) {
+			rc = -EINVAL;
+			goto fail;
+		}
+		total += buffer->user[i].iov_len;
+	}
+	if (total) {
+		buffer->data = uk_malloc(a, total);
+		if (!buffer->data) {
+			rc = -ENOMEM;
+			goto fail;
+		}
+	}
+	for (int i = 0; i < count; i++) {
+		buffer->io[i].iov_base = total ?
+			(char *)buffer->data + offset : NULL;
+		buffer->io[i].iov_len = buffer->user[i].iov_len;
+		offset += buffer->user[i].iov_len;
+	}
+	if (write && fdio_buffer_copy(buffer, total, 1) != (ssize_t)total)
+		goto fail;
+	return 0;
+fail:
+	fdio_buffer_free(buffer);
+	return rc;
+}
+
+static ssize_t fdio_buffer_finish(struct fdio_buffer *buffer, ssize_t result,
+				 int write)
+{
+	if (!write && result > 0)
+		result = fdio_buffer_copy(buffer, result, 0);
+	fdio_buffer_free(buffer);
+	return result;
+}
+
 ssize_t uk_sys_preadv(struct uk_ofile *of, const struct iovec *iov, int iovcnt,
 		      off_t offset)
 {
+	struct fdio_buffer buffer;
 	ssize_t r;
 	long flags;
 	int iolock;
@@ -120,6 +218,11 @@ ssize_t uk_sys_preadv(struct uk_ofile *of, const struct iovec *iov, int iovcnt,
 	if (unlikely(offset < 0))
 		return -EINVAL;
 
+	r = fdio_buffer_init(&buffer, iov, iovcnt, 0);
+	if (r)
+		return r;
+	iov = buffer.io;
+
 	flags = mode & _READ_MODEMASK;
 	iolock = _SHOULD_LOCK(mode);
 	f = of->file;
@@ -133,8 +236,10 @@ ssize_t uk_sys_preadv(struct uk_ofile *of, const struct iovec *iov, int iovcnt,
 			break;
 		r = fdio_wait(f, UKFD_POLLIN|UKFD_POLL_ALWAYS);
 		if (r)
-			return r;
+			return fdio_buffer_finish(&buffer, r, 0);
 	}
+	r = fdio_buffer_finish(&buffer, r, 0);
+
 	return r;
 }
 
@@ -145,6 +250,7 @@ ssize_t uk_sys_pread(struct uk_ofile *of, void *buf, size_t count, off_t offset)
 
 ssize_t uk_sys_readv(struct uk_ofile *of, const struct iovec *iov, int iovcnt)
 {
+	struct fdio_buffer buffer;
 	ssize_t r;
 	long flags;
 	size_t off;
@@ -160,6 +266,11 @@ ssize_t uk_sys_readv(struct uk_ofile *of, const struct iovec *iov, int iovcnt)
 		return -EINVAL;
 	if (unlikely(!iov && iovcnt))
 		return -EFAULT;
+
+	r = fdio_buffer_init(&buffer, iov, iovcnt, 0);
+	if (r)
+		return r;
+	iov = buffer.io;
 
 	seekable = _IS_SEEKABLE(mode);
 	iolock = _SHOULD_LOCK(mode);
@@ -184,8 +295,10 @@ ssize_t uk_sys_readv(struct uk_ofile *of, const struct iovec *iov, int iovcnt)
 			_of_unlock(of);
 		r = fdio_wait(f, UKFD_POLLIN|UKFD_POLL_ALWAYS);
 		if (r)
-			return r;
+			return fdio_buffer_finish(&buffer, r, 0);
 	}
+
+	r = fdio_buffer_finish(&buffer, r, 0);
 
 	if (seekable) {
 		if (r > 0)
@@ -204,6 +317,7 @@ ssize_t uk_sys_read(struct uk_ofile *of, void *buf, size_t count)
 ssize_t uk_sys_preadv2(struct uk_ofile *of, const struct iovec *iov, int iovcnt,
 		       off_t offset, int flags)
 {
+	struct fdio_buffer buffer;
 	ssize_t r;
 	size_t off;
 	long xflags;
@@ -228,6 +342,11 @@ ssize_t uk_sys_preadv2(struct uk_ofile *of, const struct iovec *iov, int iovcnt,
 		return -EFAULT;
 	if (unlikely(offset < 0))
 		return -EINVAL;
+
+	r = fdio_buffer_init(&buffer, iov, iovcnt, 0);
+	if (r)
+		return r;
+	iov = buffer.io;
 
 	seekable = _IS_SEEKABLE(mode);
 	use_pos = offset == -1 && seekable;
@@ -254,8 +373,10 @@ ssize_t uk_sys_preadv2(struct uk_ofile *of, const struct iovec *iov, int iovcnt,
 			_of_unlock(of);
 		r = fdio_wait(f, UKFD_POLLIN|UKFD_POLL_ALWAYS);
 		if (r)
-			return r;
+			return fdio_buffer_finish(&buffer, r, 0);
 	}
+
+	r = fdio_buffer_finish(&buffer, r, 0);
 
 	if (use_pos) {
 		if (r > 0)
@@ -270,6 +391,7 @@ ssize_t uk_sys_preadv2(struct uk_ofile *of, const struct iovec *iov, int iovcnt,
 ssize_t uk_sys_pwritev(struct uk_ofile *of, const struct iovec *iov, int iovcnt,
 		       off_t offset)
 {
+	struct fdio_buffer buffer;
 	ssize_t r;
 	long flags;
 	const struct uk_file *f;
@@ -286,6 +408,11 @@ ssize_t uk_sys_pwritev(struct uk_ofile *of, const struct iovec *iov, int iovcnt,
 	if (unlikely(offset < 0))
 		return -EINVAL;
 
+	r = fdio_buffer_init(&buffer, iov, iovcnt, 1);
+	if (r)
+		return r;
+	iov = buffer.io;
+
 	flags = mode & _WRITE_MODEMASK;
 	iolock = _SHOULD_LOCK(mode);
 	f = of->file;
@@ -299,8 +426,10 @@ ssize_t uk_sys_pwritev(struct uk_ofile *of, const struct iovec *iov, int iovcnt,
 			break;
 		r = fdio_wait(f, UKFD_POLLOUT|UKFD_POLL_ALWAYS);
 		if (r)
-			return r;
+			return fdio_buffer_finish(&buffer, r, 1);
 	}
+
+	r = fdio_buffer_finish(&buffer, r, 1);
 
 	return r;
 }
@@ -313,6 +442,7 @@ ssize_t uk_sys_pwrite(struct uk_ofile *of, const void *buf, size_t count,
 
 ssize_t uk_sys_writev(struct uk_ofile *of, const struct iovec *iov, int iovcnt)
 {
+	struct fdio_buffer buffer;
 	ssize_t r;
 	off_t off;
 	long flags;
@@ -328,6 +458,11 @@ ssize_t uk_sys_writev(struct uk_ofile *of, const struct iovec *iov, int iovcnt)
 		return -EINVAL;
 	if (unlikely(!iov && iovcnt))
 		return -EFAULT;
+
+	r = fdio_buffer_init(&buffer, iov, iovcnt, 1);
+	if (r)
+		return r;
+	iov = buffer.io;
 
 	seekable = _IS_SEEKABLE(mode);
 	iolock = _SHOULD_LOCK(mode);
@@ -361,8 +496,10 @@ ssize_t uk_sys_writev(struct uk_ofile *of, const struct iovec *iov, int iovcnt)
 			_of_unlock(of);
 		r = fdio_wait(f, UKFD_POLLOUT|UKFD_POLL_ALWAYS);
 		if (r)
-			return r;
+			return fdio_buffer_finish(&buffer, r, 1);
 	}
+
+	r = fdio_buffer_finish(&buffer, r, 1);
 
 	if (seekable) {
 		if (r >= 0)
@@ -381,6 +518,7 @@ ssize_t uk_sys_write(struct uk_ofile *of, const void *buf, size_t count)
 ssize_t uk_sys_pwritev2(struct uk_ofile *of, const struct iovec *iov,
 			int iovcnt, off_t offset, int flags)
 {
+	struct fdio_buffer buffer;
 	ssize_t r;
 	off_t off;
 	long xflags;
@@ -399,6 +537,11 @@ ssize_t uk_sys_pwritev2(struct uk_ofile *of, const struct iovec *iov,
 		return -EFAULT;
 	if (unlikely(offset < 0))
 		return -EINVAL;
+
+	r = fdio_buffer_init(&buffer, iov, iovcnt, 1);
+	if (r)
+		return r;
+	iov = buffer.io;
 
 	seekable = _IS_SEEKABLE(mode);
 	use_pos = seekable && offset == -1;
@@ -443,8 +586,10 @@ ssize_t uk_sys_pwritev2(struct uk_ofile *of, const struct iovec *iov,
 			_of_unlock(of);
 		r = fdio_wait(f, UKFD_POLLOUT|UKFD_POLL_ALWAYS);
 		if (r)
-			return r;
+			return fdio_buffer_finish(&buffer, r, 1);
 	}
+
+	r = fdio_buffer_finish(&buffer, r, 1);
 
 	if (use_pos) {
 		if (r >= 0) {
