@@ -433,8 +433,8 @@ static inline int lcpu_transition_safe(struct uk_lcpu *lcpu, int incr)
 		if (!uk_lcpu_state_is_online(old))
 			return 0;
 
-		UK_ASSERT(old <= INT_MAX - incr);
-		UK_ASSERT(old >= INT_MIN + incr);
+		UK_ASSERT(incr <= 0 || old <= INT_MAX - incr);
+		UK_ASSERT(incr >= 0 || old >= INT_MIN - incr);
 		new = old + incr;
 
 		UK_ASSERT(uk_lcpu_state_is_online(new));
@@ -469,34 +469,30 @@ int uk_lcpu_run(const __u64 lcpuidx[], unsigned int *num,
 		if (!lcpu_transition_safe(lcpu, 1))
 			continue;
 
-		/* We successfully performed the state transition. Now queue
-		 * the function and trigger its execution
-		 */
-		while (1) {
+		do {
 			rc = uk_lcpu_fn_enqueue(lcpu, fn);
-			if (unlikely(rc))
-				goto lcpu_run_err;
+			if (rc == -EAGAIN && !(flags & UK_LCPU_RFLG_DONOTBLOCK))
+				uk_arch_spinwait();
+		} while (rc == -EAGAIN && !(flags & UK_LCPU_RFLG_DONOTBLOCK));
+		if (unlikely(rc))
+			goto lcpu_run_cancel;
 
+		do {
 			rc = uk_pal_except_send_ipi(uk_pcpuvar_lval(lcpuidx[i],
 							uk_pcpuvar_cpu_id),
 						    *uk_lcpu_run_irqv);
-			if (unlikely(rc)) {
-				/* Retry if we could not enqueue the function
-				 * and it is ok to block
-				 */
-				if ((rc == -EAGAIN) &&
-				    (!(flags & UK_LCPU_RFLG_DONOTBLOCK)))
-					continue;
-
-				/* Try to transition back one busy level. We
-				 * don't care if the CPU is no longer online
-				 */
-				lcpu_transition_safe(lcpu, -1);
-				goto lcpu_run_err;
-			}
-
-			break;
+			if (rc == -EAGAIN && !(flags & UK_LCPU_RFLG_DONOTBLOCK))
+				uk_arch_spinwait();
+		} while (rc == -EAGAIN && !(flags & UK_LCPU_RFLG_DONOTBLOCK));
+		if (unlikely(rc)) {
+			__atomic_store_n(&lcpu->fn.fn, __NULL, __ATOMIC_RELEASE);
+			goto lcpu_run_cancel;
 		}
+		continue;
+
+lcpu_run_cancel:
+		lcpu_transition_safe(lcpu, -1);
+		goto lcpu_run_err;
 	}
 
 lcpu_run_err:
