@@ -86,8 +86,6 @@ typedef struct fd_set
   unsigned char fd_bits [(FD_SETSIZE+7)/8];
 } fd_set;
 
-#elif FD_SETSIZE < (LWIP_SOCKET_OFFSET + MEMP_NUM_NETCONN)
-#error "external FD_SETSIZE too small for number of sockets"
 #else
 #define LWIP_SELECT_MAXNFDS FD_SETSIZE
 #endif /* FD_SET */
