@@ -49,7 +49,10 @@ own marker. Both disks pass `e2fsck` and SQLite integrity checks; the captured
 source disk stays unchanged. Native interrupted-write checks pass on 1 KiB
 and 4 KiB images through both the port and Linux recovery. They cover a
 committed allocation and an aborted transaction, with filesystem checks
-after replay. Managed shim checks remain unfinished.
+after replay. Managed ARM64 shim checks pass for EROFS and CPIO roots with
+two CPUs, four requests across reused and replaced VMs, writable scratch
+contents, directory ownership and cleanup. CPIO extraction restores archive
+UID/GID values without following symbolic links.
 
 ARM64 and AMD64 metadata layouts, snapshot discovery and entropy setup are
 selected by architecture. AMD64 has not yet been built from the combined

@@ -57,6 +57,7 @@ int uk_syscall_do_open(const char *, int, mode_t);
 int uk_syscall_do_close(int);
 ssize_t uk_syscall_do_write(int, const void *, size_t);
 int uk_syscall_do_chmod(const char *, mode_t);
+int uk_syscall_do_lchown(const char *, uid_t, gid_t);
 int uk_syscall_do_utime(const char *, const struct utimbuf *);
 int uk_syscall_do_mkdir(const char *, mode_t);
 int uk_syscall_do_symlink(const char *, const char *);
@@ -409,9 +410,23 @@ extract_section(struct cpio_ilist *ilist,
 				   mode & 0777, mtime);
 	else if (UKCPIO_IS_SYMLINK(mode))
 		err = extract_symlink(fullpath, data, filesize);
-	else
+	else {
 		uk_pr_warn("File %s unknown mode %o\n", fullpath, mode);
+		goto next;
+	}
 
+	if (err == UKCPIO_SUCCESS) {
+		rc = uk_syscall_do_lchown(fullpath,
+					UKCPIO_U32FIELD(header->uid),
+					UKCPIO_U32FIELD(header->gid));
+		if (unlikely(rc)) {
+			uk_pr_err("%s: Failed to retain ownership: %s (%d)\n",
+				  fullpath, strerror(-rc), -rc);
+			err = -UKCPIO_FILE_CHOWN_FAILED;
+		}
+	}
+
+next:
 	*headerp = UKCPIO_NEXT(header, namesize, filesize);
 	return err;
 }
