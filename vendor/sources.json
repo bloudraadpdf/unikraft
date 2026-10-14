@@ -3,5 +3,10 @@
     "revision": "0cd7a2b2c4d5ece85647c0c9903b50426e849420",
     "url": "https://github.com/unikraft/app-elfloader/archive/0cd7a2b2c4d5ece85647c0c9903b50426e849420.tar.gz",
     "sha256": "9fde2e4cfe283e30591688eadc4e60fbc054a6e4ab075febf8edd982b951278f"
+  },
+  "lib-libelf": {
+    "revision": "c03d4ceb22a2b9e9799238f9c277a14284d313ad",
+    "url": "https://github.com/unikraft/lib-libelf/archive/c03d4ceb22a2b9e9799238f9c277a14284d313ad.tar.gz",
+    "sha256": "f707dc9c19293880c34b40de67b5aa8a831926344d07c3bcc9cfbf86369fa84e"
   }
 }
