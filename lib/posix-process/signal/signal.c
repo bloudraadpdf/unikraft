@@ -6,7 +6,7 @@
 
 #include <uk/process.h>
 #include <uk/refcount.h>
-#include <uk/semaphore.h>
+#include <uk/plat/time.h>
 
 #include "process.h"
 #include "sigset.h"
@@ -32,6 +32,7 @@ static int pprocess_signal_enqueue(struct posix_process *pproc,
 				   struct uk_signal *sig)
 {
 	struct uk_signal_queue *queue;
+	struct posix_thread *thread, *next;
 	int signum = sig->siginfo.si_signo;
 	int rc = 0;
 
@@ -46,6 +47,16 @@ static int pprocess_signal_enqueue(struct posix_process *pproc,
 		uk_list_add_tail(&sig->list_head, &queue->list_head[signum]);
 		SET_PENDING(*queue, signum);
 		pproc->signal->queued_count++;
+	}
+	if (!rc) {
+		if (pthread) {
+			if (pthread->state == POSIX_THREAD_BLOCKED_SIGNAL)
+				uk_waitq_wake_up(&pthread->signal->waitq);
+		} else {
+			uk_pprocess_foreach_pthread(pproc, thread, next)
+				if (thread->state == POSIX_THREAD_BLOCKED_SIGNAL)
+					uk_waitq_wake_up(&thread->signal->waitq);
+		}
 	}
 	uk_mutex_unlock(&pprocess_mutex);
 	return rc;
@@ -100,25 +111,58 @@ struct uk_signal *pprocess_signal_dequeue(struct posix_process *pproc,
 	return sig;
 }
 
-struct uk_signal *pprocess_signal_next_pending_t(struct posix_thread *pthread)
+static int signal_take_locked(struct posix_thread *thread,
+			      const uk_sigset_t *set, siginfo_t *info)
 {
-	struct posix_process *pproc;
+	struct posix_process *proc = thread->process;
+	struct posix_thread *target;
 	struct uk_signal *sig;
 	int signum;
 
-	pproc = tid2pprocess(pthread->tid);
-	UK_ASSERT(pproc);
-
-	pprocess_signal_foreach(signum) {
-		if (!pprocess_signal_is_deliverable(pthread, signum))
-			continue;
-
-		sig = pprocess_signal_dequeue(pproc, pthread, signum);
-		if (sig)
-			return sig;
+	for (int queue = 0; queue < 2; queue++) {
+		target = queue ? NULL : thread;
+		pprocess_signal_foreach(signum) {
+			if (set ? !uk_sigismember(set, signum) :
+			    !pprocess_signal_is_deliverable(thread, signum))
+				continue;
+			sig = signal_dequeue_locked(proc, target, signum);
+			if (!sig)
+				continue;
+			if (info)
+				*info = sig->siginfo;
+			uk_signal_free(target ? thread->_a : proc->_a, sig);
+			return signum;
+		}
 	}
+	return 0;
+}
 
-	return NULL;
+int pprocess_signal_wait_locked(struct posix_thread *thread,
+			       const uk_sigset_t *set, siginfo_t *info,
+			       __nsec deadline)
+{
+	struct uk_signal_tdesc *td = thread->signal;
+	int rc;
+
+	UK_ASSERT(!td->wait_pending);
+	for (;;) {
+		if (set && (rc = signal_take_locked(thread, set, info)))
+			break;
+		if (signal_take_locked(thread, NULL, &td->wait_info)) {
+			td->wait_pending = true;
+			rc = -EINTR;
+			break;
+		}
+		if (deadline && ukplat_monotonic_clock() >= deadline) {
+			rc = -EAGAIN;
+			break;
+		}
+		thread->state = POSIX_THREAD_BLOCKED_SIGNAL;
+		uk_waitq_wait_deadline_locked(&td->waitq, deadline,
+			uk_mutex_lock, uk_mutex_unlock, &pprocess_mutex);
+	}
+	thread->state = POSIX_THREAD_RUNNING;
+	return rc;
 }
 
 void pprocess_signal_clear_pending(struct posix_process *proc, int signum)
@@ -196,7 +240,6 @@ int pprocess_signal_send(struct posix_process *proc, int signum,
 static int signal_process_locked(pid_t pid, int signum, siginfo_t *siginfo)
 {
 	struct posix_process *pproc = NULL;
-	struct posix_thread *thread, *threadn;
 	int rc;
 
 	if (unlikely(signum != 0 && !IS_VALID(signum)))
@@ -255,12 +298,6 @@ static int signal_process_locked(pid_t pid, int signum, siginfo_t *siginfo)
 	if (unlikely(rc))
 		return rc;
 
-	/* Wake up any threads that may be paused */
-	uk_pprocess_foreach_pthread(pproc, thread, threadn) {
-		if (thread->state == POSIX_THREAD_BLOCKED_SIGNAL)
-			uk_semaphore_up(&thread->signal->deliver_semaphore);
-	}
-
 	return 0;
 }
 
@@ -312,9 +349,6 @@ static int signal_thread_locked(int tgid, int tid, int signum,
 		uk_signal_free(pthread->_a, sig);
 		return rc;
 	}
-
-	if (pthread->state == POSIX_THREAD_BLOCKED_SIGNAL)
-		uk_semaphore_up(&pthread->signal->deliver_semaphore);
 
 #if CONFIG_LIBPOSIX_PROCESS_SIGNALFD
 	pthread_signal_files_notify(pproc, pthread, signum);
@@ -404,15 +438,16 @@ int pprocess_signal_tdesc_init(struct posix_thread *thread)
 	td = thread->signal;
 
 	td->altstack = (stack_t){ .ss_flags = SS_DISABLE };
-	uk_sigemptyset(&td->sigwait_set);
+	td->wait_pending = false;
+	td->restore_mask = false;
+	td->saved_mask = 0;
 	uk_sigemptyset(&td->mask);
 	uk_sigemptyset(&td->sigqueue.pending);
 
 	pprocess_signal_foreach(signum)
 		UK_INIT_LIST_HEAD(&td->sigqueue.list_head[signum]);
 
-	uk_semaphore_init(&thread->signal->pending_semaphore, 0);
-	uk_semaphore_init(&thread->signal->deliver_semaphore, 0);
+	uk_waitq_init(&td->waitq);
 
 	return 0;
 }

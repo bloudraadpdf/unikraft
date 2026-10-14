@@ -12,8 +12,8 @@
 #include <uk/syscall.h>
 #include <uk/timeutil.h>
 
-#if !CONFIG_LIBPOSIX_PROCESS_SIGNAL
 #include <uk/plat/time.h>
+#if !CONFIG_LIBPOSIX_PROCESS_SIGNAL
 #include <uk/sched.h>
 #endif /* !CONFIG_LIBPOSIX_PROCESS_SIGNAL */
 
@@ -27,44 +27,33 @@ UK_LLSYSCALL_R_DEFINE(int, rt_sigtimedwait,
 		      const struct timespec *, timeout,
 		      size_t, sigsetsize)
 {
-	struct posix_thread *pthread;
-	struct uk_signal *sig;
+	struct posix_thread *thread = uk_pthread_current();
+	uk_sigset_t wait_set;
+	__nsec deadline = 0;
+	__nsec now, limit;
+	int rc;
 
+	if (unlikely(sigsetsize != sizeof(uk_sigset_t)))
+		return -EINVAL;
 	if (unlikely(!set))
-		return -EINVAL;
-
-	if (unlikely(sigsetsize != sizeof(sigset_t)))
-		return -EINVAL;
-
-	pthread = uk_pthread_current();
-	UK_ASSERT(pthread);
-
-	/* TODO protect concurrent access by deliver_pending_proc() */
-	uk_sigcopyset(&pthread->signal->sigwait_set, set);
-
-	/* If a signal in the set is already pending return immediately */
-	if ((sig = pprocess_signal_next_pending_t(pthread)))
-		goto out;
-
+		return -EFAULT;
 	if (timeout) {
 		if (unlikely(!(uk_time_spec_canonical(timeout) &&
 			       uk_time_spec_positive(timeout))))
 			return -EINVAL;
-		uk_semaphore_down_to(&pthread->signal->pending_semaphore,
-				     uk_time_spec_to_nsec(timeout));
-	} else {
-		uk_semaphore_down(&pthread->signal->pending_semaphore);
+		now = ukplat_monotonic_clock();
+		limit = (__NSEC_MAX >> 1) - now;
+		deadline = (__u64)timeout->tv_sec > limit / 1000000000ULL ?
+			limit : MIN(uk_time_spec_to_nsec(timeout), limit);
+		deadline += now;
 	}
-
-	if ((sig = pprocess_signal_next_pending_t(pthread)))
-		goto out;
-
-	return -EAGAIN;
-out:
-	if (info)
-		*info = sig->siginfo;
-	uk_sigemptyset(&pthread->signal->sigwait_set);
-	return sig->siginfo.si_signo;
+	uk_sigcopyset(&wait_set, set);
+	uk_sigdelset(&wait_set, SIGKILL);
+	uk_sigdelset(&wait_set, SIGSTOP);
+	uk_mutex_lock(&pprocess_mutex);
+	rc = pprocess_signal_wait_locked(thread, &wait_set, info, deadline);
+	uk_mutex_unlock(&pprocess_mutex);
+	return rc;
 }
 #else /* !CONFIG_LIBPOSIX_PROCESS_SIGNAL */
 UK_LLSYSCALL_R_DEFINE(int, rt_sigtimedwait,

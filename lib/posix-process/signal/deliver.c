@@ -249,6 +249,33 @@ static void deliver_pending(struct posix_thread *thread, bool process_queue,
 	}
 }
 
+static void deliver_waited(struct posix_thread *thread,
+			   struct ukarch_execenv *execenv)
+{
+	struct uk_signal_tdesc *td = thread->signal;
+	struct uk_signal sig;
+	uk_sigset_t saved_mask;
+	bool restore_mask;
+
+	uk_mutex_lock(&pprocess_mutex);
+	if (!td->wait_pending) {
+		uk_mutex_unlock(&pprocess_mutex);
+		return;
+	}
+	sig.siginfo = td->wait_info;
+	restore_mask = td->restore_mask;
+	saved_mask = td->saved_mask;
+	td->wait_pending = false;
+	td->restore_mask = false;
+	uk_mutex_unlock(&pprocess_mutex);
+	do_deliver(thread, &sig, execenv);
+	if (restore_mask) {
+		uk_mutex_lock(&pprocess_mutex);
+		td->mask = saved_mask;
+		uk_mutex_unlock(&pprocess_mutex);
+	}
+}
+
 static bool kill_pending(struct posix_thread *thread)
 {
 	bool pending;
@@ -296,6 +323,8 @@ static void uk_signal_deliver(struct uk_syscall_exit_ctx *exit_ctx)
 	/* SIGSTOP / SIGCONT should have been already ignored by rt_sigaction */
 	UK_ASSERT(!IS_PENDING(pproc->signal->sigqueue, SIGSTOP));
 	UK_ASSERT(!IS_PENDING(pproc->signal->sigqueue, SIGCONT));
+
+	deliver_waited(pthread, execenv);
 
 	/* Deliver all pending signals of this process & thread */
 	deliver_pending(pthread, true, execenv);

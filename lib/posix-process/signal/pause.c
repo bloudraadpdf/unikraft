@@ -14,18 +14,12 @@
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 UK_SYSCALL_R_DEFINE(int, pause)
 {
-	struct posix_thread *pthread;
+	int rc;
 
-	pthread = uk_pthread_current();
-	UK_ASSERT(pthread);
-
-	/* Return as soon as a signal is queued. The signal will
-	 * be delivered at syscall exit.
-	 */
-	pthread->state = POSIX_THREAD_BLOCKED_SIGNAL;
-	uk_semaphore_down(&pthread->signal->deliver_semaphore);
-
-	return -EINTR;
+	uk_mutex_lock(&pprocess_mutex);
+	rc = pprocess_signal_wait_locked(uk_pthread_current(), NULL, NULL, 0);
+	uk_mutex_unlock(&pprocess_mutex);
+	return rc;
 }
 #else /* !CONFIG_LIBPOSIX_PROCESS_SIGNAL */
 UK_SYSCALL_R_DEFINE(int, pause)

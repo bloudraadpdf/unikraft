@@ -17,7 +17,7 @@
 #include <uk/list.h>
 #include <uk/process.h>
 #include <uk/refcount.h>
-#include <uk/semaphore.h>
+#include <uk/wait.h>
 
 #include "process.h"
 #include "sigset.h"
@@ -201,10 +201,12 @@ struct uk_signal_pdesc {
 struct uk_signal_tdesc {
 	stack_t altstack;
 	uk_sigset_t mask;
-	uk_sigset_t sigwait_set;
 	struct uk_signal_queue sigqueue;
-	struct uk_semaphore deliver_semaphore;
-	struct uk_semaphore pending_semaphore;
+	struct uk_waitq waitq;
+	siginfo_t wait_info;
+	uk_sigset_t saved_mask;
+	bool wait_pending;
+	bool restore_mask;
 };
 
 /* System error descriptor passed to handler */
@@ -276,8 +278,10 @@ void pprocess_signal_sigaction_clear(struct kern_sigaction *ks);
  */
 void pprocess_signal_clear_pending(struct posix_process *proc, int signum);
 
-/* Get next pending signal of a given thread */
-struct uk_signal *pprocess_signal_next_pending_t(struct posix_thread *pthread);
+/* Caller holds pprocess_mutex once; the wait releases it while blocked. */
+int pprocess_signal_wait_locked(struct posix_thread *thread,
+			       const uk_sigset_t *set, siginfo_t *info,
+			       __nsec deadline);
 
 /* Signal a process (abstraction for kill / sigqueueinfo) */
 int pprocess_signal_process_do(pid_t pid, int signum, siginfo_t *siginfo);
