@@ -327,6 +327,7 @@ typedef struct ip_mreq {
 #if LWIP_IPV4
 struct in_pktinfo {
   unsigned int   ipi_ifindex;  /* Interface index */
+  struct in_addr ipi_spec_dst;	/* Routing destination address  */
   struct in_addr ipi_addr;     /* Destination (from header) address */
 };
 #endif /* LWIP_IPV4 */
