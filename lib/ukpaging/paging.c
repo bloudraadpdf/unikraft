@@ -23,8 +23,6 @@
 #include <uk/paging.h>
 #include <uk/plat/memory.h>
 #include <uk/print.h>
-#include <uk/pcpuvar.h>
-#include <uk/pal/except.h>
 
 /* Forward declarations */
 static inline int pg_pt_alloc(struct uk_pagetable *pt, __vaddr_t *pt_vaddr,
@@ -57,22 +55,24 @@ static int pg_page_unmap(struct uk_pagetable *pt, __vaddr_t pt_vaddr,
 static unsigned int pg_page_largest_level = UK_PAL_PAGE_LEVEL;
 
 static struct uk_pagetable kernel_pt;
-static __uk_pcpuvar __used struct uk_pagetable *pg_active_pt;
+static struct uk_pagetable *pg_active_pt;
 
 struct uk_pagetable *uk_paging_pt_get_active(void)
 {
-	return uk_pcpuvar_current_get(pg_active_pt);
+	return pg_active_pt;
 }
 
 int uk_paging_pt_set_active(struct uk_pagetable *pt)
 {
-	unsigned long irq_flags = uk_pal_save_irqf();
-	int rc = uk_pal_pt_write_base(pt->pt_pbase);
+	int rc;
 
-	if (!rc)
-		uk_pcpuvar_current_set(pg_active_pt, pt);
-	uk_pal_restore_irqf(irq_flags);
-	return rc;
+	rc = uk_pal_pt_write_base(pt->pt_pbase);
+	if (rc)
+		return rc;
+
+	pg_active_pt = pt;
+
+	return 0;
 }
 
 static int pg_pt_clone(struct uk_pagetable *pt_dst, struct uk_pagetable *pt_src,

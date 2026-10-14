@@ -457,12 +457,13 @@ static inline void uk_paging_tlb_service(void)
 #endif
 
 /**
- * Returns the active page table of the current CPU.
+ * Returns the active page table (the one that defines the virtual address
+ * space at the moment of the execution of this function).
  */
 struct uk_pagetable *uk_paging_pt_get_active(void);
 
 /**
- * Switches the active page table of the current CPU.
+ * Switches the active page table to the specified one.
  *
  * @param pt
  *   The page table instance to switch to. The code of the function

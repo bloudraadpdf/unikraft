@@ -19,10 +19,9 @@
 #include <uk/assert.h>
 #include <uk/list.h>
 #include <uk/config.h>
-#include <uk/pcpuvar.h>
 #include <uk/pal/except.h>
 
-static __uk_pcpuvar __used struct uk_vas *vmem_active_vas;
+static struct uk_vas *vmem_active_vas;
 
 /* Forward declarations */
 static void vmem_vma_unmap(struct uk_vma *vma, __vaddr_t vaddr, __sz len);
@@ -30,21 +29,21 @@ static void vmem_vma_unlink_and_free(struct uk_vma *vma);
 
 struct uk_vas *uk_vas_get_active(void)
 {
-	return uk_pcpuvar_current_get(vmem_active_vas);
+	return vmem_active_vas;
 }
 
 int uk_vas_set_active(struct uk_vas *vas)
 {
-	unsigned long irq_flags = uk_pal_save_irqf();
-	int rc = 0;
-
 #ifdef CONFIG_LIBUKPAGING
+	int rc;
+
 	rc = uk_paging_pt_set_active(vas->pt);
+	if (unlikely(rc))
+		return rc;
 #endif /* CONFIG_LIBUKPAGING */
-	if (!rc)
-		uk_pcpuvar_current_set(vmem_active_vas, vas);
-	uk_pal_restore_irqf(irq_flags);
-	return rc;
+
+	vmem_active_vas = vas;
+	return 0;
 }
 
 int uk_vas_init(struct uk_vas *vas, struct uk_pagetable *pt __maybe_unused,
@@ -124,8 +123,8 @@ static void vmem_destroy(struct uk_vas *vas)
 
 	UK_ASSERT(uk_list_empty(&vas->vma_list));
 
-	if (uk_vas_get_active() == vas)
-		uk_pcpuvar_current_set(vmem_active_vas, __NULL);
+	if (vmem_active_vas == vas)
+		vmem_active_vas = __NULL;
 }
 
 void uk_vas_destroy(struct uk_vas *vas)

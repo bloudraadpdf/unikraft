@@ -401,12 +401,12 @@ struct uk_vma_ops {
 };
 
 /**
- * Returns the active virtual address space of the current CPU.
+ * Returns the currently active virtual address space.
  */
 struct uk_vas *uk_vas_get_active(void);
 
 /**
- * Switches the active virtual address space of the current CPU.
+ * Switches the currently active virtual address space.
  *
  * @param vas
  *   The fully-initialized address space to switch to

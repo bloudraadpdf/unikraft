@@ -7,19 +7,9 @@
 #include <uk/sched.h>
 #include <uk/schedcoop.h>
 #include <uk/plat/common/_time.h>
-#if CONFIG_LIBUKVMEM
-#include <uk/vmem.h>
-#elif CONFIG_LIBUKPAGING
-#include <uk/paging.h>
-#endif
 
 struct cpu_boot_context {
 	struct uk_sched *scheduler;
-#if CONFIG_LIBUKVMEM
-	struct uk_vas *vas;
-#elif CONFIG_LIBUKPAGING
-	struct uk_pagetable *pt;
-#endif
 	__uptr tlsp;
 	__uptr auxsp;
 	int result;
@@ -34,15 +24,6 @@ static __noreturn void secondary_boot(struct uk_lcpu *cpu)
 	int rc;
 
 	context = &cpu_contexts[index];
-#if CONFIG_LIBUKVMEM
-	rc = uk_vas_set_active(context->vas);
-#elif CONFIG_LIBUKPAGING
-	rc = uk_paging_pt_set_active(context->pt);
-#else
-	rc = 0;
-#endif
-	if (rc)
-		goto error;
 	rc = uk_lcpu_init(cpu);
 	if (rc)
 		goto error;
@@ -74,11 +55,6 @@ int uk_boot_smp_init(struct uk_sched *primary)
 		void *base, *auxstack, *tls;
 		int rc;
 
-#if CONFIG_LIBUKVMEM
-		context->vas = uk_vas_get_active();
-#elif CONFIG_LIBUKPAGING
-		context->pt = uk_paging_pt_get_active();
-#endif
 		context->scheduler = uk_schedcoop_create(primary->a, primary->a_stack,
 			primary->a_auxstack, primary->a_uktls);
 		if (!context->scheduler)
