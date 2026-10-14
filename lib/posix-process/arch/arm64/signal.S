@@ -25,6 +25,12 @@ ENTRY(pprocess_signal_jmp_handler)
 	stp	x19, x20, [sp, #-16]!
 	stp	x21, x22, [sp, #-16]!
 	stp	x23, x24, [sp, #-16]!
+	stp	x25, x26, [sp, #-16]!
+	stp	x27, x28, [sp, #-16]!
+	stp	d8, d9, [sp, #-16]!
+	stp	d10, d11, [sp, #-16]!
+	stp	d12, d13, [sp, #-16]!
+	stp	d14, d15, [sp, #-16]!
 	mov	x29, sp /* save pre-aligned sp */
 
 	mov	x19, x0 /* handler_ctx */
@@ -61,22 +67,19 @@ ENTRY(pprocess_signal_jmp_handler)
 	str	x11, [x10]
 
 	/*───────────────────────────────────────────────────────────────────*
-	 * Switch to the application's sysctx                                *
+	 * Prepare the application context                                *
 	 *───────────────────────────────────────────────────────────────────*/
-	add	x0, x20, #UKARCH_EXECENV_OFFSETOF_SYSCTX
-	bl	UK_LCPU_SYSCTX_LOAD_FNSYM		/* load app sysctx */
+	mov	x0, x19
+	mov	x1, x20
 
 	/*───────────────────────────────────────────────────────────────────*
 	 * Call signal handler                                               *
 	 *───────────────────────────────────────────────────────────────────*/
-	ldr	x22, [x19, #PPROCESS_SIGHNDL_CTX_FN_OFFS]	/* handler_fn */
-	ldr	x23, [x19, #PPROCESS_SIGHNDL_CTX_SP_OFFS]	/* handler_sp */
-	ldr	w0, [x19, #PPROCESS_SIGHNDL_CTX_SN_OFFS]	/* signum */
-	ldr	x1, [x19, #PPROCESS_SIGHNDL_CTX_SI_OFFS]	/* siginfo_t */
-	ldr	x2, [x19, #PPROCESS_SIGHNDL_CTX_UC_OFFS]	/* ucontext_t */
-
-	mov	sp, x23			/* switch to handler stack */
-	blr	x22			/* call handler */
+	mov	x2, x21
+	mov	x3, x29
+	adr	x4, 1f
+	b	pprocess_signal_handler_enter
+1:
 	mov	sp, x21			/* switch back to uk sp */
 
 	/*───────────────────────────────────────────────────────────────────*
@@ -92,6 +95,12 @@ ENTRY(pprocess_signal_jmp_handler)
 	bl	UK_LCPU_SYSCTX_LOAD_FNSYM	/* restore saved sysctx */
 
 	mov	sp, x29				/* restore pre-aligned sp */
+	ldp	d14, d15, [sp], #16
+	ldp	d12, d13, [sp], #16
+	ldp	d10, d11, [sp], #16
+	ldp	d8, d9, [sp], #16
+	ldp	x27, x28, [sp], #16
+	ldp	x25, x26, [sp], #16
 	ldp	x23, x24, [sp], #16
 	ldp	x21, x22, [sp], #16
 	ldp	x19, x20, [sp], #16

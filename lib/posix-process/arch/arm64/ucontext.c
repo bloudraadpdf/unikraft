@@ -10,11 +10,15 @@
 #include <uk/essentials.h>
 #include <uk/syscall.h>
 
+UK_CTASSERT(__offsetof(ucontext_t, uc_mcontext) == 176);
+
 void pprocess_signal_arch_set_ucontext(struct ukarch_execenv *execenv,
 				       ucontext_t *ucontext)
 {
 	UK_ASSERT(execenv);
 	UK_ASSERT(ucontext);
+
+	memset(ucontext, 0, sizeof(*ucontext));
 
 	ucontext->uc_mcontext.regs[0] = uk_lcpu_regs_get(execenv->regs, X0);
 	ucontext->uc_mcontext.regs[1] = uk_lcpu_regs_get(execenv->regs, X1);
@@ -47,7 +51,10 @@ void pprocess_signal_arch_set_ucontext(struct ukarch_execenv *execenv,
 	ucontext->uc_mcontext.regs[28] = uk_lcpu_regs_get(execenv->regs, X28);
 	ucontext->uc_mcontext.regs[29] = uk_lcpu_regs_get(execenv->regs, X29);
 
-	/* TODO Populate the rest of the context */
+	ucontext->uc_mcontext.regs[30] = uk_lcpu_regs_get(execenv->regs, LR);
+	ucontext->uc_mcontext.sp = uk_lcpu_regs_get(execenv->regs, SP);
+	ucontext->uc_mcontext.pc = uk_lcpu_regs_get(execenv->regs, PC);
+	ucontext->uc_mcontext.pstate = uk_lcpu_regs_get(execenv->regs, SPSR_EL1);
 }
 
 void pprocess_signal_arch_get_ucontext(ucontext_t *ucontext,
@@ -87,5 +94,8 @@ void pprocess_signal_arch_get_ucontext(ucontext_t *ucontext,
 	uk_lcpu_regs_set(execenv->regs, X28, ucontext->uc_mcontext.regs[28]);
 	uk_lcpu_regs_set(execenv->regs, X29, ucontext->uc_mcontext.regs[29]);
 
-	/* TODO Populate the rest of the context */
+	uk_lcpu_regs_set(execenv->regs, LR, ucontext->uc_mcontext.regs[30]);
+	uk_lcpu_regs_set(execenv->regs, SP, ucontext->uc_mcontext.sp);
+	uk_lcpu_regs_set(execenv->regs, PC, ucontext->uc_mcontext.pc);
+	uk_lcpu_regs_set(execenv->regs, SPSR_EL1, ucontext->uc_mcontext.pstate);
 }

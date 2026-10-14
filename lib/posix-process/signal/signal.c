@@ -36,6 +36,15 @@ void pprocess_signal_wake_waiter(struct posix_thread *thread)
 	}
 }
 
+static void signal_notify_thread(struct posix_thread *thread)
+{
+	if (thread->state == POSIX_THREAD_BLOCKED_SIGNAL)
+		pprocess_signal_wake_waiter(thread);
+#if CONFIG_ARCH_ARM_64
+	pprocess_signal_notify(thread);
+#endif
+}
+
 /* Enqueue signal for a thread or a process
  *
  * Setting pthread to NULL signifies that the signal
@@ -64,12 +73,10 @@ static int pprocess_signal_enqueue(struct posix_process *pproc,
 	}
 	if (!rc) {
 		if (pthread) {
-			if (pthread->state == POSIX_THREAD_BLOCKED_SIGNAL)
-				pprocess_signal_wake_waiter(pthread);
+			signal_notify_thread(pthread);
 		} else {
 			uk_pprocess_foreach_pthread(pproc, thread, next)
-				if (thread->state == POSIX_THREAD_BLOCKED_SIGNAL)
-					pprocess_signal_wake_waiter(thread);
+				signal_notify_thread(thread);
 		}
 	}
 	uk_mutex_unlock(&pprocess_mutex);
@@ -555,6 +562,9 @@ int pprocess_signal_tdesc_init(struct posix_thread *thread)
 	td = thread->signal;
 
 	td->altstack = (stack_t){ .ss_flags = SS_DISABLE };
+#if CONFIG_ARCH_ARM_64
+	td->notification = false;
+#endif
 	td->wait_pending = false;
 	td->restore_mask = false;
 	td->saved_mask = 0;

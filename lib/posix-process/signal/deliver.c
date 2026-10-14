@@ -16,14 +16,6 @@
 #include "signal.h"
 #include "siginfo.h"
 
-struct pprocess_signal_handler_ctx {
-	void *handler_fn;
-	void *handler_sp;
-	siginfo_t *siginfo;
-	ucontext_t *ucontext;
-	int signo;
-} __packed;
-
 UK_CTASSERT(__offsetof(struct pprocess_signal_handler_ctx, handler_fn) ==
 	    PPROCESS_SIGHNDL_CTX_FN_OFFS);
 UK_CTASSERT(__offsetof(struct pprocess_signal_handler_ctx, handler_sp) ==
@@ -223,6 +215,11 @@ static void do_deliver(struct posix_thread *pthread, struct uk_signal *sig,
 
 	uk_mutex_lock(&pprocess_mutex);
 	pthread->signal->mask = saved_mask;
+#if CONFIG_ARCH_ARM_64
+	if ((pthread->signal->sigqueue.pending | pproc->signal->sigqueue.pending) &
+	    ~saved_mask)
+		uk_store_n(&pthread->signal->notification, true);
+#endif
 	uk_mutex_unlock(&pprocess_mutex);
 }
 
@@ -278,15 +275,10 @@ static void deliver_waited(struct posix_thread *thread,
 	}
 }
 
-static void uk_signal_deliver(struct uk_syscall_exit_ctx *exit_ctx)
+void pprocess_signal_deliver(struct ukarch_execenv *execenv)
 {
-	struct ukarch_execenv *execenv;
 	struct posix_thread *pthread;
 	struct posix_process *pproc;
-
-	UK_ASSERT(exit_ctx);
-
-	execenv = exit_ctx->execenv;
 
 	/* FIXME: This can go away once we eliminate the last syscall made
 	 *        by kernel context and pass execenv to syscalls in native
@@ -297,6 +289,9 @@ static void uk_signal_deliver(struct uk_syscall_exit_ctx *exit_ctx)
 
 	pthread = uk_pthread_current();
 	UK_ASSERT(pthread);
+#if CONFIG_ARCH_ARM_64
+	uk_store_n(&pthread->signal->notification, false);
+#endif
 
 	pproc = uk_pprocess_current();
 	UK_ASSERT(pproc);
@@ -312,6 +307,11 @@ static void uk_signal_deliver(struct uk_syscall_exit_ctx *exit_ctx)
 	if (pthread->state == POSIX_THREAD_RUNNING ||
 	    pthread->state == POSIX_THREAD_BLOCKED_SIGNAL)
 		deliver_pending(pthread, false, execenv);
+}
+
+static void uk_signal_deliver(struct uk_syscall_exit_ctx *exit_ctx)
+{
+	pprocess_signal_deliver(exit_ctx->execenv);
 }
 
 uk_syscall_exittab_prio(uk_signal_deliver, UK_PRIO_BEFORE(UK_PRIO_LATEST));
