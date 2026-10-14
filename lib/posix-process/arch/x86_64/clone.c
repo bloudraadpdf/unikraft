@@ -12,11 +12,11 @@
 #include "../../process.h"
 
 void clone_setup_child_ctx(struct ukarch_execenv *pexecenv,
-			   struct uk_thread *child, __uptr sp)
+			   struct uk_thread *child, __uptr sp, __uptr tls)
 {
 	struct ukarch_execenv *cexecenv;
 	struct ukarch_auxspcb *auxspcb;
-	__u64 gsbase, fsbase;
+	__u64 gsbase;
 	__uptr auxsp_pos;
 
 	UK_ASSERT(pexecenv);
@@ -52,13 +52,7 @@ void clone_setup_child_ctx(struct ukarch_execenv *pexecenv,
 	gsbase = uk_lcpu_sysctx_get(pexecenv->sysctx, GSBASE);
 	uk_lcpu_sysctx_set(cexecenv->sysctx, GSBASE, gsbase);
 
-	/* Use parent's fsbase if clone did not have SETTLS */
-	if (!child->tlsp)
-		fsbase = uk_lcpu_sysctx_get(pexecenv->sysctx, FSBASE);
-	else
-		fsbase = child->tlsp;
-
-	uk_lcpu_sysctx_set(cexecenv->sysctx, FSBASE, fsbase);
+	uk_lcpu_sysctx_set(cexecenv->sysctx, FSBASE, tls);
 	child->tlsp = child->uktlsp;
 
 	ukarch_ctx_init_entry1(&child->ctx,

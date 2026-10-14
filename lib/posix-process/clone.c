@@ -386,7 +386,9 @@ int uk_clone(struct clone_args *cl_args, size_t cl_args_len,
 		    t, t->name ? child->name : "<unnamed>",
 		    child, child->name ? child->name : "<unnamed>", ret);
 
-	clone_setup_child_ctx(execenv, child, (__uptr)stack);
+	clone_setup_child_ctx(execenv, child, (__uptr)stack,
+			      (flags & CLONE_SETTLS) ? cl_args->tls :
+			      uk_lcpu_sysctx_get(execenv->sysctx, TLSP));
 
 	/* Assign the child to the scheduler */
 	ret = uk_sched_thread_add(uk_sched_select(), child);
