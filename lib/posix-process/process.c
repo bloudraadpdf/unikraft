@@ -162,6 +162,12 @@ struct posix_thread *pprocess_create_pthread(struct posix_process *pprocess,
 	uk_mutex_lock(&pprocess_mutex);
 	tid_thread[tid] = pthread;
 
+	if (pprocess->exit_state != POSIX_PROCESS_RUNNING)
+		pthread->exit_state = pprocess->exit_state == POSIX_PROCESS_KILLED ?
+			POSIX_THREAD_KILLED : POSIX_THREAD_EXITED;
+	else if (pprocess->exec_owner)
+		pthread->exit_state = POSIX_THREAD_EXITED;
+
 	/* Add to parent's list of threads */
 	uk_list_add_tail(&pthread->thread_list_entry, &pprocess->threads);
 	uk_mutex_unlock(&pprocess_mutex);
@@ -203,6 +209,7 @@ void pprocess_release_pthread(struct posix_thread *pthread)
 
 	/* remove from process' thread list */
 	uk_list_del_init(&pthread->thread_list_entry);
+	uk_waitq_wake_up(&pthread->process->thread_wait);
 
 	/* release TID */
 	tid_thread[pthread->tid] = NULL;
@@ -278,6 +285,7 @@ struct posix_process *pprocess_create(struct uk_alloc *a,
 		goto err_out;
 	}
 	pprocess->_a = a;
+	uk_refcount_init(&pprocess->references, 1);
 	UK_INIT_LIST_HEAD(&pprocess->threads);
 	UK_INIT_LIST_HEAD(&pprocess->children);
 
@@ -305,6 +313,7 @@ struct posix_process *pprocess_create(struct uk_alloc *a,
 		goto err_free_pprocess;
 
 	uk_waitq_init(&pprocess->child_wait);
+	uk_waitq_init(&pprocess->thread_wait);
 	uk_semaphore_init(&pprocess->exit_semaphore, 0);
 
 	/* Check if we have a pthread structure already for this thread
@@ -520,6 +529,17 @@ err_free_thread:
 }
 #endif /* CONFIG_LIBPOSIX_PROCESS_MULTIPROCESS */
 
+void pprocess_acquire(struct posix_process *process)
+{
+	uk_refcount_acquire(&process->references);
+}
+
+void pprocess_put(struct posix_process *process)
+{
+	if (uk_refcount_release(&process->references))
+		uk_free(process->_a, process);
+}
+
 /* Releases pprocess memory and other resources.
  * NOTE: All pthreads must be removed already
  *       from this pprocess. All chilren must
@@ -550,7 +570,7 @@ void pprocess_release(struct posix_process *pprocess)
 	pid_process[pid] = NULL;
 	release_tid(pid);
 
-	uk_free(pprocess->_a, pprocess);
+	pprocess_put(pprocess);
 	uk_mutex_unlock(&pprocess_mutex);
 
 	uk_pr_debug("pid %d released\n", pid);
@@ -615,16 +635,16 @@ static void posix_thread_fini(struct uk_thread *thread)
 	UK_ASSERT(pprocess);
 	is_init = pprocess->pid == UK_PID_INIT;
 
-	/* Terminate and release thread */
-	pprocess_exit_pthread(pthread, POSIX_THREAD_EXITED, 0);
-
-	/* If last thread, also release the process */
-	if  (uk_list_empty(&pprocess->threads)) {
-		pprocess_exit(pprocess, POSIX_PROCESS_EXITED, 0);
-		/* UK_PID_INIT cannot be waited, release here */
+	if (uk_list_is_singular(&pprocess->threads)) {
+		pprocess_finish_exit(pprocess, pthread);
 		if (is_init)
 			pprocess_release(pprocess);
+	} else {
+		pprocess_exit_pthread(pthread,
+			pthread->exit_state == POSIX_THREAD_KILLED ?
+			POSIX_THREAD_KILLED : POSIX_THREAD_EXITED);
 	}
+
 out:
 	uk_mutex_unlock(&pprocess_mutex);
 }

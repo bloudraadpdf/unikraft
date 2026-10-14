@@ -35,6 +35,7 @@
 #define __UK_PROCESS_H__
 
 #include <stdbool.h>
+
 #include <stddef.h> /* NULL */
 #include <sys/resource.h>
 #include <sys/types.h> /* pid_t */
@@ -79,6 +80,7 @@ pid_t uk_sys_getpid(void);
  * see the implementation of app-elfloader.
  */
 int uk_posix_process_create_pthread(struct uk_thread *thread);
+bool uk_posix_process_exit_requested(void);
 
 #endif /* CONFIG_LIBPOSIX_PROCESS_MULTITHREADING */
 

@@ -253,6 +253,8 @@ struct uk_signal *pprocess_signal_dequeue(struct posix_process *pproc,
 					  struct posix_thread *pthread,
 					  int signum);
 
+void pprocess_signal_wake_waiter(struct posix_thread *thread);
+
 struct uk_sigaction *pprocess_signal_sigaction_alloc(struct uk_alloc *alloc);
 
 #if CONFIG_LIBPOSIX_PROCESS_EXECVE

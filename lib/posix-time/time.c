@@ -43,6 +43,9 @@
 #include <uk/config.h>
 #include <uk/print.h>
 #include <uk/syscall.h>
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+#include <uk/process.h>
+#endif
 #include <uk/posix-time.h>
 
 #if CONFIG_HAVE_SCHED
@@ -89,7 +92,14 @@ int uk_sys_nanosleep(const struct timespec *req, struct timespec *rem)
 	before = ukplat_monotonic_clock();
 
 #if CONFIG_HAVE_SCHED
-	uk_sched_thread_sleep(nsec);
+	struct uk_thread *thread = uk_thread_current();
+
+	uk_thread_block_timeout(thread, nsec);
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+	if (uk_posix_process_exit_requested())
+		uk_thread_wake(thread);
+#endif
+	uk_sched_yield();
 #else
 	__spin_wait(nsec);
 #endif

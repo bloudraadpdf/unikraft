@@ -47,6 +47,9 @@
 
 #include <linux/futex.h>
 #include <uk/syscall.h>
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+#include <uk/process.h>
+#endif
 #include <uk/atomic.h>
 #include <uk/thread.h>
 #include <uk/thread.h>
@@ -102,22 +105,14 @@ static int futex_wait(uint32_t *uaddr, uint32_t val, const __nsec *timeout)
 	struct uk_thread *current = uk_thread_current();
 	struct uk_futex f = {.uaddr = uaddr, .thread = current};
 
-	if (uk_load_n(uaddr) != val) {
-		uk_pr_debug("FUTEX_WAIT: Condition not met (*uaddr != %"PRIu32", uaddr: %p)\n",
-			    val, uaddr);
-		return -EAGAIN;
-	}
-
-	/* Futex word _does_ contain expected val */
-	uk_pr_debug("FUTEX_WAIT: Condition met (*uaddr == %"PRIu32", uaddr: %p)\n",
-			val, uaddr);
-
-	/* Enqueue thread to wait list */
 	irqf = uk_lcpu_save_irqf();
 	uk_spin_lock(&futex_list_lock);
+	if (uk_load_n(uaddr) != val) {
+		uk_spin_unlock(&futex_list_lock);
+		uk_lcpu_restore_irqf(irqf);
+		return -EAGAIN;
+	}
 	uk_list_add_tail(&f.list_node, &futex_list);
-	uk_spin_unlock(&futex_list_lock);
-	uk_lcpu_restore_irqf(irqf);
 
 	if (timeout) {
 		/* Block at most until `timeout` nanosecs */
@@ -129,6 +124,12 @@ static int futex_wait(uint32_t *uaddr, uint32_t val, const __nsec *timeout)
 		uk_pr_debug("FUTEX_WAIT: Wait indefinitely for wake-up\n");
 		uk_thread_block(current);
 	}
+	uk_spin_unlock(&futex_list_lock);
+	uk_lcpu_restore_irqf(irqf);
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+	if (uk_posix_process_exit_requested())
+		uk_thread_wake(current);
+#endif
 	uk_sched_yield();
 
 	uk_pr_debug("FUTEX_WAIT: Woke up (uaddr: %p)\n", uaddr);

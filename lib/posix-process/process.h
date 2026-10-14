@@ -18,6 +18,7 @@
 #include <uk/semaphore.h>
 #include <uk/thread.h>
 #include <uk/mutex.h>
+#include <uk/refcount.h>
 #endif /* CONFIG_LIBPOSIX_PROCESS_MULTITHREADING */
 
 extern struct uk_thread *pprocess_thread_main;
@@ -69,6 +70,7 @@ struct posix_vm_context {
 };
 
 struct posix_process {
+	__atomic references;
 	pid_t pid;
 	struct posix_process *parent;
 	struct uk_list_head children; /* child processes */
@@ -80,6 +82,9 @@ struct posix_process {
 	struct uk_signal_pdesc *signal;
 #endif /* CONFIG_LIBPOSIX_PROCESS_SIGNAL */
 	struct uk_waitq child_wait;
+	struct uk_waitq thread_wait;
+	struct uk_thread *exec_owner;
+	enum posix_process_state exit_state;
 	struct uk_semaphore exit_semaphore;
 	enum posix_process_state state;
 	__u64 exit_signal;
@@ -97,6 +102,9 @@ struct posix_thread {
 	struct uk_thread *thread;
 	struct uk_alloc *_a;
 	enum posix_thread_state state;
+	enum posix_thread_state exit_state;
+	int exit_status;
+	bool user_started;
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 	struct uk_signal_tdesc *signal;
 #endif /* CONFIG_LIBPOSIX_PROCESS_SIGNAL */
@@ -115,6 +123,14 @@ int pprocess_brk_init(struct posix_vm_context *state);
 void pprocess_brk_free(struct posix_vm_context *state);
 #endif
 extern struct uk_mutex pprocess_mutex;
+void pprocess_finish_exit(struct posix_process *process,
+                         struct posix_thread *thread);
+int pprocess_stop_others(struct posix_process *process);
+
+static inline bool pprocess_thread_exit_requested(struct posix_thread *thread)
+{
+	return uk_load_n(&thread->exit_state) != POSIX_THREAD_RUNNING;
+}
 
 extern __uk_tls struct posix_thread *pthread_self;
 
@@ -145,42 +161,8 @@ struct posix_process *tid2pprocess(pid_t tid);
 pid_t ukthread2tid(struct uk_thread *thread);
 pid_t ukthread2pid(struct uk_thread *thread);
 
-/**
- * INTERNAL. Exit and release a pthread
- *
- * Performs termination tasks and raises the POSIX_PROCESS_EXIT_EVENT.
- * Unlike processes, pthreads are released upon exit. Besides the pthread,
- * this function terminates the underlying uk_thread, unless called on
- * uk_thread_current()'s pthread. In this last case, the caller should
- * take care of terminating the underlying uk_thread, as needed.
- *
- * @param pthread      The terminating thread.
- * @param state	       The terminating thread's state. Must be either
- *                     POSIX_THREAD_STATE_EXITED if terminated volunatrily, or
- *                     POSIX_THREAD_STATE_KILLED if terminated by signal.
- * @param exit_status  The exit status of the terminating thread.
- */
-void pprocess_exit_pthread(struct posix_thread *pthread,
-			   enum posix_thread_state state,
-			   int exit_status);
-/**
- * INTERNAL. Exit process
- *
- * Performs process termination tasks and raises POSIX_PROCESS_EXIT_EVENT.
- * Does not release the process. Upon completion, if the process has not been
- * reaped by an existing wait, the process becomes a zombie and its resources
- * remain allocated until reaped by a subsequent call to wait().
- *
- * Notice: It's the caller's responsibility to terminate the current uk_thread
- *         upon return, if the calling thread is a member of the terminating
- *         process.
- *
- * @param pprocess     The terminating process.
- * @param state        The new process state. Must be either
- *                     POSIX_PROCESS_STATE_EXITED if terminated volunatrily, or
- *                     POSIX_PROCESS_STATE_KILLED if terminated by signal.
- * @param exit_status  The exit status of the terminating process.
- */
+void pprocess_exit_pthread(struct posix_thread *thread,
+                          enum posix_thread_state state);
 void pprocess_exit(struct posix_process *process,
 		   enum posix_process_state state,
 		   int exit_status);
@@ -204,6 +186,8 @@ void pprocess_complete_vfork(struct posix_thread *pthread);
  * @param pprocess  The process to release.
  */
 void pprocess_release(struct posix_process *pprocess);
+void pprocess_acquire(struct posix_process *process);
+void pprocess_put(struct posix_process *process);
 
 /**
  * INTERNAL. Create pthread

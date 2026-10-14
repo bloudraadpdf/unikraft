@@ -233,6 +233,7 @@ static void deliver_pending(struct posix_thread *thread, bool process_queue,
 	struct posix_thread *target = process_queue ? NULL : thread;
 	struct uk_alloc *alloc = process_queue ? proc->_a : thread->_a;
 	struct uk_signal *sig;
+	struct uk_signal delivery;
 	int signum;
 
 	pprocess_signal_foreach(signum) {
@@ -243,8 +244,9 @@ static void deliver_pending(struct posix_thread *thread, bool process_queue,
 			uk_mutex_unlock(&pprocess_mutex);
 			if (!sig)
 				break;
-			do_deliver(thread, sig, execenv);
+			delivery.siginfo = sig->siginfo;
 			uk_signal_free(alloc, sig);
+			do_deliver(thread, &delivery, execenv);
 		}
 	}
 }

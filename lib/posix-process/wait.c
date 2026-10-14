@@ -70,6 +70,10 @@ static int pprocess_wait(pid_t pid, siginfo_t *si, int opt)
 	uk_mutex_lock(&pprocess_mutex);
 	this_thread->state = POSIX_THREAD_BLOCKED_WAIT;
 	for (;;) {
+		if (pprocess_thread_exit_requested(this_thread)) {
+			ret = -EINTR;
+			break;
+		}
 		if (uk_list_empty(&this_process->children)) {
 			ret = -ECHILD;
 			break;

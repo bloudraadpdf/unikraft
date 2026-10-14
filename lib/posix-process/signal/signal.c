@@ -24,7 +24,7 @@
  */
 #define signal_check_perm(_target_process) true
 
-static void signal_wake_waiter(struct posix_thread *thread)
+void pprocess_signal_wake_waiter(struct posix_thread *thread)
 {
 	struct uk_posix_signal_wait *wait = thread->signal->poll_wait;
 
@@ -65,11 +65,11 @@ static int pprocess_signal_enqueue(struct posix_process *pproc,
 	if (!rc) {
 		if (pthread) {
 			if (pthread->state == POSIX_THREAD_BLOCKED_SIGNAL)
-				signal_wake_waiter(pthread);
+				pprocess_signal_wake_waiter(pthread);
 		} else {
 			uk_pprocess_foreach_pthread(pproc, thread, next)
 				if (thread->state == POSIX_THREAD_BLOCKED_SIGNAL)
-					signal_wake_waiter(thread);
+					pprocess_signal_wake_waiter(thread);
 		}
 	}
 	uk_mutex_unlock(&pprocess_mutex);
@@ -190,7 +190,9 @@ int uk_posix_signal_wait_check(struct uk_posix_signal_wait *wait)
 	td = wait->thread->signal;
 	uk_mutex_lock(&pprocess_mutex);
 	uk_store_n(&wait->interrupted, 0);
-	if (pprocess_signal_take_locked(wait->thread, NULL, &td->wait_info)) {
+	if (pprocess_thread_exit_requested(wait->thread)) {
+		rc = -EINTR;
+	} else if (pprocess_signal_take_locked(wait->thread, NULL, &td->wait_info)) {
 		td->wait_pending = true;
 		rc = -EINTR;
 	}
@@ -229,6 +231,10 @@ int pprocess_signal_wait_locked(struct posix_thread *thread,
 
 	UK_ASSERT(!td->wait_pending);
 	for (;;) {
+		if (pprocess_thread_exit_requested(thread)) {
+			rc = -EINTR;
+			break;
+		}
 		if (set && (rc = pprocess_signal_take_locked(thread, set, info)))
 			break;
 		if (pprocess_signal_take_locked(thread, NULL, &td->wait_info)) {

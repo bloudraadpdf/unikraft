@@ -47,25 +47,6 @@ static void __noreturn execve_ctx_switch(long arg0, long arg1)
 	ukarch_execenv_load((long)execenv_new);
 }
 
-/* Prepare process for executing new context. For a complete list see
- * "Effect on process attributes" in execve(2).
- */
-static int pprocess_cleanup(struct posix_process *pprocess)
-{
-	struct posix_thread *pt, *ptn;
-
-	uk_mutex_lock(&pprocess_mutex);
-	/* Kill all threads of this process except current */
-	uk_pprocess_foreach_pthread(pprocess, pt, ptn) {
-		if (pt->thread == uk_thread_current())
-			continue;
-		pprocess_exit_pthread(pt, POSIX_THREAD_EXITED, 0);
-	}
-	uk_mutex_unlock(&pprocess_mutex);
-
-	return 0;
-}
-
 UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 		      char *const *, argv,
 		      char *const *, envp)
@@ -185,7 +166,9 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 		uk_pr_err("execve event error (%d)\n", rc);
 		goto err_free_stack_new;
 	}
-	pprocess_cleanup(uk_pprocess_current());
+	rc = pprocess_stop_others(uk_pprocess_current());
+	if (rc)
+		goto err_free_stack_new;
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 	pprocess_signal_exec(signal_actions);
 #endif
