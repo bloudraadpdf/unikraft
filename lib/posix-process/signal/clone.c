@@ -106,9 +106,11 @@ int uk_posix_clone_sighand(void *arg)
 			    cpid);
 
 		if (!(cl_args->flags & CLONE_THREAD)) {
-			rc = pprocess_signal_sigaction_new(cp->_a, cp->signal);
-			if (unlikely(rc))
+			cp->signal->sigaction = pprocess_signal_sigaction_alloc(cp->_a);
+			if (unlikely(!cp->signal->sigaction)) {
+				rc = -ENOMEM;
 				goto fail_malloc;
+			}
 		}
 
 		pprocess_signal_foreach(signum)
@@ -120,16 +122,20 @@ int uk_posix_clone_sighand(void *arg)
 	} else if (cl_args->flags & CLONE_SIGHAND) {
 		uk_pr_debug("CLONE_SIGHAND: pid %d gets a reference of the parent's handlers\n",
 			    cpid);
+		uk_mutex_lock(&pprocess_mutex);
 		pprocess_signal_sigaction_acquire(pp->signal->sigaction);
 		cp->signal->sigaction = pp->signal->sigaction;
+		uk_mutex_unlock(&pprocess_mutex);
 	/* Default: Iherit a copy of the parent's signal dispositions. */
 	} else {
 		uk_pr_debug("pid %d gets a copy of the parent's handlers\n",
 			    cpid);
 
-		rc = pprocess_signal_sigaction_new(cp->_a, cp->signal);
-		if (unlikely(rc))
+		cp->signal->sigaction = pprocess_signal_sigaction_alloc(cp->_a);
+		if (unlikely(!cp->signal->sigaction)) {
+			rc = -ENOMEM;
 			goto fail_malloc;
+		}
 
 		uk_mutex_lock(&pprocess_mutex);
 		memcpy(cp->signal->sigaction->ks, pp->signal->sigaction->ks,

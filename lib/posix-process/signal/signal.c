@@ -274,19 +274,40 @@ void pprocess_signal_sigaction_clear(struct kern_sigaction *ks)
 	uk_sigemptyset(&ks->ks_mask);
 }
 
-int pprocess_signal_sigaction_new(struct uk_alloc *alloc, struct uk_signal_pdesc *pd)
+struct uk_sigaction *pprocess_signal_sigaction_alloc(struct uk_alloc *alloc)
 {
-	pd->sigaction = uk_malloc(alloc, sizeof(struct uk_sigaction));
-	if (unlikely(!pd->sigaction)) {
+	struct uk_sigaction *actions = uk_malloc(alloc, sizeof(*actions));
+
+	if (unlikely(!actions)) {
 		uk_pr_err("Could not allocate memory\n");
-		return -ENOMEM;
+		return NULL;
 	}
-
-	pd->sigaction->alloc = alloc;
-	uk_refcount_init(&pd->sigaction->refcnt, 1);
-
-	return 0;
+	actions->alloc = alloc;
+	uk_refcount_init(&actions->refcnt, 1);
+	return actions;
 }
+
+#if CONFIG_LIBPOSIX_PROCESS_EXECVE
+void pprocess_signal_exec(struct uk_sigaction *actions)
+{
+	struct posix_thread *thread = uk_pthread_current();
+	struct posix_process *process = thread->process;
+	struct uk_sigaction *previous;
+	int signum;
+
+	uk_mutex_lock(&pprocess_mutex);
+	previous = process->signal->sigaction;
+	pprocess_signal_foreach(signum) {
+		pprocess_signal_sigaction_clear(&actions->ks[signum]);
+		if (previous->ks[signum].ks_handler == SIG_IGN)
+			actions->ks[signum].ks_handler = SIG_IGN;
+	}
+	process->signal->sigaction = actions;
+	thread->signal->altstack = (stack_t){ .ss_flags = SS_DISABLE };
+	pprocess_signal_sigaction_release(previous);
+	uk_mutex_unlock(&pprocess_mutex);
+}
+#endif
 
 int pprocess_signal_send(struct posix_process *proc, int signum,
 			 siginfo_t *siginfo)
@@ -481,7 +502,6 @@ int pprocess_signal_pdesc_init(struct posix_process *process)
 {
 	struct uk_signal_pdesc *pd;
 	int signum;
-	int rc;
 
 	UK_ASSERT(process);
 	UK_ASSERT(process->signal);
@@ -496,9 +516,9 @@ int pprocess_signal_pdesc_init(struct posix_process *process)
 	pprocess_signal_foreach(signum)
 		UK_INIT_LIST_HEAD(&pd->sigqueue.list_head[signum]);
 
-	rc = pprocess_signal_sigaction_new(process->_a, pd);
-	if (unlikely(rc))
-		return rc;
+	pd->sigaction = pprocess_signal_sigaction_alloc(process->_a);
+	if (unlikely(!pd->sigaction))
+		return -ENOMEM;
 
 	pprocess_signal_foreach(signum)
 		pprocess_signal_sigaction_clear(KERN_SIGACTION(process, signum));

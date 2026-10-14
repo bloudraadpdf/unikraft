@@ -253,11 +253,11 @@ struct uk_signal *pprocess_signal_dequeue(struct posix_process *pproc,
 					  struct posix_thread *pthread,
 					  int signum);
 
-/* Allocates and, upon success, acquires a new instance of uk_sigaction.
- * Does not clear or otherwise initialize signal dispositions.
- */
-int pprocess_signal_sigaction_new(struct uk_alloc *alloc,
-				  struct uk_signal_pdesc *pd);
+struct uk_sigaction *pprocess_signal_sigaction_alloc(struct uk_alloc *alloc);
+
+#if CONFIG_LIBPOSIX_PROCESS_EXECVE
+void pprocess_signal_exec(struct uk_sigaction *actions);
+#endif
 
 static inline void pprocess_signal_sigaction_acquire(struct uk_sigaction *sa)
 {

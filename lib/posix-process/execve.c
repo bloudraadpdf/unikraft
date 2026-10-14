@@ -15,6 +15,9 @@
 #include <uk/sched.h>
 
 #include "process.h"
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+#include "signal/signal.h"
+#endif
 
 void execve_arch_execenv_init(struct ukarch_execenv *execenv_new,
 			      struct ukarch_execenv *execenv,
@@ -70,6 +73,9 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 	struct posix_process_execve_event_data event_data;
 	struct uk_binfmt_loader_args loader_args;
 	struct posix_vm_context *vm_new = NULL;
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+	struct uk_sigaction *signal_actions = NULL;
+#endif
 	struct ukarch_execenv *execenv_new;
 	struct uk_thread *this_thread;
 	struct ukarch_ctx ctx_old;
@@ -145,6 +151,14 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 	loader_args.ctx.sp -= UKARCH_EXECENV_SIZE;
 	execenv_new = (struct ukarch_execenv *)loader_args.ctx.sp;
 
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+	signal_actions = pprocess_signal_sigaction_alloc(uk_pprocess_current()->_a);
+	if (!signal_actions) {
+		rc = -ENOMEM;
+		goto err_free_stack_new;
+	}
+#endif
+
 	/* Load executable */
 	rc = uk_binfmt_load(&loader_args);
 	if (unlikely(rc)) {
@@ -172,6 +186,9 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 		goto err_free_stack_new;
 	}
 	pprocess_cleanup(uk_pprocess_current());
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+	pprocess_signal_exec(signal_actions);
+#endif
 
 	/* Prepare switch to the new context.
 	 *
@@ -199,6 +216,10 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 	UK_BUG(); /* noreturn */
 
 err_free_stack_new:
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+	if (signal_actions)
+		pprocess_signal_sigaction_release(signal_actions);
+#endif
 	pprocess_vm_put(vm_new);
 	uk_free(stack_allocator, stack_new);
 
