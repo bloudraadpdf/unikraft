@@ -68,6 +68,7 @@ struct epoll_entry {
 #endif /* CONFIG_LIBVFSCORE */
 	};
 	struct epoll_event event;
+	unsigned int disabled;
 	union {
 		struct {
 			struct uk_poll_chain tick;
@@ -136,10 +137,10 @@ static void epoll_event_callback(uk_pollevent set,
 			tick, struct epoll_entry, tick);
 		struct uk_pollq *upq = (struct uk_pollq *)tick->arg;
 
+		if (uk_load_n(&ent->disabled))
+			return;
 		(void)uk_or(&ent->revents, set);
 		uk_pollq_set_n(upq, UKFD_POLLIN, IS_EDGEPOLL(ent));
-		if (IS_ONESHOT(ent))
-			tick->mask = 0;
 	}
 }
 
@@ -383,6 +384,7 @@ static void epoll_entry_mod(const struct uk_file *epf, struct epoll_entry *ent,
 	ent->event = *event;
 	ent->tick.mask = events2mask(event->events);
 	ent->revents = 0;
+	uk_store_n(&ent->disabled, 0);
 	epoll_register(epf, ent, 0);
 
 }
@@ -395,6 +397,7 @@ static void epoll_entry_mod_legacy(struct epoll_entry *ent,
 	ent->legacy_cb.revents = 0;
 	ent->legacy_cb.mask = events2mask(event->events);
 	ent->event = *event;
+	uk_store_n(&ent->disabled, 0);
 	vfs_poll_register(ent->vf, &ent->legacy_cb);
 }
 
@@ -408,7 +411,7 @@ void eventpoll_signal(struct eventpoll_cb *ecb, unsigned int revents)
 						struct epoll_entry, legacy_cb);
 
 	revents &= leg->mask;
-	if (revents) {
+	if (revents && !uk_load_n(&ent->disabled)) {
 		(void)uk_or(&leg->revents, revents);
 		uk_file_event_set(ent->epf, UKFD_POLLIN);
 	}
@@ -647,6 +650,9 @@ int uk_sys_epoll_pwait2(const struct uk_file *epf, struct epoll_event *events,
 			unsigned int revents;
 			unsigned int *revp;
 
+			if (uk_load_n(&p->disabled))
+				continue;
+
 #if CONFIG_LIBVFSCORE
 			if (p->legacy)
 				revp = &p->legacy_cb.revents;
@@ -656,7 +662,7 @@ int uk_sys_epoll_pwait2(const struct uk_file *epf, struct epoll_event *events,
 
 			revents = uk_exchange_n(revp, 0);
 			if (revents) {
-				if (!IS_EDGEPOLL(p)
+				if (!IS_EDGEPOLL(p) || IS_ONESHOT(p)
 #if CONFIG_LIBPOSIX_PROCESS_SIGNALFD
 #if CONFIG_LIBVFSCORE
 				    || (!p->legacy && p->signal_file)
@@ -681,11 +687,14 @@ int uk_sys_epoll_pwait2(const struct uk_file *epf, struct epoll_event *events,
 					if (!revents)
 						continue;
 
-					if (!IS_EDGEPOLL(p)) {
+					if (!IS_EDGEPOLL(p) && !IS_ONESHOT(p)) {
 						lvlev = 1;
 						(void)uk_or(revp, revents);
 					}
 				}
+
+				if (IS_ONESHOT(p) && uk_exchange_n(&p->disabled, 1))
+					continue;
 
 				events[nout].events = revents;
 				events[nout].data = p->event.data;
