@@ -321,6 +321,11 @@ int pprocess_signal_send(struct posix_process *proc, int signum,
 	struct uk_signal *sig;
 	int rc;
 
+	if (signum == SIGKILL) {
+		pprocess_exit(proc, POSIX_PROCESS_KILLED, signum);
+		return 0;
+	}
+
 	sig = uk_signal_alloc(proc->_a);
 	if (unlikely(!sig)) {
 		uk_pr_err("Could not allocate signal\n");
@@ -440,6 +445,9 @@ static int signal_thread_locked(int tgid, int tid, int signum,
 		return -ESRCH;
 	if (!signum)
 		return 0;
+
+	if (signum == SIGKILL)
+		return pprocess_signal_send(pproc, signum, siginfo);
 
 	sig = uk_signal_alloc(pthread->_a);
 	if (unlikely(!sig)) {

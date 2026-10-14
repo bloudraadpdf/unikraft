@@ -278,17 +278,6 @@ static void deliver_waited(struct posix_thread *thread,
 	}
 }
 
-static bool kill_pending(struct posix_thread *thread)
-{
-	bool pending;
-
-	uk_mutex_lock(&pprocess_mutex);
-	pending = IS_PENDING(thread->process->signal->sigqueue, SIGKILL) ||
-		  IS_PENDING(thread->signal->sigqueue, SIGKILL);
-	uk_mutex_unlock(&pprocess_mutex);
-	return pending;
-}
-
 static void uk_signal_deliver(struct uk_syscall_exit_ctx *exit_ctx)
 {
 	struct ukarch_execenv *execenv;
@@ -311,16 +300,6 @@ static void uk_signal_deliver(struct uk_syscall_exit_ctx *exit_ctx)
 
 	pproc = uk_pprocess_current();
 	UK_ASSERT(pproc);
-
-	/* If there's SIGKILL pending, kill the process right away */
-	if (kill_pending(pthread)) {
-		uk_pr_info("SIGKILL tid %d\n", uk_sys_gettid());
-		uk_sigact_term(SIGKILL);
-		/* We assume that we always call this function
-		 * on the running process.
-		 */
-		UK_BUG();
-	}
 
 	/* SIGSTOP / SIGCONT should have been already ignored by rt_sigaction */
 	UK_ASSERT(!IS_PENDING(pproc->signal->sigqueue, SIGSTOP));
@@ -366,11 +345,7 @@ void sys_error_handler(struct ukarch_execenv *ee __unused, long arg)
 	pthread = uk_pthread_current();
 	UK_ASSERT(pthread);
 
-	/* If there's a SIGKILL pending, kill the process right away */
-	if (kill_pending(pthread)) {
-		uk_sigact_term(SIGKILL);
-		UK_BUG(); /* noreturn */
-	}
+	pprocess_enter_application();
 
 	/* If the application masks or ignores this signal, panic.
 	 * A general-purpose OS would terminate the application.

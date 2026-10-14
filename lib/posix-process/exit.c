@@ -135,6 +135,10 @@ void pprocess_exit(struct posix_process *process,
 
 	UK_ASSERT(state == POSIX_PROCESS_EXITED || state == POSIX_PROCESS_KILLED);
 	uk_mutex_lock(&pprocess_mutex);
+	if (process->state != POSIX_PROCESS_RUNNING) {
+		uk_mutex_unlock(&pprocess_mutex);
+		return;
+	}
 	if (process->exit_state == POSIX_PROCESS_RUNNING) {
 		process->exit_state = state;
 		process->exit_status = status;
