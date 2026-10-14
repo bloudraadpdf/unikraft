@@ -527,17 +527,17 @@ typedef struct fd_set
 /* poll-related defines and types */
 /* @todo: find a better way to guard the definition of these defines and types if already defined */
 #if !defined(POLLIN) && !defined(POLLOUT)
-#define POLLIN     0x1
-#define POLLOUT    0x2
-#define POLLERR    0x4
-#define POLLNVAL   0x8
+#define POLLIN     0x0001
+#define POLLOUT    0x0004
+#define POLLERR    0x0008
+#define POLLNVAL   0x0020
 /* Below values are unimplemented */
-#define POLLRDNORM 0x10
-#define POLLRDBAND 0x20
-#define POLLPRI    0x40
-#define POLLWRNORM 0x80
-#define POLLWRBAND 0x100
-#define POLLHUP    0x200
+#define POLLRDNORM 0x0040
+#define POLLRDBAND 0x0080
+#define POLLPRI    0x0002
+#define POLLWRNORM 0x0100
+#define POLLWRBAND 0x0200
+#define POLLHUP    0x0010
 typedef unsigned int nfds_t;
 struct pollfd
 {

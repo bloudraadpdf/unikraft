@@ -288,6 +288,7 @@ static struct lwip_select_cb *select_cb_list;
 /* Forward declaration of some functions */
 #if LWIP_SOCKET_SELECT || LWIP_SOCKET_POLL
 static void event_callback(struct netconn *conn, enum netconn_evt evt, u16_t len);
+void lwip_posix_socket_event_callback(struct lwip_sock *sock, enum netconn_evt evt, u16_t len);
 #define DEFAULT_SOCKET_EVENTCB event_callback
 static void select_check_waiters(int s, int has_recvevent, int has_sendevent, int has_errevent);
 #else
@@ -531,6 +532,7 @@ alloc_socket(struct netconn *newconn, int accepted)
        * (unless it has been created by accept()). */
       sockets[i].sendevent  = (NETCONNTYPE_GROUP(newconn->type) == NETCONN_TCP ? (accepted != 0) : 1);
       sockets[i].errevent   = 0;
+      sockets[i].sock_data  = NULL;
 #endif /* LWIP_SOCKET_SELECT || LWIP_SOCKET_POLL */
       return i + LWIP_SOCKET_OFFSET;
     }
@@ -2552,6 +2554,8 @@ event_callback(struct netconn *conn, enum netconn_evt evt, u16_t len)
       LWIP_ASSERT("unknown event", 0);
       break;
   }
+
+  lwip_posix_socket_event_callback(sock, evt, len);
 
   if (sock->select_waiting && check_waiters) {
     /* Save which events are active */
