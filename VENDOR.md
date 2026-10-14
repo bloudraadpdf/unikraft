@@ -33,7 +33,7 @@ implementations. The FreeBSD extent and attribute ports pass the native ARM64
 filesystem checks, including shared attributes created by Linux. The ARM64
 kernel builds with `CONFIG_LIBUKFS_EXT4=y` and passes the guest VFS probe,
 including sparse writes above 64 GiB, ownership, links, rename and unmount.
-Its output disk passes `e2fsck`. SQLite snapshot qualification is in progress.
+Its output disk passes `e2fsck`.
 
 ## Build and verification status
 
@@ -42,11 +42,12 @@ Use `vendor/app-elfloader` for the Unikraft `A` build argument and
 `vendor/lib-libelf:vendor/lib-lwip` for `L`, with absolute paths. EROFS, LZ4
 and lwIP sources come from this tree; the build does not patch those sources.
 
-The migrated source compiled on the ARM64 appliance with the Tokoloshe
-configuration except that ext4 was disabled. The existing signal-return
-probe passed in a two-vCPU Firecracker VM. This check establishes boot,
-application loading and signal return for that configuration. It does not
-qualify writable disks or the complete guest protocol.
+The migrated source compiles on the ARM64 appliance with the full Tokoloshe
+configuration. A two-vCPU SQLite probe captures an open read transaction,
+then restores two VMs. Each accepts a new vsock connection and commits its
+own marker. Both disks pass `e2fsck` and SQLite integrity checks; the captured
+source disk stays unchanged. Managed shim checks and interrupted-write
+recovery remain unfinished.
 
 ARM64 and AMD64 metadata layouts, snapshot discovery and entropy setup are
 selected by architecture. AMD64 has not yet been built from the combined
