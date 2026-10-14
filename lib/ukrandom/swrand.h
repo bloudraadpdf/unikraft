@@ -53,5 +53,7 @@ int __check_result uk_swrand_randr(__u32 *val);
 int uk_swrand_reseed(void);
 
 int uk_swrand_quiesce(void);
+int uk_swrand_refresh(void);
+int uk_swrand_set_generation_source(volatile const __u8 source[16]);
 
 #endif /* __UK_RANDOM_SWRAND_H__ */

@@ -38,7 +38,6 @@ UK_LIBPARAM_PARAM(clock_addr, __u64, "VMClock shared page physical address");
 UK_LIBPARAM_PARAM(genid_addr, __u64, "VMGenID shared bytes physical address");
 UK_LIBPARAM_PARAM(irq, uint, "VMClock notification interrupt");
 
-static __u8 seeded_id[16];
 static __u8 witnessed_id[16];
 static __u8 transport_id[16];
 static struct uk_waitq transport_wait;
@@ -104,30 +103,10 @@ static int transport_restored(void *argument __unused)
 
 UK_EVENT_HANDLER(UK_PM_EVENT_SYSMIGRATION, transport_restored);
 
-static int reseed_generation(const __u8 id[16])
-{
-	int rc;
-
-	if (same_id(seeded_id, id))
-		return 0;
-	rc = uk_random_reseed();
-	if (rc)
-		return rc;
-	for (unsigned int i = 0; i < 16; ++i)
-		seeded_id[i] = id[i];
-	return 0;
-}
-
 static int restore_irq(void *argument __unused)
 {
-	__u8 id[16];
-	unsigned long irq_flags;
-	int rc;
+	int rc = uk_random_refresh();
 
-	uk_spin_lock_irqsave(&generation_lock, irq_flags);
-	read_genid(id);
-	rc = reseed_generation(id);
-	uk_spin_unlock_irqrestore(&generation_lock, irq_flags);
 	if (rc)
 		UK_CRASH("Snapshot entropy refresh failed (%d)", rc);
 	uk_file_event_set(&clock_file, POLLIN);
@@ -206,7 +185,7 @@ static int generation_control(const struct uk_file *file __unused,
 		if (same_id(id, witnessed_id)) {
 			rc = -EALREADY;
 		} else {
-			rc = reseed_generation(id);
+			rc = uk_random_refresh();
 			if (!rc)
 				for (unsigned int i = 0; i < 16; ++i)
 					witnessed_id[i] = id[i];
@@ -331,7 +310,9 @@ static int restore_devices_init(struct uk_init_ctx *context __unused)
 	    version != 1 || (flags & CLOCK_FLAGS) != CLOCK_FLAGS)
 		return -ENODEV;
 	memcpy(&read_sequence, snapshot + 12, sizeof(read_sequence));
-	read_genid(seeded_id);
+	rc = uk_random_set_generation_source((volatile const __u8 *)genid_addr);
+	if (rc)
+		return rc;
 	read_genid(witnessed_id);
 	read_genid(transport_id);
 	uk_waitq_init(&transport_wait);

@@ -115,6 +115,16 @@ int __check_result uk_random_reseed(void)
 	return uk_swrand_reseed();
 }
 
+int __check_result uk_random_refresh(void)
+{
+	return uk_swrand_refresh();
+}
+
+int __check_result uk_random_set_generation_source(volatile const __u8 source[16])
+{
+	return uk_swrand_set_generation_source(source);
+}
+
 int __check_result uk_random_quiesce(void)
 {
 	return uk_swrand_quiesce();

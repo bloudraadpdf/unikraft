@@ -28,6 +28,14 @@
 static __u32 iv[CHACHA20_IV_WORDS] = {0};
 
 static UK_SWRAND_CTX(ctx);
+static volatile const __u8 *generation_source;
+static __u8 seeded_generation[16];
+
+static void read_generation(__u8 id[16])
+{
+	for (unsigned int i = 0; i < 16; ++i)
+		id[i] = generation_source ? generation_source[i] : 0;
+}
 
 #if CONFIG_LIBUKRANDOM_CMDLINE_SEED
 #define CHACHA_SEED_NOINIT						\
@@ -132,26 +140,69 @@ int uk_swrand_init(struct uk_random_driver **drv)
 static int uk_swrand_reseed_locked(void)
 {
 	__u32 seedv[CHACHA20_SEED_WORDS];
+	__u8 before[16], after[16];
 	int ret;
+
+	if (unlikely(!ctx.driver ||
+		     ctx.driver == (void *)UK_SWRAND_DRIVER_NONE))
+		return -ENODEV;
+
+	do {
+		read_generation(before);
+		ret = ctx.driver->ops->seed_bytes_fb((__u8 *)seedv,
+						  sizeof(seedv));
+		if (unlikely(ret))
+			return ret;
+		read_generation(after);
+	} while (memcmp(before, after, sizeof(before)));
+
+	chacha_init(&ctx.chacha, seedv, iv, 0);
+	memcpy(seeded_generation, before, sizeof(seeded_generation));
+	return 0;
+}
+
+static int uk_swrand_refresh_locked(void)
+{
+	__u8 id[16];
 
 	if (unlikely(!ctx.driver))
 		return -ENODEV;
+	if (!generation_source)
+		return 0;
+	read_generation(id);
+	return memcmp(id, seeded_generation, sizeof(id)) ?
+		uk_swrand_reseed_locked() : 0;
+}
 
-	if (unlikely(ctx.driver == (void *)UK_SWRAND_DRIVER_NONE)) {
-		uk_pr_err("Could not reseed, no driver\n");
-		return -ENODEV;
+int uk_swrand_set_generation_source(volatile const __u8 source[16])
+{
+	unsigned long flags;
+	int ret;
+
+	if (!source)
+		return -EINVAL;
+	uk_spin_lock_irqsave(&ctx.lock, flags);
+	if (generation_source) {
+		ret = -EEXIST;
+	} else {
+		generation_source = source;
+		ret = uk_swrand_reseed_locked();
+		if (ret)
+			generation_source = NULL;
 	}
+	uk_spin_unlock_irqrestore(&ctx.lock, flags);
+	return ret;
+}
 
-	ret = (ctx.driver)->ops->seed_bytes_fb((__u8 *)seedv, sizeof(seedv));
-	if (unlikely(ret)) {
-		uk_pr_err("Could not reseed: Failed to collect entropy (%d)\n",
-			  ret);
-		return ret;
-	}
+int uk_swrand_refresh(void)
+{
+	unsigned long flags;
+	int ret;
 
-	chacha_init(&ctx.chacha, seedv, iv, 0);
-
-	return 0;
+	uk_spin_lock_irqsave(&ctx.lock, flags);
+	ret = uk_swrand_refresh_locked();
+	uk_spin_unlock_irqrestore(&ctx.lock, flags);
+	return ret;
 }
 
 int __check_result uk_swrand_reseed(void)
@@ -185,6 +236,12 @@ int __check_result uk_swrand_randr(__u32 *val)
 		return -ENODEV;
 
 	uk_spin_lock_irqsave(&ctx.lock, irq_flags);
+
+	ret = uk_swrand_refresh_locked();
+	if (unlikely(ret)) {
+		uk_spin_unlock_irqrestore(&ctx.lock, irq_flags);
+		return ret;
+	}
 
 	/* Depending on the implementation of chacha_rand32()
 	 * this may skip the last block, which we favor over

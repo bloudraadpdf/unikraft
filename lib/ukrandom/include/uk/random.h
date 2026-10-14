@@ -59,6 +59,10 @@ int __check_result uk_random_fill_buffer(void *buf, __sz buflen);
 int __check_result uk_random_reseed(void);
 
 int __check_result uk_random_quiesce(void);
+int __check_result uk_random_refresh(void);
+
+/* The VM generation source must stay mapped for the guest lifetime. */
+int __check_result uk_random_set_generation_source(volatile const __u8 source[16]);
 
 #ifdef __cplusplus
 }
