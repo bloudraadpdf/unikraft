@@ -427,6 +427,8 @@ void uk_sched_thread_terminate(struct uk_thread *thread)
 
 	if (thread == uk_thread_current() && uk_thread_in_waitq(thread))
 		uk_waitq_cancel(thread);
+	if (thread == uk_thread_current())
+		uk_thread_set_exited(thread);
 	/* remove from scheduling queue */
 	uk_sched_thread_remove(thread);
 	/* causes calling termination table */
