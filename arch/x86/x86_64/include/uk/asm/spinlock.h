@@ -60,12 +60,12 @@ static inline void ukarch_spin_lock(struct __spinlock *lock)
 		"	jnz	2b\n"		/* if unsuccessful, retry */
 		:
 		: "r" (&lock->lock), "r" (locked)
-		: "eax");
+		: "eax", "memory", "cc");
 }
 
 static inline void ukarch_spin_unlock(struct __spinlock *lock)
 {
-	UK_WRITE_ONCE(lock->lock, 0);
+	__atomic_store_n(&lock->lock, 0, __ATOMIC_RELEASE);
 }
 
 static inline int ukarch_spin_trylock(struct __spinlock *lock)
@@ -81,7 +81,7 @@ static inline int ukarch_spin_trylock(struct __spinlock *lock)
 		"1:\n"
 		: "+&r" (r)
 		: "r" (&lock->lock), "r" (locked)
-		: "eax");
+		: "eax", "memory", "cc");
 
 	return r;
 }
