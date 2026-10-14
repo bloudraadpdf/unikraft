@@ -744,6 +744,27 @@ tcp_timewait_input(struct tcp_pcb *pcb)
    *   acceptable since we only send ACKs)
    * - second check the RST bit (... return) */
   if (flags & TCP_RST) {
+    if (seqno == pcb->rcv_nxt) {
+      /* Go to closed state */
+      tcp_pcb_purge(pcb);
+      /* Remove it from the list */
+      struct tcp_pcb *prev = NULL;
+      struct tcp_pcb *pcbi = tcp_tw_pcbs;
+      while (pcbi != NULL) {
+        if (pcbi == pcb) {
+          if (prev != NULL) {
+            prev->next = pcb->next;
+          } else {
+            tcp_tw_pcbs = pcb->next;
+          }
+          pcbi = pcbi->next;
+          tcp_free(pcb);
+        } else {
+          prev = pcbi;
+          pcbi = pcbi->next;
+        }
+      }
+    }
     return;
   }
 
