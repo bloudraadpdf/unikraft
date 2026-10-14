@@ -702,6 +702,9 @@ lwip_accept(int s, struct sockaddr *addr, socklen_t *addrlen)
     }
 
     IPADDR_PORT_TO_SOCKADDR(&tempaddr, &naddr, port);
+    if (*addrlen > sizeof(*addr)) {
+      *addrlen = sizeof(*addr);
+    }
     MEMCPY(addr, &tempaddr, *addrlen);
 
     LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_accept(%d) returning new sock=%d addr=", s, newsock));
@@ -1044,6 +1047,11 @@ lwip_sock_make_addr(struct netconn *conn, ip_addr_t *fromaddr, u16_t port,
 #endif /* LWIP_IPV4 && LWIP_IPV6 */
 
   IPADDR_PORT_TO_SOCKADDR(&saddr, fromaddr, port);
+  if (*fromlen < sizeof(*from)) {
+    truncated = 1;
+  } else {
+    *fromlen = sizeof(*from);
+  }
   MEMCPY(from, &saddr, *fromlen);
   return truncated;
 }
@@ -2740,6 +2748,9 @@ lwip_getaddrname(int s, struct sockaddr *name, socklen_t *namelen, u8_t local)
   ip_addr_debug_print_val(SOCKETS_DEBUG, naddr);
   LWIP_DEBUGF(SOCKETS_DEBUG, (" port=%"U16_F")\n", port));
 
+  if (*namelen > sizeof(*name)) {
+    *namelen = sizeof(*name);
+  }
   MEMCPY(name, &saddr, *namelen);
 
   sock_set_errno(sock, 0);
