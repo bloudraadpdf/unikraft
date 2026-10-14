@@ -23,6 +23,8 @@
 #include <uk/paging.h>
 #include <uk/plat/memory.h>
 #include <uk/print.h>
+#include <uk/pcpuvar.h>
+#include <uk/pal/except.h>
 
 /* Forward declarations */
 static inline int pg_pt_alloc(struct uk_pagetable *pt, __vaddr_t *pt_vaddr,
@@ -54,31 +56,23 @@ static int pg_page_unmap(struct uk_pagetable *pt, __vaddr_t pt_vaddr,
  */
 static unsigned int pg_page_largest_level = UK_PAL_PAGE_LEVEL;
 
-/*
- * Pointer to currently active page table.
- * TODO: With SMP support, this should move to a CPU-local variable or we
- * need a way to derive the struct pagetable pointer from the configured
- * HW page table base pointer.
- */
 static struct uk_pagetable kernel_pt;
-static struct uk_pagetable *pg_active_pt;
+static __uk_pcpuvar __used struct uk_pagetable *pg_active_pt;
 
 struct uk_pagetable *uk_paging_pt_get_active(void)
 {
-	return pg_active_pt;
+	return uk_pcpuvar_current_get(pg_active_pt);
 }
 
 int uk_paging_pt_set_active(struct uk_pagetable *pt)
 {
-	int rc;
+	unsigned long irq_flags = uk_pal_save_irqf();
+	int rc = uk_pal_pt_write_base(pt->pt_pbase);
 
-	rc = uk_pal_pt_write_base(pt->pt_pbase);
-	if (rc)
-		return rc;
-
-	pg_active_pt = pt;
-
-	return 0;
+	if (!rc)
+		uk_pcpuvar_current_set(pg_active_pt, pt);
+	uk_pal_restore_irqf(irq_flags);
+	return rc;
 }
 
 static int pg_pt_clone(struct uk_pagetable *pt_dst, struct uk_pagetable *pt_src,
@@ -743,7 +737,7 @@ TOO_BIG:
 #endif /* CONFIG_LIBUKPAGING_STATS */
 
 		if (UK_PAL_PT_Lx_PTE_PRESENT(orig_pte, lvl) &&
-		    pt == pg_active_pt)
+		    pt == uk_paging_pt_get_active())
 			uk_pal_tlb_flush_entry(vaddr);
 
 NEXT_PTE:
@@ -1057,7 +1051,8 @@ static int pg_page_unmap(struct uk_pagetable *pt, __vaddr_t pt_vaddr,
 			if (unlikely(rc))
 				return rc;
 
-			if (vaddr != UK_PAL_VADDR_INV && pt == pg_active_pt)
+			if (vaddr != UK_PAL_VADDR_INV &&
+			    pt == uk_paging_pt_get_active())
 				uk_pal_tlb_flush_entry(vaddr);
 
 #ifdef CONFIG_LIBUKPAGING_STATS
@@ -1168,7 +1163,8 @@ static int pg_page_unmap(struct uk_pagetable *pt, __vaddr_t pt_vaddr,
 			if (unlikely(rc))
 				return rc;
 
-			if (vaddr != UK_PAL_VADDR_INV && pt == pg_active_pt)
+			if (vaddr != UK_PAL_VADDR_INV &&
+			    pt == uk_paging_pt_get_active())
 				uk_pal_tlb_flush_entry(vaddr);
 
 			pg_pt_free(pt, pt_vaddr_cache[plvl], plvl);
@@ -1192,7 +1188,7 @@ static int pg_page_unmap(struct uk_pagetable *pt, __vaddr_t pt_vaddr,
 
 	} while (1);
 
-	if (vaddr == UK_PAL_VADDR_INV && pt == pg_active_pt)
+	if (vaddr == UK_PAL_VADDR_INV && pt == uk_paging_pt_get_active())
 		uk_pal_tlb_flush();
 
 	return 0;
@@ -1332,7 +1328,8 @@ static int pg_page_set_attr(struct uk_pagetable *pt, __vaddr_t pt_vaddr,
 			if (unlikely(rc))
 				return rc;
 
-			if (vaddr != UK_PAL_VADDR_INV && pt == pg_active_pt)
+			if (vaddr != UK_PAL_VADDR_INV &&
+			    pt == uk_paging_pt_get_active())
 				uk_pal_tlb_flush_entry(vaddr);
 		}
 
@@ -1372,7 +1369,7 @@ static int pg_page_set_attr(struct uk_pagetable *pt, __vaddr_t pt_vaddr,
 
 	} while (1);
 
-	if (vaddr == UK_PAL_VADDR_INV && pt == pg_active_pt)
+	if (vaddr == UK_PAL_VADDR_INV && pt == uk_paging_pt_get_active())
 		uk_pal_tlb_flush();
 
 	return 0;

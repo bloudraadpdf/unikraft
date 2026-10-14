@@ -2,6 +2,7 @@ menuconfig LIBUKPAGING
 	bool "ukpaging: Virtual memory API"
 	depends on HAVE_PAGING
 	select LIBUKPAL
+	select LIBUKPCPUVAR
 	select LIBUKFALLOC
 	select LIBUKFALLOCBUDDY
 	help

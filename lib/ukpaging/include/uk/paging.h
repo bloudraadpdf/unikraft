@@ -456,13 +456,12 @@ void uk_paging_tlb_flush(void)
 }
 
 /**
- * Returns the active page table (the one that defines the virtual address
- * space at the moment of the execution of this function).
+ * Returns the active page table of the current CPU.
  */
 struct uk_pagetable *uk_paging_pt_get_active(void);
 
 /**
- * Switches the active page table to the specified one.
+ * Switches the active page table of the current CPU.
  *
  * @param pt
  *   The page table instance to switch to. The code of the function
