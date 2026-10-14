@@ -42,9 +42,10 @@ $(eval $(call addlib_s,liblwip,$(CONFIG_LIBLWIP)))
 # Sources
 ################################################################################
 ifeq ($(CONFIG_LWIP_UNIKRAFT21X),y)
-LIBLWIP_BRANCH=UNIKRAFT-2_1_x
+LIBLWIP_BRANCH=bef26c44236a078d4352e76392ef16f019bea501
 LIBLWIP_ZIPNAME=fork-lwip-$(LIBLWIP_BRANCH)
-LIBLWIP_URL=https://github.com/unikraft/fork-lwip/archive/refs/heads/$(LIBLWIP_BRANCH).zip
+LIBLWIP_URL=https://github.com/unikraft/fork-lwip/archive/$(LIBLWIP_BRANCH).zip
+LIBLWIP_ORIGIN_SHA256=0e7de8cd81d29194b6eb587968d11b9d30f74f0230351e63a4178a72cd307cac
 else ifeq ($(CONFIG_LWIP_LATEST21X),y)
 LIBLWIP_BRANCH=STABLE-2_1_x
 LIBLWIP_ZIPNAME=fork-lwip-$(LIBLWIP_BRANCH)
