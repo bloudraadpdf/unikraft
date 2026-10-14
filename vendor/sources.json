@@ -83,5 +83,31 @@
       "src/ext4_extent.c",
       "src/ext4_xattr.c"
     ]
+  },
+  "freebsd-ext2fs": {
+    "repository": "https://github.com/freebsd/freebsd-src",
+    "revision": "9d50245a0f1333e10cc1c4dda16878cd79a7c42b",
+    "files": {
+      "ext2_extents.c": {
+        "url": "https://raw.githubusercontent.com/freebsd/freebsd-src/9d50245a0f1333e10cc1c4dda16878cd79a7c42b/sys/fs/ext2fs/ext2_extents.c",
+        "sha256": "496baaf85c5a9470f52488eeaeff4fa320f31f374886fb74bd6ee206772df712",
+        "destination": "vendor/lwext4/src/ext4_extent.c"
+      },
+      "ext2_extents.h": {
+        "url": "https://raw.githubusercontent.com/freebsd/freebsd-src/9d50245a0f1333e10cc1c4dda16878cd79a7c42b/sys/fs/ext2fs/ext2_extents.h",
+        "sha256": "5a25ab376652a4afcdc7efeb2b885e7e396eebba814541d175ed4a17716b0592",
+        "destination": "vendor/lwext4/include/ext4_extent_disk.h"
+      },
+      "ext2_extattr.c": {
+        "url": "https://raw.githubusercontent.com/freebsd/freebsd-src/9d50245a0f1333e10cc1c4dda16878cd79a7c42b/sys/fs/ext2fs/ext2_extattr.c",
+        "sha256": "f3b2d15e33dc4911c71d7067281e617697b86e49b0a8746dc78ab1ca06e0be93",
+        "destination": "vendor/lwext4/src/ext4_xattr.c"
+      },
+      "ext2_extattr.h": {
+        "url": "https://raw.githubusercontent.com/freebsd/freebsd-src/9d50245a0f1333e10cc1c4dda16878cd79a7c42b/sys/fs/ext2fs/ext2_extattr.h",
+        "sha256": "688258f8c080525629d5a47e1f1dd9bb3e84a338ec55c22470a0e9869c2a0408",
+        "destination": "vendor/lwext4/include/ext4_xattr_disk.h"
+      }
+    }
   }
 }
