@@ -83,9 +83,6 @@ int file_vma_op_new(struct uk_vas *vas, __vaddr_t vaddr __unused,
 			shared = 0;
 		}
 	}
-	if (!shared)
-		*flags |= UK_VMA_MAP_POPULATE;
-
 	fvma = uk_malloc(vas->a, sizeof(*fvma));
 	if (unlikely(!fvma))
 		return -ENOMEM;
