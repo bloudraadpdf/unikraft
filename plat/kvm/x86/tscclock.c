@@ -63,7 +63,9 @@
 #include <uk/print.h>
 #include <uk/assert.h>
 #include <uk/atomic.h>
+#include <uk/paging.h>
 
+#if CONFIG_KVM_PIT
 #define TIMER_CNTR           0x40
 #define TIMER_MODE           0x43
 #define TIMER_SEL0           0x00
@@ -72,6 +74,7 @@
 #define TIMER_ONESHOT        0x08
 #define TIMER_16BIT          0x30
 #define TIMER_HZ             1193182
+#endif
 
 #define	RTC_COMMAND          0x70
 #define	RTC_DATA             0x71
@@ -91,7 +94,7 @@
  * This is really only a basic sanity check. We'll run into serious issues WAY
  * earlier.
  */
-#if TIMER_HZ / CONFIG_HZ < 1
+#if CONFIG_KVM_PIT && TIMER_HZ / CONFIG_HZ < 1
 #error Timer tick frequency (CONFIG_HZ) cannot be higher than PIT frequency!
 #endif
 
@@ -119,11 +122,17 @@ static __u32 tsc_mult;
  */
 static const __u32 pit_mult =
 	(1ULL << 63) / ((UKARCH_NSEC_PER_SEC << 31) / TIMER_HZ);
-#else
+#elif CONFIG_KVM_PIT
 #define APIC_TIMER_DIV16 0x3
 #define APIC_TIMER_MASKED UK_BIT(16)
 
 static __u32 apic_mult;
+#else
+#define APIC_TIMER_TSC_DEADLINE (2U << 17)
+#define MSR_IA32_TSC_DEADLINE 0x6e0
+static __u64 tsc_frequency;
+#endif
+#if CONFIG_LIBUKINTCTLR_APIC
 __uk_pcpuvar bool tscclock_apic_timer_ready;
 #endif
 
@@ -131,6 +140,7 @@ __uk_pcpuvar bool tscclock_apic_timer_ready;
 /*
  * Read the current i8254 channel 0 tick count.
  */
+#if CONFIG_KVM_PIT
 static unsigned int i8254_gettick(void)
 {
 	__u16 rdval;
@@ -164,6 +174,8 @@ static void i8254_delay(unsigned int n)
 		initial_tick = cur_tick;
 	}
 }
+
+#endif
 
 /*
  * Read a RTC register. Due to PC platform braindead-ness also disables NMI.
@@ -219,7 +231,7 @@ __u64 tscclock_monotonic(void)
 	return uk_arch_x86_64_mul64_32(tsc_delta, tsc_mult);
 }
 
-#if CONFIG_LIBUKINTCTLR_APIC
+#if CONFIG_LIBUKINTCTLR_APIC && CONFIG_KVM_PIT
 static int apic_timer_calibrate(void)
 {
 	__u64 start, elapsed, ticks, mult;
@@ -245,6 +257,62 @@ static int apic_timer_calibrate(void)
 }
 #endif
 
+/* KVM clock ABI: https://docs.kernel.org/virt/kvm/x86/msr.html */
+#define MSR_KVM_SYSTEM_TIME_NEW 0x4b564d01
+
+struct kvm_clock_info {
+	__u32 version;
+	__u32 pad0;
+	__u64 tsc_timestamp;
+	__u64 system_time;
+	__u32 multiplier;
+	__s8 shift;
+	__u8 flags;
+	__u8 pad[2];
+} __packed;
+
+static struct kvm_clock_info kvm_clock __align(32);
+
+static __u64 kvm_tsc_frequency(void)
+{
+	__u32 eax, ebx, ecx, edx, version, multiplier;
+	__s8 shift;
+	__u64 frequency, address;
+
+	uk_arch_x86_64_cpuid(0x40000000, 0, &eax, &ebx, &ecx, &edx);
+	if (eax < 0x40000001 || ebx != 0x4b4d564b ||
+	    ecx != 0x564b4d56 || edx != 0x4d)
+		return 0;
+	uk_arch_x86_64_cpuid(0x40000001, 0, &eax, &ebx, &ecx, &edx);
+	if (!(eax & UK_BIT(3)))
+		return 0;
+
+	address = uk_paging_virt_to_phys((__vaddr_t)&kvm_clock);
+	uk_arch_x86_64_wrmsrl(MSR_KVM_SYSTEM_TIME_NEW, address | 1);
+	/* Disable host updates before the kernel can be snapshotted. */
+	uk_arch_x86_64_wrmsrl(MSR_KVM_SYSTEM_TIME_NEW, 0);
+	uk_arch_x86_64_rmb();
+	version = UK_READ_ONCE(kvm_clock.version);
+	uk_arch_x86_64_rmb();
+	multiplier = UK_READ_ONCE(kvm_clock.multiplier);
+	shift = UK_READ_ONCE(kvm_clock.shift);
+	uk_arch_x86_64_rmb();
+	if (!version || (version & 1) ||
+	    version != UK_READ_ONCE(kvm_clock.version) || !multiplier ||
+	    shift < -32 || shift > 32)
+		return 0;
+
+	frequency = (UKARCH_NSEC_PER_SEC << 32) / multiplier;
+	if (shift < 0) {
+		if (frequency > (UINT64_MAX >> -shift))
+			return 0;
+		frequency <<= -shift;
+	} else {
+		frequency >>= shift;
+	}
+	return frequency;
+}
+
 /*
  * Calibrate TSC and initialise TSC clock.
  */
@@ -253,17 +321,28 @@ int tscclock_init(void)
 	__u64 tsc_freq = 0, rtc_boot;
 	__u32 eax, ebx, ecx, edx;
 
+#if CONFIG_KVM_PIT
 	/* Initialise i8254 timer channel 0 to mode 2 at CONFIG_HZ frequency */
 	uk_arch_x86_64_outb(TIMER_MODE,
 			    TIMER_SEL0 | TIMER_RATEGEN | TIMER_16BIT);
 	uk_arch_x86_64_outb(TIMER_CNTR, (TIMER_HZ / CONFIG_HZ) & 0xff);
 	uk_arch_x86_64_outb(TIMER_CNTR, (TIMER_HZ / CONFIG_HZ) >> 8);
 
+#else
+	uk_arch_x86_64_cpuid(1, 0, &eax, &ebx, &ecx, &edx);
+	if (!(ecx & UK_BIT(24))) {
+		uk_pr_err("PIT-free clock requires TSC-deadline support\n");
+		return -ENODEV;
+	}
+#endif
+
 	/*
 	 * Read RTC "time at boot". This must be done just before tsc_base is
 	 * initialised in order to get a correct offset below.
 	 */
 	rtc_boot = rtc_gettimeofday();
+	tsc_base = uk_arch_x86_64_rdtsc();
+	tsc_freq = kvm_tsc_frequency();
 
 	/*
 	 * Attempt to retrieve TSC frequency via the hypervisor generic cpuid
@@ -272,13 +351,14 @@ int tscclock_init(void)
 	 * hypervisor.
 	 */
 	uk_arch_x86_64_cpuid(0x40000000, 0, &eax, &ebx, &ecx, &edx);
-	if (eax >= 0x40000010) {
+	if (!tsc_freq && eax >= 0x40000010) {
 		uk_pr_info("Retrieving TSC clock frequency from hypervisor\n");
 		tsc_base = uk_arch_x86_64_rdtsc();
 		uk_arch_x86_64_cpuid(0x40000010, 0, &eax, &ebx, &ecx, &edx);
-		tsc_freq = eax * 1000;
+		tsc_freq = (__u64)eax * 1000;
 	}
 
+#if CONFIG_KVM_PIT
 	/*
 	 * If we could not retrieve the TSC frequency from the hypervisor,
 	 * calibrate against an 0.1s delay using the i8254 timer. This is
@@ -290,6 +370,17 @@ int tscclock_init(void)
 		i8254_delay(100000);
 		tsc_freq = (uk_arch_x86_64_rdtsc() - tsc_base) * 10;
 	}
+#endif
+	if (!tsc_freq) {
+		uk_pr_err("No published TSC frequency and PIT fallback is disabled\n");
+		return -ENODEV;
+	}
+	if (tsc_freq > (UKARCH_NSEC_PER_SEC << 32) ||
+	    (UKARCH_NSEC_PER_SEC << 32) / tsc_freq > UINT32_MAX)
+		return -ERANGE;
+#if !CONFIG_KVM_PIT
+	tsc_frequency = tsc_freq;
+#endif
 
 	/*
 	 * Calculate TSC scaling multiplier.
@@ -298,9 +389,7 @@ int tscclock_init(void)
 	 *
 	 * Warning, do not print anything between TSC calibration and the
 	 * setting of tsc_mult, as the clock is not usable until then.
-	 *
-	 * FIXME: this will overflow with small TSC frequencies. We should
-	 * probably calculate the TSC shift dynamically like solo5/hvt does.
+
 	 */
 	tsc_mult = (UKARCH_NSEC_PER_SEC << 32) / tsc_freq;
 
@@ -313,13 +402,14 @@ int tscclock_init(void)
 	 */
 	rtc_epochoffset = rtc_boot - tscclock_monotonic();
 
-#if CONFIG_LIBUKINTCTLR_APIC
+#if CONFIG_LIBUKINTCTLR_APIC && CONFIG_KVM_PIT
 	int rc = apic_timer_calibrate();
 
 	if (rc)
 		return rc;
 #endif
 
+#if CONFIG_KVM_PIT
 	/*
 	 * Initialise i8254 timer channel 0 to mode 4 (one shot).
 	 */
@@ -327,6 +417,7 @@ int tscclock_init(void)
 			    TIMER_SEL0 | TIMER_ONESHOT | TIMER_16BIT);
 	uk_arch_x86_64_outb(TIMER_CNTR, 0);
 	uk_arch_x86_64_outb(TIMER_CNTR, 0);
+#endif
 
 	return 0;
 }
@@ -339,7 +430,30 @@ __u64 tscclock_epochoffset(void)
 	return rtc_epochoffset;
 }
 
-#if CONFIG_LIBUKINTCTLR_APIC
+#if !CONFIG_KVM_PIT
+static void tscclock_cpu_block(__u64 until)
+{
+	__u64 deadline;
+
+	UK_ASSERT(uk_lcpu_irqs_disabled());
+	if (!uk_pcpuvar_current_get(tscclock_apic_timer_ready)) {
+		uk_arch_x86_64_wrmsrl(UK_ARCH_X86_64_APIC_MSR_LVT_TIMER,
+				      APIC_TIMER_TSC_DEADLINE |
+				      (32 + ukplat_time_get_irq()));
+		uk_pcpuvar_current_set(tscclock_apic_timer_ready, true);
+	}
+	if (ukplat_monotonic_clock() >= until)
+		return;
+	deadline = tsc_base + (until / UKARCH_NSEC_PER_SEC) * tsc_frequency;
+	until %= UKARCH_NSEC_PER_SEC;
+	deadline += until * (tsc_frequency / UKARCH_NSEC_PER_SEC) +
+		until * (tsc_frequency % UKARCH_NSEC_PER_SEC) /
+		UKARCH_NSEC_PER_SEC;
+	uk_arch_x86_64_wrmsrl(MSR_IA32_TSC_DEADLINE, deadline);
+	uk_lcpu_halt_irq();
+	uk_arch_x86_64_wrmsrl(MSR_IA32_TSC_DEADLINE, 0);
+}
+#elif CONFIG_LIBUKINTCTLR_APIC
 static void tscclock_cpu_block(__u64 until)
 {
 	__u64 now, ticks;

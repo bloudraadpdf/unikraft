@@ -23,6 +23,7 @@ menuconfig PLAT_KVM
 	select HAVE_INTCTLR
 	select HAVE_APIC if ARCH_X86_64
 	select LIBUKINTCTLR_XPIC if ARCH_X86_64
+	select LIBUKINTCTLR_APIC if (ARCH_X86_64 && !KVM_PIT)
 	imply LIBUKBUS_PLATFORM if ARCH_ARM_64
 	imply LIBVIRTIO_9P if LIBUK9P
 	imply LIBVIRTIO_NET if LIBUKNETDEV
@@ -32,6 +33,15 @@ menuconfig PLAT_KVM
 		Create a Unikraft image that runs as a KVM guest
 
 if (PLAT_KVM)
+
+config KVM_PIT
+	bool "Legacy PIT clock calibration and timer fallback"
+	depends on ARCH_X86_64
+	default y
+	help
+		Include the i8254 PIT fallback for clock calibration and scheduling.
+		Without it, the guest requires a published TSC frequency and the
+		local APIC TSC-deadline timer. No PIT port access is compiled in.
 
 choice
 	prompt "Boot protocol"

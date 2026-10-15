@@ -70,3 +70,14 @@ allowed thread flags to be read before the scheduler lock.
 Tokoloshe pins this repository and exports its source in release archives.
 Its guest feature contracts and architecture-specific acceptance checks
 remain the authority for supported launches.
+
+## Optional timer support
+
+`CONFIG_KVM_PIT` keeps the legacy AMD64 PIT calibration and timer fallback
+available. It defaults to enabled for upstream configurations. Disabling it
+selects the local APIC and compiles out PIT port access and calibration.
+The kernel then requires TSC-deadline support and a published TSC frequency.
+KVM clock timing data supplies the frequency without a calibration delay;
+the temporary timing page is disabled before snapshots can be taken.
+The existing generic hypervisor frequency leaf remains available as a
+fallback. ARM64 continues to use its architectural timer.
