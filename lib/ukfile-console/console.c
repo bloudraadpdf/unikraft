@@ -517,7 +517,7 @@ static int serial_getstat(const struct uk_file *f __maybe_unused,
 	arg->stx_mask = SERIAL_STATX_MASK;
 	arg->stx_mode = S_IFCHR|0666;
 	arg->stx_nlink = 1;
-	arg->stx_ino = 1;
+	arg->stx_ino = (uintptr_t)f->node;
 	arg->stx_size = 0;
 
 	/* Following fields are always filled in, not in stx_mask */
