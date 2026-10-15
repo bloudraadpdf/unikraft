@@ -704,6 +704,7 @@ int ramfs_live_getstat(struct ramfs_node *n,
 {
 	/* Everything is immediately available; ignore mask */
 	/* Const/computed values */
+	memset(arg, 0, sizeof(*arg));
 	arg->stx_mask = UK_STATX_TYPE | UK_STATX_MODE | UK_STATX_NLINK |
 			UK_STATX_UID | UK_STATX_GID | UK_STATX_ATIME |
 			UK_STATX_BTIME | UK_STATX_CTIME | UK_STATX_MTIME |
