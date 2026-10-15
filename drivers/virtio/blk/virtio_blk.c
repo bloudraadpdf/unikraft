@@ -25,6 +25,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <virtio/virtio_bus.h>
 #include <virtio/virtio_ids.h>
 #include <uk/blkdev.h>
@@ -651,6 +652,14 @@ exit:
 	return rc;
 }
 
+static void virtio_blkdev_request_limit(struct virtio_blk_device *vbdev)
+{
+	struct uk_blkdev_cap *cap = &vbdev->blkdev.capabilities;
+
+	cap->max_sectors_per_req = vbdev->max_size_segment / cap->ssize *
+				  (vbdev->max_segments - 2);
+}
+
 static int virtio_blkdev_queues_alloc(struct virtio_blk_device *vbdev,
 				    const struct uk_blkdev_conf *conf)
 {
@@ -673,6 +682,14 @@ static int virtio_blkdev_queues_alloc(struct virtio_blk_device *vbdev,
 		rc = -ENOMEM;
 		goto exit;
 	}
+	for (i = 0; i < conf->nb_queues; ++i) {
+		if (qdesc_size[i] < 3) {
+			rc = -ENOBUFS;
+			goto exit;
+		}
+		vbdev->max_segments = MIN(vbdev->max_segments, qdesc_size[i]);
+	}
+	virtio_blkdev_request_limit(vbdev);
 
 	/**
 	 * TODO:
@@ -854,10 +871,10 @@ static int virtio_blkdev_feature_negotiate(struct virtio_blk_device *vbdev)
 			goto exit;
 		}
 	} else
-		max_segments = 1;
+		max_segments = UINT16_MAX - 2;
 
 	/* We need extra sg elements for head (header) and tail (status). */
-	max_segments += 2;
+	max_segments = MIN(max_segments, UINT16_MAX - 2) + 2;
 
 	if (VIRTIO_FEATURE_HAS(host_features, VIRTIO_BLK_F_SIZE_MAX)) {
 		rc = virtio_config_get(vbdev->vdev,
@@ -878,12 +895,11 @@ static int virtio_blkdev_feature_negotiate(struct virtio_blk_device *vbdev)
 	cap->ioalign = sizeof(void *);
 	cap->mode = (VIRTIO_FEATURE_HAS(
 			host_features, VIRTIO_BLK_F_RO)) ? O_RDONLY : O_RDWR;
-	cap->max_sectors_per_req =
-			max_size_segment / ssize * (max_segments - 2);
 
 	vbdev->max_vqueue_pairs = num_queues;
 	vbdev->max_segments = max_segments;
 	vbdev->max_size_segment = max_size_segment;
+	virtio_blkdev_request_limit(vbdev);
 	cap->flush_supported = VIRTIO_FEATURE_HAS(host_features,
 				VIRTIO_BLK_F_FLUSH);
 
