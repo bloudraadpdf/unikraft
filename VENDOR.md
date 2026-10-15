@@ -81,3 +81,9 @@ KVM clock timing data supplies the frequency without a calibration delay;
 the temporary timing page is disabled before snapshots can be taken.
 The existing generic hypervisor frequency leaf remains available as a
 fallback. ARM64 continues to use its architectural timer.
+
+## Optional SMP support
+
+`CONFIG_UKPLAT_CPU_MAXCOUNT=1` disables `CONFIG_HAVE_SMP` on both
+architectures. AMD64 excludes the 16-bit secondary startup trampoline in
+this configuration; the common primary CPU entry remains available.

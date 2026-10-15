@@ -49,6 +49,7 @@
 #define START16_PLACEHOLDER	0x1516	/* IS16 */
 #define START32_PLACEHOLDER	0x1532	/* IS32 */
 
+#if CONFIG_HAVE_SMP
 /* TODO: Move this to plat native driver */
 .section .data.boot.16
 .globl uk_plat_native_x86_64_start16_addr
@@ -187,6 +188,7 @@ jump_to32:
 END(lcpu_start16)
 
 SEC_END(start16)
+#endif
 
 /*
  * 32-bit boot entry function
