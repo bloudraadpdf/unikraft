@@ -106,14 +106,17 @@ static inline int _sglist_append_buf(struct uk_sglist *sg, void *buf,
 	offset = page_off(vaddr);
 
 #ifdef CONFIG_LIBUKVMEM
-	/* Ensure the buffer is backed by physical memory */
-	error = uk_vma_advise(uk_vas_get_active(),
-			      UK_PAGING_PAGE_ALIGN_DOWN(vaddr),
-			      UK_PAGING_PAGE_ALIGN_UP(len + offset),
-			      UK_VMA_ADV_WILLNEED,
-			      UK_VMA_FLAG_UNINITIALIZED);
-	if (unlikely(error))
-		return error;
+	__vaddr_t next = vaddr;
+	size_t left = len;
+
+	while (left) {
+		error = uk_vma_populate_page(uk_vas_get_active(), next);
+		if (unlikely(error))
+			return error;
+		seglen = MIN(left, __PAGE_SIZE - page_off(next));
+		next += seglen;
+		left -= seglen;
+	}
 #endif /* CONFIG_LIBUKVMEM */
 
 	/* Do the first page. It may have an offset. */

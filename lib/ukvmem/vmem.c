@@ -1137,6 +1137,20 @@ int uk_vma_populate_page(struct uk_vas *vas, __vaddr_t vaddr)
 	unsigned long previous;
 	unsigned int level;
 	int rc = -ENOENT;
+#ifdef CONFIG_LIBUKPAGING
+	__pte_t entry;
+	unsigned long flags = uk_pal_save_irqf();
+	int present;
+
+	level = UK_PAGING_PAGE_LEVEL;
+	vmem_fault_lock(vas);
+	present = !uk_paging_pt_walk(vas->pt, vaddr, &level, NULL, &entry) &&
+		UK_PAGING_PT_Lx_PTE_PRESENT(entry, level) &&
+		UK_PAGING_PAGE_Lx_IS(entry, level);
+	uk_spin_unlock_irqrestore(&vas->fault_lock, flags);
+	if (present)
+		return 0;
+#endif
 
 	previous = vmem_mutation_begin(vas);
 	vma = vmem_vma_find(vas, vaddr, 0);
