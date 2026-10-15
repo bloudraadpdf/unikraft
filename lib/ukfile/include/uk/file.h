@@ -310,8 +310,6 @@ typedef struct uk_file_finref uk_file_refcnt;
 #define UK_FILE_REFCNT_INIT_VALUE_V(name, v) \
 	UK_FILE_FINREF_INIT_VALUE((name), (v))
 
-#define uk_file_refcnt_finalize uk_file_finref_finalize
-
 #define uk_file_refcnt_acquire		uk_file_finref_acquire
 #define uk_file_refcnt_acquire_weak	uk_file_finref_acquire_weak
 #define uk_file_refcnt_try_acquire	uk_file_finref_try_acquire
@@ -325,8 +323,6 @@ typedef struct uk_swrefcount uk_file_refcnt;
 	UK_SWREFCOUNT_INITIALIZER((v), (v))
 #define UK_FILE_REFCNT_INIT_VALUE_V(name, v) \
 	UK_SWREFCOUNT_INIT_VALUE((v), (v))
-
-#define uk_file_refcnt_finalize(_) do { } while (0)
 
 #define uk_file_refcnt_acquire		uk_swrefcount_acquire
 #define uk_file_refcnt_acquire_weak	uk_swrefcount_acquire_weak
@@ -440,8 +436,6 @@ void uk_file_release(const struct uk_file *f)
 
 	if (r)
 		f->_release(f, r);
-	if (r | UK_SWREFCOUNT_LAST_STRONG)
-		uk_file_refcnt_finalize(f->refcnt);
 }
 
 static inline

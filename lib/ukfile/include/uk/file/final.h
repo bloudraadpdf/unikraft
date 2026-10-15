@@ -58,12 +58,6 @@ int uk_file_finref_try_acquire(struct uk_file_finref *r)
 }
 
 static inline
-int uk_file_finref_release(struct uk_file_finref *r)
-{
-	return uk_swrefcount_release(&r->cnt);
-}
-
-static inline
 void uk_file_finref_finalize(struct uk_file_finref *r)
 {
 	struct uk_file_finalize_cb *fin = r->fins;
@@ -75,6 +69,18 @@ void uk_file_finref_finalize(struct uk_file_finref *r)
 		fin->fin(fin->arg);
 		fin = next;
 	}
+}
+
+static inline
+int uk_file_finref_release(struct uk_file_finref *r)
+{
+	int ret = 0;
+
+	if (uk_refcount_release(&r->cnt.strong)) {
+		ret = UK_SWREFCOUNT_LAST_STRONG;
+		uk_file_finref_finalize(r);
+	}
+	return ret | uk_swrefcount_release_weak(&r->cnt);
 }
 
 static inline
