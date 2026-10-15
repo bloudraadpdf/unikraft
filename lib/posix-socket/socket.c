@@ -780,7 +780,7 @@ UK_SYSCALL_R_DEFINE(ssize_t, recvfrom, int, sock, void *, buf, size_t, len,
 		    (flags & MSG_DONTWAIT) ||
 		    !_ERR_BLOCK(ret))
 			break;
-		(void)uk_file_poll(of->file, UKFD_POLLIN);
+		(void)uk_file_poll(of->file, UKFD_POLLIN | UKFD_POLL_ALWAYS);
 	}
 	uk_ofile_release(of);
 
@@ -831,7 +831,7 @@ UK_SYSCALL_R_DEFINE(ssize_t, recvmsg, int, sock, struct msghdr *, msg,
 		    (flags & MSG_DONTWAIT) ||
 		    !_ERR_BLOCK(ret))
 			break;
-		(void)uk_file_poll(of->file, UKFD_POLLIN);
+		(void)uk_file_poll(of->file, UKFD_POLLIN | UKFD_POLL_ALWAYS);
 	}
 	uk_ofile_release(of);
 

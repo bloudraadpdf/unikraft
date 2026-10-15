@@ -410,7 +410,7 @@ static int uk_vsock_close(struct uk_vsock *sock, int force_reset, __bool locked)
 		    sock);
 
 	posix_sock_event_clear(sock->posix_sock, EPOLLOUT);
-	posix_sock_event_set(sock->posix_sock, EPOLLHUP);
+	posix_sock_event_set(sock->posix_sock, EPOLLIN | EPOLLHUP);
 
 	uk_pr_debug("sock=%p close complete\n", sock);
 
@@ -638,8 +638,8 @@ int uk_vsock_conn_shutdown(struct uk_vsock *sock, int peer_rx, int peer_tx)
 		/* peer will not send any more data */
 		uk_pr_debug("rx shutdown on sock=%p, setting EPOLLRDHUP\n",
 			    sock);
-		posix_sock_event_set(sock->posix_sock, EPOLLRDHUP);
 		sock->rx_shutdown = 1;
+		posix_sock_event_set(sock->posix_sock, EPOLLIN | EPOLLRDHUP);
 	}
 	if (sock->rx_shutdown && sock->tx_shutdown) {
 		uk_pr_debug("both directions shut down on sock=%p, closing\n",
@@ -1121,7 +1121,7 @@ static int vsock_shutdown(posix_sock *sock, int how)
 
 	uk_pr_debug("driver shutdown ok, updating connection state\n");
 
-	return uk_vsock_conn_shutdown(vsock, rx, tx);
+	return uk_vsock_conn_shutdown(vsock, tx, rx);
 }
 
 static int vsock_close(posix_sock *sock)
@@ -1566,7 +1566,7 @@ static ssize_t vsock_read(posix_sock *sock,
 	}
 
 out:
-	if (uk_vsock_buffer_is_empty(&vsock->rx)) {
+	if (uk_vsock_buffer_is_empty(&vsock->rx) && !vsock->rx_shutdown) {
 		uk_pr_debug("rx buffer empty, clearing EPOLLIN on vsock=%p\n",
 			    vsock);
 		posix_sock_event_clear(sock, EPOLLIN);
@@ -1628,7 +1628,7 @@ static ssize_t vsock_recvfrom(posix_sock *sock, void *restrict buf, size_t len,
 		uk_vsock_buffer_consume(&vsock->rx, res);
 	}
 
-	if (uk_vsock_buffer_is_empty(&vsock->rx)) {
+	if (uk_vsock_buffer_is_empty(&vsock->rx) && !vsock->rx_shutdown) {
 		uk_pr_debug("rx buffer empty, clearing EPOLLIN on vsock=%p\n",
 			    vsock);
 		posix_sock_event_clear(sock, EPOLLIN);

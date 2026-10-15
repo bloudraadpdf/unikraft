@@ -155,6 +155,9 @@ lwip_posix_socket_shutdown(posix_sock *file, int how)
 	ret = lwip_shutdown(lwip_fd, how);
 	if (unlikely(ret < 0))
 		ret = -errno;
+	else if (how != SHUT_WR)
+		posix_sock_event_set(file, EPOLLIN | EPOLLRDNORM | EPOLLRDHUP |
+				     (how == SHUT_RDWR ? EPOLLHUP : 0));
 
 	return ret;
 }
