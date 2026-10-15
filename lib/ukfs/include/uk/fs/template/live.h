@@ -1360,7 +1360,8 @@ attr UK_FS_TMPL_LIVE_DECL_FS_LOOKUP(drv)				\
 		UK_FS_TMPL_LIVE_NODETYPE(drv) nod[2];			\
 									\
 		/* Check if d is mount point */				\
-		if (d && !(flags & UKFS_LOOKUP_IGNMNT)) {		\
+		if (d && !(flags & (UKFS_LOOKUP_IGNMNT |		\
+				   UKFS_LOOKUP_IGNMNT_START))) {		\
 			struct drv##_IDATA *idata = drv##_FILE_IDATA(d);\
 			const struct uk_file *mnt;			\
 									\
@@ -1382,6 +1383,7 @@ attr UK_FS_TMPL_LIVE_DECL_FS_LOOKUP(drv)				\
 				return UKFS_STOP_MNT;			\
 			}						\
 		}							\
+		flags &= ~UKFS_LOOKUP_IGNMNT_START;			\
 		/* Skip redundant leading '/' */			\
 		while (cur < len && path[cur] == '/')			\
 			cur++;						\

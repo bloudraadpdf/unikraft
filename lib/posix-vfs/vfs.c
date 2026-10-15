@@ -582,6 +582,7 @@ const struct uk_file *_vfs_lookupat(const struct uk_file *atroot,
 	const struct uk_file *d = atroot;
 	const struct uk_file *fsroot;
 	const struct uk_file *ret;
+	unsigned int lflags = UKFS_LOOKUP_NO_MNTAUX;
 	size_t pos;
 
 	/* Skip leading '/' */
@@ -602,15 +603,17 @@ const struct uk_file *_vfs_lookupat(const struct uk_file *atroot,
 		UK_ASSERT(uk_fs_isfs(d));
 		/* Skip parent lookups if at fsroot */
 		if (d == fsroot && uk_fs_path_isdotdot(path, len)) {
+			lflags &= ~UKFS_LOOKUP_IGNMNT_START;
 			path += (len == 2) ? 2 : 3;
 			len -= (len == 2) ? 2 : 3;
 			continue;
 		}
 		/* Lookup in filesystem */
 		vfs_rlock(d);
-		r = uk_fs_lookupat(d, path, len, UKFS_LOOKUP_NO_MNTAUX,
+		r = uk_fs_lookupat(d, path, len, lflags,
 				   &lout, &pos);
 		vfs_runlock(d);
+		lflags = UKFS_LOOKUP_NO_MNTAUX;
 		if (r < 0) {
 			ret = ERR2PTR(r);
 			goto out;
@@ -642,6 +645,8 @@ const struct uk_file *_vfs_lookupat(const struct uk_file *atroot,
 		case UKFS_STOP_MNT:
 			uk_file_release(d);
 			d = lout.target;
+			if (uk_fs_path_isdotdot(path + pos, len - pos))
+				lflags |= UKFS_LOOKUP_IGNMNT_START;
 			break;
 
 		case UKFS_STOP_SYM:

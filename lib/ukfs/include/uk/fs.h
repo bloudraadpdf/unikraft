@@ -71,6 +71,7 @@ struct uk_fs_specfile {
 #define UKFS_LOOKUP_IGNMNT    1
 #define UKFS_LOOKUP_NO_MNTAUX 2
 #define UKFS_LOOKUP_NO_SYMAUX 4
+#define UKFS_LOOKUP_IGNMNT_START 8
 
 /* (Partial) success return codes from lookup */
 #define UKFS_SUCCESS    0
@@ -141,6 +142,8 @@ union uk_fs_lookup_out {
  * Behavior is influenced by bits set in `flags`:
  * - UKFS_LOOKUP_IGNMNT: ignore mounted filesystems and perform lookups on the
  *   referenced mount point itself
+ * - UKFS_LOOKUP_IGNMNT_START: ignore the mount on the initial node only;
+ *   follow mount points reached later in the path
  * - UKFS_LOOKUP_NO_MNTAUX: do not output a reference to the mount point node
  *   in `out.aux`
  * - UKFS_LOOKUP_NO_SYMAUX: do not output a reference to the parent directory

@@ -103,7 +103,7 @@ int root_lookup(const struct uk_file *f,
 		break;
 	}
 
-	if (!(flags & UKFS_LOOKUP_IGNMNT)) {
+	if (!(flags & (UKFS_LOOKUP_IGNMNT | UKFS_LOOKUP_IGNMNT_START))) {
 		uk_spin_lock(&umount_lock);
 		mnt = rootmnt;
 		if (mnt)
