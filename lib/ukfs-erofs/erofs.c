@@ -15,12 +15,22 @@
 #include <uk/fs/template/live.h>
 #include <uk/mutex.h>
 
+#define EROFS_READ_CACHE_BYTES (64 * 1024)
+
+struct erofs_cached_block {
+	u64 offset;
+	size_t length;
+	unsigned char data[EROFS_READ_CACHE_BYTES];
+};
+
 struct erofs_volume {
 	struct erofs_sb_info super;
 	struct uk_fs_vopen_memimg image;
 	const struct uk_file *source;
 	struct uk_mutex lock;
 	unsigned int references;
+	/* After mount, the volume lock protects cached reads. */
+	struct erofs_cached_block cache[64];
 };
 
 struct erofs_node {
@@ -44,11 +54,42 @@ static ssize_t image_read(struct erofs_vfile *file, void *buffer,
 	    length > volume->image.len - offset)
 		return -EIO;
 	if (volume->source) {
-		const struct iovec vector = {
-			.iov_base = buffer, .iov_len = length
-		};
+		size_t copied = 0;
 
-		return uk_file_read(volume->source, &vector, 1, offset, 0);
+		while (length) {
+			u64 aligned = round_down(offset, EROFS_READ_CACHE_BYTES);
+			struct erofs_cached_block *block =
+				&volume->cache[(aligned / EROFS_READ_CACHE_BYTES) %
+					       ARRAY_SIZE(volume->cache)];
+			size_t prefix = offset - aligned;
+			size_t count;
+
+			if (!block->length || block->offset != aligned) {
+				const struct iovec vector = {
+					.iov_base = block->data,
+					.iov_len = MIN(sizeof(block->data),
+						       volume->image.len - aligned)
+				};
+				ssize_t result;
+
+				block->length = 0;
+				result = uk_file_read(volume->source, &vector, 1,
+						      aligned, 0);
+				if (result < 0)
+					return result;
+				if ((size_t)result != vector.iov_len)
+					return -EIO;
+				block->offset = aligned;
+				block->length = result;
+			}
+			count = MIN(length, block->length - prefix);
+			memcpy((char *)buffer + copied, block->data + prefix, count);
+			copied += count;
+			offset += count;
+			length -= count;
+		}
+
+		return copied;
 	}
 	memcpy(buffer, (const char *)volume->image.base + offset, length);
 	return length;

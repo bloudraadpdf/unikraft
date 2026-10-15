@@ -207,7 +207,8 @@ static int block_files_init(struct uk_init_ctx *context __unused)
 		    capacity->sectors > SIZE_MAX / 512)
 			return -EOPNOTSUPP;
 		block->size = capacity->sectors * 512;
-		block->chunk = MIN(capacity->max_sectors_per_req, 8) * 512;
+		block->chunk = MIN(capacity->max_sectors_per_req,
+				   capacity->mode == O_RDONLY ? 128 : 8) * 512;
 		result = posix_memalign((void **)&block->buffer,
 				       MAX(capacity->ioalign, 4096),
 				       block->chunk);
