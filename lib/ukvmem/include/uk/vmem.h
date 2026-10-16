@@ -116,6 +116,7 @@ struct uk_vma {
 
 	struct uk_vas *vas;
 	const struct uk_vma_ops *ops;
+	const void *owner;
 
 	struct uk_list_head vma_list;
 
@@ -569,6 +570,8 @@ static inline const struct uk_vma *uk_vma_next(const struct uk_vma *vma)
  *   Pointer to the operations defining the behavior of the VMA
  * @param args
  *   Pointer to additional VMA-type specific arguments
+ * @param owner
+ *   Opaque owner identity. Areas with different owners are not merged.
  *
  * @return
  *   0 on success, a negative errno error otherwise
@@ -580,7 +583,7 @@ static inline const struct uk_vma *uk_vma_next(const struct uk_vma *vma)
  */
 int uk_vma_map(struct uk_vas *vas, __vaddr_t *vaddr, __sz len,
 	       unsigned long attr, unsigned long flags, const char *name,
-	       const struct uk_vma_ops *ops, void *args);
+	       const struct uk_vma_ops *ops, void *args, const void *owner);
 
 /**
  * Removes any mapping in the specified virtual address range.

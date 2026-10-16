@@ -15,6 +15,9 @@
 #include <uk/arch/limits.h>
 #include <uk/lcpu.h>
 #include <uk/vmem.h>
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+#include <uk/process.h>
+#endif
 
 #if CONFIG_LIBPOSIX_FDTAB
 #include <uk/posix-fdtab.h>
@@ -69,6 +72,7 @@ static int do_mmap(void **addr, size_t len, int prot, int flags, int fd,
 	struct uk_fdio_vma_args fdio_vma_args = {0};
 #endif /* CONFIG_LIBPOSIX_FDIO */
 #endif /* CONFIG_LIBPOSIX_FDTAB */
+	const void *owner = NULL;
 	void *vargs;
 	const struct uk_vma_ops *vops;
 	unsigned int order, lvl = UK_PAGING_PAGE_LEVEL;
@@ -206,7 +210,11 @@ static int do_mmap(void **addr, size_t len, int prot, int flags, int fd,
 	/* MAP_NONBLOCKED: Ignored for now */
 	/* MAP_NORESERVE : Ignored for now */
 
-	rc = uk_vma_map(vas, &vaddr, len, vattr, vflags, NULL, vops, vargs);
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+	owner = uk_posix_process_vm_owner();
+#endif
+	rc = uk_vma_map(vas, &vaddr, len, vattr, vflags, NULL, vops, vargs,
+			owner);
 	if (unlikely(rc && !(flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) &&
 		     vaddr != UK_PAGING_VADDR_ANY)) {
 		/* If addr was meant as a hint and we fail to map, we retry
@@ -214,7 +222,7 @@ static int do_mmap(void **addr, size_t len, int prot, int flags, int fd,
 		 */
 		vaddr = UK_PAGING_VADDR_ANY;
 		rc = uk_vma_map(vas, &vaddr, len, vattr, vflags, NULL, vops,
-				vargs);
+				vargs, owner);
 	}
 
 #if CONFIG_LIBPOSIX_FDTAB && CONFIG_LIBPOSIX_FDIO

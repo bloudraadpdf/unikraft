@@ -85,6 +85,9 @@ pid_t uk_sys_getpid(void);
  */
 int uk_posix_process_create_pthread(struct uk_thread *thread);
 bool uk_posix_process_exit_requested(void);
+#if CONFIG_LIBUKVMEM
+const void *uk_posix_process_vm_owner(void);
+#endif
 
 #endif /* CONFIG_LIBPOSIX_PROCESS_MULTITHREADING */
 

@@ -167,7 +167,9 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 #endif
 
 	/* Load executable */
+	uk_pthread_current()->exec_vm = vm_new;
 	rc = uk_binfmt_load(&loader_args);
+	uk_pthread_current()->exec_vm = NULL;
 	if (unlikely(rc)) {
 		uk_pr_err("%s: Unable to load (%d)\n", pathname, rc);
 		goto err_free_stack_new;

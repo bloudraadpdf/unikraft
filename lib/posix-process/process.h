@@ -111,6 +111,9 @@ struct posix_thread {
 	__u64 application_deadline;
 #endif
 	struct posix_process *process;
+#if CONFIG_LIBPOSIX_PROCESS_EXECVE
+	struct posix_vm_context *exec_vm;
+#endif
 	struct posix_thread *vfork_parent;
 	struct uk_list_head thread_list_entry;
 	struct uk_thread *thread;

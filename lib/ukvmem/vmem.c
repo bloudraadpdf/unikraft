@@ -318,6 +318,7 @@ static inline int vmem_vma_can_merge(struct uk_vma *vma, struct uk_vma *next)
 
 	return ((vma->end == next->start) &&
 		(vma->ops == next->ops) &&
+		(vma->owner == next->owner) &&
 		(vma->attr == next->attr) &&
 		(vma->flags == next->flags) &&
 		(vma->page_lvl == next->page_lvl) &&
@@ -409,6 +410,7 @@ static int vmem_vma_split(struct uk_vma *vma, __vaddr_t vaddr,
 	v->end		= vma->end;
 	v->vas		= vma->vas;
 	v->ops		= vma->ops;
+	v->owner	= vma->owner;
 	v->attr		= vma->attr;
 	v->flags	= vma->flags;
 	v->page_lvl	= vma->page_lvl;
@@ -708,7 +710,7 @@ static int vmem_mapx_initial_populate(struct uk_pagetable *pt,
 
 static int vmem_map(struct uk_vas *vas, __vaddr_t *vaddr, __sz len,
 	       unsigned long attr, unsigned long flags, const char *name,
-	       const struct uk_vma_ops *ops, void *args)
+	       const struct uk_vma_ops *ops, void *args, const void *owner)
 {
 	unsigned int order = UK_VMA_MAP_SIZE_TO_ORDER(flags);
 	int rc, to_lvl, algn_lvl, strict;
@@ -836,6 +838,7 @@ static int vmem_map(struct uk_vas *vas, __vaddr_t *vaddr, __sz len,
 	vma->end	= va + len;
 	vma->vas	= vas;
 	vma->ops	= ops;
+	vma->owner	= owner;
 	vma->attr	= attr;
 	vma->flags	= extf;
 	vma->page_lvl	= to_lvl;
@@ -883,13 +886,13 @@ static int vmem_map(struct uk_vas *vas, __vaddr_t *vaddr, __sz len,
 
 int uk_vma_map(struct uk_vas *vas, __vaddr_t *vaddr, __sz len,
 	       unsigned long attr, unsigned long flags, const char *name,
-	       const struct uk_vma_ops *ops, void *args)
+	       const struct uk_vma_ops *ops, void *args, const void *owner)
 {
 	unsigned long previous;
 	int rc;
 
 	previous = vmem_mutation_begin(vas);
-	rc = vmem_map(vas, vaddr, len, attr, flags, name, ops, args);
+	rc = vmem_map(vas, vaddr, len, attr, flags, name, ops, args, owner);
 	vmem_mutation_end(vas, previous);
 	return rc;
 }

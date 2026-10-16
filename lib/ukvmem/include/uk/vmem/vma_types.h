@@ -42,7 +42,7 @@ extern const struct uk_vma_ops uk_vma_rsvd_ops;
 static inline int uk_vma_reserve(struct uk_vas *vas, __vaddr_t *vaddr, __sz len)
 {
 	return uk_vma_map(vas, vaddr, len, 0, 0, __NULL,
-			  &uk_vma_rsvd_ops, __NULL);
+			  &uk_vma_rsvd_ops, __NULL, __NULL);
 }
 
 /**
@@ -60,7 +60,7 @@ static inline int uk_vma_reserve_ex(struct uk_vas *vas, __vaddr_t *vaddr,
 	UK_ASSERT(flags == 0 || flags & UK_VMA_MAP_REPLACE);
 
 	return uk_vma_map(vas, vaddr, len, attr, flags, name,
-			  &uk_vma_rsvd_ops, __NULL);
+			  &uk_vma_rsvd_ops, __NULL, __NULL);
 }
 
 /**
@@ -82,7 +82,7 @@ static inline int uk_vma_map_anon(struct uk_vas *vas, __vaddr_t *vaddr,
 				  unsigned long flags, const char *name)
 {
 	return uk_vma_map(vas, vaddr, len, attr, flags, name,
-			  &uk_vma_anon_ops, __NULL);
+			  &uk_vma_anon_ops, __NULL, __NULL);
 }
 
 /**
@@ -144,7 +144,7 @@ static inline int uk_vma_map_stack(struct uk_vas *vas, __vaddr_t *vaddr,
 
 	rc = uk_vma_map(vas, vaddr, len + UK_VMA_STACK_GUARDS_SIZE,
 			UK_PAGING_PAGE_ATTR_PROT_RW, flags, name,
-			&uk_vma_stack_ops, __NULL);
+			&uk_vma_stack_ops, __NULL, __NULL);
 	if (unlikely(rc))
 		return rc;
 
@@ -202,7 +202,7 @@ static inline int uk_vma_map_dma(struct uk_vas *vas, __vaddr_t *vaddr,
 	UK_ASSERT(UK_PAGING_PAGE_ALIGNED(paddr));
 
 	return uk_vma_map(vas, vaddr, len, attr, flags, name,
-			  &uk_vma_dma_ops, &args);
+			  &uk_vma_dma_ops, &args, __NULL);
 }
 
 /* Common flags for any file-like VMA implementations */

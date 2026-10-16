@@ -52,7 +52,7 @@ int uk_fdio_map_file(struct uk_vas *vas, __vaddr_t *vaddr,
 	};
 
 	return uk_vma_map(vas, vaddr, len, attr, flags, __NULL,
-			  &uk_fdio_vma_ops, &args);
+			  &uk_fdio_vma_ops, &args, __NULL);
 }
 
 #endif /* __UK_POSIX_FILE_VMA_H__ */
