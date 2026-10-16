@@ -208,6 +208,7 @@ typedef struct uk_fs_path (*uk_fs_readlink_func)(const struct uk_file *f);
  * @param[in,out] curp Pointer to entry index
  * @param[out] buf Buffer to write directory entries in
  * @param len Length of buf
+ * @param flags Open file status flags
  *
  * @return
  *   > 0: Number of bytes output
@@ -215,7 +216,7 @@ typedef struct uk_fs_path (*uk_fs_readlink_func)(const struct uk_file *f);
  *   < 0: Negative error code on failure
  */
 typedef ssize_t (*uk_fs_listdir_func)(const struct uk_file *f, size_t *curp,
-				      void *buf, size_t len);
+				      void *buf, size_t len, int flags);
 
 /**
  * Union argument for a target to the create operation.
@@ -514,11 +515,11 @@ struct uk_fs_path uk_fs_readlink(const struct uk_file *f)
 
 static inline
 ssize_t uk_fs_listdir(const struct uk_file *f, size_t *curp,
-		      void *buf, size_t len)
+		      void *buf, size_t len, int flags)
 {
 	UK_ASSERT(f->fsops);
 	UK_ASSERT(f->fsops->listdir);
-	return f->fsops->listdir(f, curp, buf, len);
+	return f->fsops->listdir(f, curp, buf, len, flags);
 }
 
 static inline

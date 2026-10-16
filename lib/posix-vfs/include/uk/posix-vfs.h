@@ -62,7 +62,7 @@ int uk_sys_utimensat(const struct uk_file *f, const char *path,
 
 /* Read node contents */
 ssize_t uk_sys_getdents64(const struct uk_file *f, size_t *curp,
-			  void *dirp, size_t count);
+			  void *dirp, size_t count, int flags);
 ssize_t uk_sys_readlinkat(const struct uk_file *f, const char *restrict path,
 			  char *restrict buf, size_t bufsz);
 

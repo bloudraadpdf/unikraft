@@ -22,6 +22,7 @@
 #ifndef __UKFS_FS_TEMPLATE_LIVE_H__
 #define __UKFS_FS_TEMPLATE_LIVE_H__
 
+#include <fcntl.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
 
@@ -1090,7 +1091,7 @@ attr UK_FS_TMPL_LIVE_DECL_FS_SYNC(drv)					\
 #define UK_FS_TMPL_LIVE_DECL_FS_LISTDIR(drv)				\
 ssize_t UK_FS_TMPL_LIVE_OP_FS_LISTDIR(drv)(const struct uk_file *f,	\
 					   size_t *curp,		\
-					   void *buf, size_t len)
+					   void *buf, size_t len, int flags)
 
 /**
  * Generate the ukfs listdir operation with regular linkage.
@@ -1126,8 +1127,12 @@ ssize_t UK_FS_TMPL_LIVE_OP_FS_LISTDIR(drv)(const struct uk_file *f,	\
 #define UK_FS_TMPL_LIVE_GEN_FS_LISTDIR_ATTR(drv, live_fs_listdir, attr)	\
 attr UK_FS_TMPL_LIVE_DECL_FS_LISTDIR(drv)				\
 {									\
+	unsigned long mntflags = drv##_FILE_ISTATE(f)->mntflags;	\
+									\
+	if (flags & O_NOATIME)						\
+		mntflags = (mntflags & ~MS_STRICTATIME) | MS_NOATIME; \
 	return (live_fs_listdir)(drv##_FILE_NODE(f), curp, buf, len,	\
-				 drv##_FILE_ISTATE(f)->mntflags);	\
+				 mntflags);				\
 }
 
 /* fs unlink */

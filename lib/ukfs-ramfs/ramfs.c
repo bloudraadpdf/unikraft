@@ -1068,6 +1068,7 @@ ssize_t ramfs_live_fs_listdir(struct ramfs_node *n, size_t *curp,
 			UKFS_DIRENT_OUT_DOTDOT(out,
 				(ino_t)(uintptr_t)(parent ? parent : n));
 		}
+		out->d_off = p + 1;
 		rlen += sz;
 		len -= sz;
 		out = UKFS_DIRENT_NEXT(out, sz);
@@ -1094,6 +1095,7 @@ ssize_t ramfs_live_fs_listdir(struct ramfs_node *n, size_t *curp,
 			}
 			/* Writeout */
 			out->d_ino = ramfs_dentry_inode(dp);
+			out->d_off = p + 1;
 			out->d_reclen = sz;
 			out->d_type = ramfs_dentry_type(dp);
 			memcpy(out->d_name, dp->name, dp->namelen);

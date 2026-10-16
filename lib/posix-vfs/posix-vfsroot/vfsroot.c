@@ -159,7 +159,7 @@ int root_mount(const struct uk_file *f __maybe_unused,
 
 static
 ssize_t root_listdir(const struct uk_file *f __maybe_unused, size_t *curp,
-		     void *buf, size_t len)
+		     void *buf, size_t len, int flags __unused)
 {
 	struct uk_fs_dirent *out = buf;
 	size_t p = *curp;
@@ -179,6 +179,7 @@ ssize_t root_listdir(const struct uk_file *f __maybe_unused, size_t *curp,
 			UKFS_DIRENT_OUT_DOT(out, 0);
 		else
 			UKFS_DIRENT_OUT_DOTDOT(out, 0);
+		out->d_off = p + 1;
 		rlen += sz;
 		len -= sz;
 		out = UKFS_DIRENT_NEXT(out, sz);

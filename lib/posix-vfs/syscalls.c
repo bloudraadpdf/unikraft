@@ -422,7 +422,7 @@ UK_SYSCALL_R_DEFINE(ssize_t, getdents64, int, fd, void *, dirp, size_t, count)
 	UK_ASSERT(!(of->mode & UKFD_O_NOSEEK));
 
 	uk_mutex_lock(&of->lock);
-	ret = uk_sys_getdents64(of->file, &of->pos, dirp, count);
+	ret = uk_sys_getdents64(of->file, &of->pos, dirp, count, of->mode);
 	uk_mutex_unlock(&of->lock);
 	uk_ofile_release(of);
 	return ret;

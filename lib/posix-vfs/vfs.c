@@ -1362,7 +1362,7 @@ out:
 
 /* Read node contents */
 ssize_t uk_sys_getdents64(const struct uk_file *f, size_t *curp,
-			  void *dirp, size_t count)
+			  void *dirp, size_t count, int flags)
 {
 	ssize_t ret;
 
@@ -1373,7 +1373,7 @@ ssize_t uk_sys_getdents64(const struct uk_file *f, size_t *curp,
 		return -ENOTDIR;
 
 	vfs_rlock(f);
-	ret = uk_fs_listdir(f, curp, dirp, count);
+	ret = uk_fs_listdir(f, curp, dirp, count, flags);
 	vfs_runlock(f);
 	return ret;
 }
