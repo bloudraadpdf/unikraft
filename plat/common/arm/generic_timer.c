@@ -225,7 +225,7 @@ static inline __nsec generic_timer_monotonic_ticks(__u64 *ticks)
  * kind of mutex_lock. It will simply halt the cpu, not allowing any
  * other thread to execute.
  */
-void generic_timer_cpu_block_until(__u64 until_ns)
+void ukplat_time_arm_timer(__nsec until_ns)
 {
 	__u64 now_ns, now_ticks, until_ticks;
 
@@ -234,13 +234,18 @@ void generic_timer_cpu_block_until(__u64 until_ns)
 	/* Record current ns */
 	now_ns = generic_timer_monotonic_ticks(&now_ticks);
 
-	if (now_ns < until_ns) {
-		/* Calculate until_ticks for timer */
-		until_ticks = now_ticks
-			+ ns_to_ticks(until_ns - now_ns);
-		generic_timer_update_compare(until_ticks);
-		generic_timer_enable();
-		generic_timer_unmask_irq();
+	until_ns = MAX(until_ns, now_ns + 1);
+	until_ticks = now_ticks + MAX(ns_to_ticks(until_ns - now_ns), 1UL);
+	generic_timer_update_compare(until_ticks);
+	generic_timer_enable();
+	generic_timer_unmask_irq();
+}
+
+void generic_timer_cpu_block_until(__u64 until_ns)
+{
+	UK_ASSERT(uk_lcpu_irqs_disabled());
+	if (ukplat_monotonic_clock() < until_ns) {
+		ukplat_time_arm_timer(until_ns);
 		__asm__ __volatile__("wfi");
 
 		/* Give the IRQ handler a chance to handle whatever woke

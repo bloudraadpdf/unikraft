@@ -3,6 +3,7 @@
 #include <uk/event.h>
 #include <uk/lcpu.h>
 #include <uk/plat/config.h>
+#include <uk/plat/time.h>
 #include <uk/sched.h>
 #include <uk/syscall.h>
 
@@ -14,8 +15,17 @@
 
 void pprocess_exit_trampoline(void);
 
+#if CONFIG_LIBPOSIX_PROCESS_PREEMPT
+#define APPLICATION_QUANTUM_NS (UKARCH_NSEC_PER_SEC / 100)
+#endif
+
 static void prepare_application(struct ukarch_execenv *execenv)
 {
+#if CONFIG_LIBPOSIX_PROCESS_PREEMPT
+	struct posix_thread *thread = uk_pthread_current();
+	__nsec now;
+#endif
+
 	uk_lcpu_disable_irq();
 	if (!pprocess_application_context(execenv->regs))
 		return;
@@ -28,6 +38,21 @@ static void prepare_application(struct ukarch_execenv *execenv)
 			uk_lcpu_disable_irq();
 			continue;
 		}
+#endif
+#if CONFIG_LIBPOSIX_PROCESS_PREEMPT
+		now = ukplat_monotonic_clock();
+		if (thread->application_deadline &&
+		    thread->application_deadline <= now) {
+			thread->application_deadline = 0;
+			uk_lcpu_enable_irq();
+			uk_sched_yield();
+			uk_lcpu_disable_irq();
+			continue;
+		}
+		if (!thread->application_deadline)
+			thread->application_deadline =
+				now + APPLICATION_QUANTUM_NS;
+		ukplat_time_arm_timer(thread->application_deadline);
 #endif
 		return;
 	}
@@ -62,25 +87,35 @@ void pprocess_signal_notify(struct posix_thread *thread)
 #endif
 }
 
-static void application_signal_dispatch(struct ukarch_execenv *execenv, long auxsp)
+#endif
+
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL || CONFIG_LIBPOSIX_PROCESS_PREEMPT
+static void application_irq_dispatch(struct ukarch_execenv *execenv, long auxsp)
 {
 	struct ukarch_auxspcb *cb = ukarch_auxsp_get_cb(auxsp);
 
 	uk_lcpu_sysctx_load((struct uk_lcpu_sysctx *)cb->uksysctx);
 	uk_lcpu_enable_irq();
+#if CONFIG_LIBPOSIX_PROCESS_PREEMPT
+	uk_pthread_current()->application_deadline = 0;
+	uk_sched_yield();
+#endif
 	pprocess_enter_application();
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 	pprocess_signal_deliver(execenv);
+#endif
 	pprocess_execenv_load((long)execenv);
 }
 
-static void prepare_signal_irq(struct uk_lcpu_regs *regs)
+static void prepare_application_irq(struct uk_lcpu_regs *regs)
 {
 	__uptr auxsp = uk_pcpuvar_current_get(UK_LCPU_AUXSP_SYM);
 	struct ukarch_auxspcb *cb = ukarch_auxsp_get_cb(auxsp);
 	struct ukarch_ctx target;
 
 	ukarch_ctx_init_ehtrampo(&target, regs,
-		ukarch_auxspcb_get_curr_fp(cb), application_signal_dispatch, auxsp);
+			       ukarch_auxspcb_get_curr_fp(cb),
+			       application_irq_dispatch, auxsp);
 	uk_lcpu_regs_set(regs, PC, target.ip);
 	uk_lcpu_regs_set(regs, SP, target.sp);
 	pprocess_regs_disable_irq(regs);
@@ -108,7 +143,13 @@ static int application_irq(void *data)
 	}
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 	else if (pthread && uk_load_n(&pthread->signal->notification)) {
-		prepare_signal_irq(regs);
+		prepare_application_irq(regs);
+	}
+#endif
+#if CONFIG_LIBPOSIX_PROCESS_PREEMPT
+	else if (pthread && ukplat_monotonic_clock() >=
+		 pthread->application_deadline) {
+		prepare_application_irq(regs);
 	}
 #endif
 	return UK_EVENT_NOT_HANDLED;

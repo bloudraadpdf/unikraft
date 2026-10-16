@@ -431,7 +431,7 @@ __u64 tscclock_epochoffset(void)
 }
 
 #if !CONFIG_KVM_PIT
-static void tscclock_cpu_block(__u64 until)
+void ukplat_time_arm_timer(__nsec until)
 {
 	__u64 deadline;
 
@@ -442,19 +442,16 @@ static void tscclock_cpu_block(__u64 until)
 				      (32 + ukplat_time_get_irq()));
 		uk_pcpuvar_current_set(tscclock_apic_timer_ready, true);
 	}
-	if (ukplat_monotonic_clock() >= until)
-		return;
+	until = MAX(until, ukplat_monotonic_clock() + 1);
 	deadline = tsc_base + (until / UKARCH_NSEC_PER_SEC) * tsc_frequency;
 	until %= UKARCH_NSEC_PER_SEC;
 	deadline += until * (tsc_frequency / UKARCH_NSEC_PER_SEC) +
 		until * (tsc_frequency % UKARCH_NSEC_PER_SEC) /
 		UKARCH_NSEC_PER_SEC;
 	uk_arch_x86_64_wrmsrl(MSR_IA32_TSC_DEADLINE, deadline);
-	uk_lcpu_halt_irq();
-	uk_arch_x86_64_wrmsrl(MSR_IA32_TSC_DEADLINE, 0);
 }
 #elif CONFIG_LIBUKINTCTLR_APIC
-static void tscclock_cpu_block(__u64 until)
+void ukplat_time_arm_timer(__nsec until)
 {
 	__u64 now, ticks;
 
@@ -467,13 +464,10 @@ static void tscclock_cpu_block(__u64 until)
 		uk_pcpuvar_current_set(tscclock_apic_timer_ready, true);
 	}
 	now = ukplat_monotonic_clock();
-	if (now >= until)
-		return;
+	until = MAX(until, now + 1);
 	ticks = uk_arch_x86_64_mul64_32(until - now, apic_mult);
 	ticks = MIN(ticks + 1, UINT32_MAX);
 	uk_arch_x86_64_wrmsrl(UK_ARCH_X86_64_APIC_MSR_TIMER_IC, ticks);
-	uk_lcpu_halt_irq();
-	uk_arch_x86_64_wrmsrl(UK_ARCH_X86_64_APIC_MSR_TIMER_IC, 0);
 }
 #else
 /*
@@ -550,6 +544,22 @@ static void tscclock_cpu_block(__u64 until)
 	 * and no other, but this will do for now.
 	 */
 	uk_lcpu_halt_irq();
+}
+#endif
+
+#if !CONFIG_KVM_PIT || CONFIG_LIBUKINTCTLR_APIC
+static void tscclock_cpu_block(__u64 until)
+{
+	UK_ASSERT(uk_lcpu_irqs_disabled());
+	if (ukplat_monotonic_clock() >= until)
+		return;
+	ukplat_time_arm_timer(until);
+	uk_lcpu_halt_irq();
+#if !CONFIG_KVM_PIT
+	uk_arch_x86_64_wrmsrl(MSR_IA32_TSC_DEADLINE, 0);
+#else
+	uk_arch_x86_64_wrmsrl(UK_ARCH_X86_64_APIC_MSR_TIMER_IC, 0);
+#endif
 }
 #endif
 

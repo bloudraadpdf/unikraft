@@ -43,6 +43,8 @@ extern "C" {
 void ukplat_time_init(void);
 void ukplat_time_fini(void);
 __u32 ukplat_time_get_irq(void);
+/* Arm the local one-shot timer without halting the CPU. IRQs must be off. */
+void ukplat_time_arm_timer(__nsec until);
 
 __nsec ukplat_time_get_ticks(void);
 __nsec ukplat_monotonic_clock(void);

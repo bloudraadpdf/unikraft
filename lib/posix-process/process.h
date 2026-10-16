@@ -101,6 +101,9 @@ struct posix_process {
 struct posix_thread {
 	pid_t tid;
 	void *robust_list;
+#if CONFIG_LIBPOSIX_PROCESS_PREEMPT
+	__u64 application_deadline;
+#endif
 	struct posix_process *process;
 	struct posix_thread *vfork_parent;
 	struct uk_list_head thread_list_entry;

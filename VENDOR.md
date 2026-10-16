@@ -121,3 +121,12 @@ Fault-safe reads and atomic compare-exchange stop cleanup at inaccessible
 list entries or lock words. The Tokoloshe `robust-owner` probe and upstream
 detached-thread regression pass with both C libraries and linking modes on
 AMD64 and ARM64. Priority-inheritance futex operations remain separate work.
+
+`CONFIG_LIBPOSIX_PROCESS_PREEMPT` uses the platform's local one-shot timer
+to schedule binary application threads at 10 ms intervals. Kernel code
+remains cooperative. The interrupt return path preserves general, floating
+point and TLS registers before it calls the scheduler. Each kernel thread
+object retains its deadline across application syscalls. It does not read
+application TLS as kernel state. Application entry and signal delivery use
+the same return path. Tokoloshe's cancellation, register-context and signal
+origin probes pass with both libraries and linking modes on AMD64 and ARM64.

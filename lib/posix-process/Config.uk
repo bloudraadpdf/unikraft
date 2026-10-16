@@ -89,6 +89,14 @@ config LIBPOSIX_PROCESS_ARCH_PRCTL
 	bool "arch_prctl() system call"
 	depends on ARCH_X86_64
 
+config LIBPOSIX_PROCESS_PREEMPT
+	bool "Preempt binary application threads"
+	depends on LIBPOSIX_PROCESS_EXECVE && PLAT_KVM
+	depends on ARCH_ARM_64 || LIBUKINTCTLR_APIC
+	help
+		Use a local one-shot timer to schedule application threads that
+		do not enter the kernel. Kernel execution remains cooperative.
+
 config LIBPOSIX_PROCESS_SIGNALFD
 	bool "signalfd4() and signalfd() syscalls"
 	depends on LIBPOSIX_PROCESS_SIGNAL
