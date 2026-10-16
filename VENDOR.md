@@ -114,3 +114,10 @@ checks with static and dynamic application linking. Each architecture
 passes all 26 additional signal, futex, wait, auxiliary-vector and dynamic
 TLS probes. These checks do not establish full Linux compatibility,
 process memory protection or snapshot acceptance.
+
+Robust futex lists are registered per thread. Thread exit marks owned locks
+with `FUTEX_OWNER_DIED` and wakes waiters before clearing the child TID.
+Fault-safe reads and atomic compare-exchange stop cleanup at inaccessible
+list entries or lock words. The Tokoloshe `robust-owner` probe and upstream
+detached-thread regression pass with both C libraries and linking modes on
+AMD64 and ARM64. Priority-inheritance futex operations remain separate work.

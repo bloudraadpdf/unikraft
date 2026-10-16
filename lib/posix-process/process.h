@@ -100,6 +100,7 @@ struct posix_process {
 
 struct posix_thread {
 	pid_t tid;
+	void *robust_list;
 	struct posix_process *process;
 	struct posix_thread *vfork_parent;
 	struct uk_list_head thread_list_entry;

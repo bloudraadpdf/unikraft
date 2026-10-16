@@ -23,6 +23,11 @@ extern "C" {
  */
 #define UK_NOFAULTF_NOPAGING	0x02
 
+/* Returns 0 after a fault-safe atomic comparison, or -EFAULT. Updates
+ * expected with the observed value, as a normal compare-exchange does.
+ */
+int uk_nofault_cmpxchg32(__u32 *address, __u32 *expected, __u32 desired);
+
 /**
  * Probes the specified address range for read access. If the address
  * range cannot be fully accessed, the fault is catched and the faulting offset

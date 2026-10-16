@@ -1,4 +1,5 @@
 uk_nofault_probe_r
+uk_nofault_cmpxchg32
 uk_nofault_probe_r_nopage
 uk_nofault_probe_rw
 uk_nofault_probe_rw_nopage

@@ -453,6 +453,7 @@ static int pthread_exit_handler(void *arg)
 	struct uk_list_head *itr, *tmp;
 	struct uk_thread *child;
 	struct uk_futex *f;
+	pid_t *clear_ref;
 
 	UK_ASSERT(arg);
 
@@ -460,9 +461,10 @@ static int pthread_exit_handler(void *arg)
 	child = event_data->thread;
 
 	/* Clear child TID at the stored reference */
-	if (child_tid_clear_ref != NULL) {
-		*((pid_t *)child_tid_clear_ref) = 0;
-		futex_wake((uint32_t *)child_tid_clear_ref, 0);
+	clear_ref = uk_thread_uktls_var(child, child_tid_clear_ref);
+	if (clear_ref) {
+		uk_store_n(clear_ref, 0);
+		futex_wake((uint32_t *)clear_ref, 1);
 	}
 
 	/* Clear this thread's entries from the list */
@@ -479,6 +481,7 @@ static int pthread_exit_handler(void *arg)
 	return 0;
 }
 
-POSIX_PROCESS_PTEXIT_HANDLER_PRIO(pthread_exit_handler, UK_PRIO_EARLIEST);
+POSIX_PROCESS_PTEXIT_HANDLER_PRIO(pthread_exit_handler,
+				  UK_PRIO_AFTER(UK_PRIO_EARLIEST));
 
 #endif /* CONFIG_LIBPOSIX_PROCESS_MULTITHREADING */

@@ -15,6 +15,40 @@
 
 #include "arch/maccess.h"
 
+int uk_nofault_cmpxchg32(__u32 *address, __u32 *expected, __u32 desired)
+{
+	__u32 observed = *expected;
+
+#if CONFIG_ARCH_X86_64
+	__asm__ goto("1: lock cmpxchgl %2, %1\n"
+		NF_EXCPTTAB_ENTRY_L(1b, fault, nf_mf_handler)
+		: "+a"(observed), "+m"(*address)
+		: "r"(desired)
+		: "memory", "cc" : fault);
+#elif CONFIG_ARCH_ARM_64
+	__u32 status;
+
+	__asm__ goto("1: ldaxr %w0, [%2]\n"
+		"cmp %w0, %w3\n"
+		"b.ne 3f\n"
+		"2: stlxr %w1, %w4, [%2]\n"
+		"cbnz %w1, 1b\n"
+		"3: clrex\n"
+		NF_EXCPTTAB_ENTRY_L(1b, fault, nf_mf_handler)
+		NF_EXCPTTAB_ENTRY_L(2b, fault, nf_mf_handler)
+		: "=&r"(observed), "=&r"(status)
+		: "r"(address), "r"(*expected), "r"(desired)
+		: "memory", "cc" : fault);
+#endif
+	*expected = observed;
+	return 0;
+fault:
+#if CONFIG_ARCH_ARM_64
+	__asm__ volatile("clrex" : : : "memory");
+#endif
+	return -EFAULT;
+}
+
 #ifdef CONFIG_LIBUKVMEM
 #include <uk/vmem.h>
 typedef unsigned long nf_paging_state_t;
