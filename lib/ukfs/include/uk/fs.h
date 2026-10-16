@@ -243,9 +243,10 @@ union uk_fs_create_target {
  * The file type to be created is determined by `mode & S_IFMT`:
  * - S_IFDIR: a new directory; target is ignored
  * - S_IFREG: a new empty file; target is ignored
+ * - S_IFSOCK: a new socket inode; target is ignored
  * - S_IFLNK: a new symbolic link;
  *   target.path is a NUL-terminated target path for the new symlink
- * - S_IFIFO/S_IFSOCK/S_IFCHR/S_IFBLK: link in a special file;
+ * - S_IFIFO/S_IFCHR/S_IFBLK: link in a special file;
  *   target.special points to a description of the special file to be created
  * - S_IFMT (all bits set): hard link;
  *   target.file is a file on the same filesystem instance
@@ -261,11 +262,11 @@ union uk_fs_create_target {
  * @param target Target of create operation
  *
  * @return
- *  `mode & S_IFMT` in (S_IFDIR, S_IFREG, S_IFLNK, S_IFMT):
+ *  `mode & S_IFMT` in (S_IFDIR, S_IFREG, S_IFSOCK, S_IFLNK, S_IFMT):
  *    !PTRISERR: Live reference to newly created file (or in case of a hardlink,
  *               a duplicate reference to target)
  *     PTRISERR: Negative error code encoded in return
- *  `mode & S_IFMT` in (S_IFCHR, S_IFBLK, S_IFIFO, S_IFSOCK, 0):
+ *  `mode & S_IFMT` in (S_IFCHR, S_IFBLK, S_IFIFO, 0):
  *         NULL: Success
  *     PTRISERR: Negative error code encoded in return
  */

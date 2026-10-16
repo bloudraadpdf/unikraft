@@ -14,6 +14,7 @@ struct unix_addr_entry {
 	const char *name;
 	size_t namelen;
 	posix_sock *sock;
+	const struct uk_file *inode;
 };
 
 #define UNIX_ADDR_ENTRY(n, l, s) ((struct unix_addr_entry) { \
@@ -27,6 +28,6 @@ int unix_addr_bind(struct unix_addr_entry *ent);
 
 posix_sock *unix_addr_lookup(const char *name, size_t namelen);
 
-int unix_addr_release(const char *name, size_t namelen);
+int unix_addr_release(struct unix_addr_entry *entry);
 
 #endif /* __UK_POSIX_UNIXSOCK_BIND_H__ */

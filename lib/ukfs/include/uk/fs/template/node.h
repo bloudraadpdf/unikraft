@@ -1530,7 +1530,6 @@ attr UK_FS_TMPL_NODE_DECL_LIVE_FS_CREATE(drv)				\
 		break;							\
 	case S_IFCHR:							\
 	case S_IFBLK:							\
-	case S_IFSOCK:							\
 	case S_IFIFO:							\
 		node_target.ukfs.special = target.ukfs.special;		\
 		break;							\
@@ -1547,7 +1546,6 @@ attr UK_FS_TMPL_NODE_DECL_LIVE_FS_CREATE(drv)				\
 	case 0:								\
 	case S_IFCHR:							\
 	case S_IFBLK:							\
-	case S_IFSOCK:							\
 	case S_IFIFO:							\
 		/* Any value not errnode signals success; NULL fits */	\
 		return NULL;						\

@@ -257,6 +257,8 @@ unsigned char ramfs_dentry_type(const struct ramfs_dentry *dp)
 			return DT_DIR;
 		case S_IFREG:
 			return DT_REG;
+		case S_IFSOCK:
+			return DT_SOCK;
 		case S_IFLNK:
 			return DT_LNK;
 		default:
@@ -565,6 +567,8 @@ int ramfs_check_regfile(const struct ramfs_node *n)
 		return -EISDIR;
 	if (ramfs_live_nodekind(n, UK_FS_TMPL_SYM))
 		return -EBADF;
+	if ((n->statx.stx_mode & S_IFMT) == S_IFSOCK)
+		return -ENXIO;
 	return 0;
 }
 
@@ -1129,6 +1133,7 @@ struct ramfs_node *ramfs_node_create(unsigned int mode,
 		__fallthrough;
 	case S_IFDIR:
 	case S_IFREG:
+	case S_IFSOCK:
 		newnode = ramfs_new(xlen);
 		if (unlikely(!newnode))
 			return ERR2PTR(-ENOMEM);
@@ -1151,6 +1156,9 @@ struct ramfs_node *ramfs_node_create(unsigned int mode,
 		break;
 	case S_IFDIR:
 		ramfs_init_dir(newnode, mode);
+		break;
+	case S_IFSOCK:
+		ramfs_init_statx(newnode, mode);
 		break;
 	case S_IFREG:
 		ramfs_init_file(newnode, mode);
@@ -1237,7 +1245,6 @@ struct ramfs_node *ramfs_live_fs_create_locked(struct ramfs_node *n,
 
 	switch (mode & S_IFMT) {
 	case S_IFIFO:
-	case S_IFSOCK:
 	case S_IFCHR:
 	case S_IFBLK:
 		dtype = RAMFS_DENT_SPEC;

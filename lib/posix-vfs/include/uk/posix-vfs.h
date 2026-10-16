@@ -25,6 +25,7 @@
  * Mount `node` on `path`.
  */
 int uk_posix_vfs_mount(const char *path, const struct uk_file *node);
+const struct uk_file *uk_posix_vfs_socket_create(const char *path);
 
 /*
  * Internal syscalls

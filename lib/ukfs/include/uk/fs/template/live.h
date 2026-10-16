@@ -1635,7 +1635,6 @@ attr UK_FS_TMPL_LIVE_DECL_FS_CREATE(drv)				\
 		break;							\
 	case S_IFCHR:							\
 	case S_IFBLK:							\
-	case S_IFSOCK:							\
 	case S_IFIFO:							\
 		live_target.ukfs.special = target.special;		\
 		break;							\
@@ -1651,7 +1650,6 @@ attr UK_FS_TMPL_LIVE_DECL_FS_CREATE(drv)				\
 	case 0:								\
 	case S_IFCHR:							\
 	case S_IFBLK:							\
-	case S_IFSOCK:							\
 	case S_IFIFO:							\
 		/* NULL is returned on success */			\
 		return NULL;						\

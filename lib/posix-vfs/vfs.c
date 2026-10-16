@@ -1641,11 +1641,11 @@ int uk_sys_mknodat(const struct uk_file *f, const char *path,
 	else
 		switch (ftype) {
 		case S_IFREG:
+		case S_IFSOCK:
 			break;
 		case S_IFCHR:
 		case S_IFBLK:
 		case S_IFIFO:
-		case S_IFSOCK:
 			uk_pr_warn("Special files not supported\n");
 			__fallthrough;
 		default:
@@ -2209,6 +2209,24 @@ out:
 	return newf;
 }
 
+const struct uk_file *uk_posix_vfs_socket_create(const char *path)
+{
+	struct uk_ofile *base = NULL;
+	const struct uk_file *file;
+	size_t length;
+	int error = vfs_check_path(path, 0);
+
+	if (error)
+		return ERR2PTR(error);
+	uk_mutex_lock(&vfs_namespace_lock);
+	file = vfs_createx(NULL, path, vfs_apply_umask(S_IFSOCK | 0777),
+			   &length, &base);
+	if (base)
+		uk_ofile_release(base);
+	uk_mutex_unlock(&vfs_namespace_lock);
+	return file;
+}
+
 static
 const struct uk_file *vfs_create(struct uk_ofile *of,
 				 const char *path, size_t len,
@@ -2352,6 +2370,19 @@ static struct uk_ofile *vfs_openat(struct uk_ofile *of, const char *path,
 				ret = ERR2PTR(err);
 				goto out_targ;
 			}
+		}
+	}
+	if (!(flags & O_PATH) && uk_fs_isfs(target)) {
+		struct uk_statx status;
+
+		err = uk_file_getstat(target, UK_STATX_TYPE, &status);
+		if (err) {
+			ret = ERR2PTR(err);
+			goto out_targ;
+		}
+		if ((status.stx_mode & S_IFMT) == S_IFSOCK) {
+			ret = ERR2PTR(-ENXIO);
+			goto out_targ;
 		}
 	}
 	/* Open named file description */

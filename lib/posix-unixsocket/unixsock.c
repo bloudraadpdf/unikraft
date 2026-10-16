@@ -493,13 +493,13 @@ int unix_socket_bind(posix_sock *file,
 
 	/* Prep name string */
 	/* Linux ensures names are zero-terminated; replicate this behavior */
-	bindlen = name[len-1] == '\0' ? len : len + 1;
+	bindlen = name[0] ? strnlen(name, len) + 1 : len;
 	bindname = uk_malloc(d->allocator, bindlen);
 	if (unlikely(!bindname))
 		return -ENOMEM;
-	memcpy(bindname, name, len);
-	if (bindlen > len)
-		bindname[len] = '\0';
+	memcpy(bindname, name, MIN(bindlen, len));
+	if (name[0])
+		bindname[bindlen - 1] = '\0';
 	/* Prep sock obj */
 	data->bind = UNIX_ADDR_ENTRY(bindname, bindlen, file);
 
@@ -784,8 +784,8 @@ int unix_socket_connect(posix_sock *file,
 
 	/* Get target */
 	target = unix_addr_lookup(rname, rlen);
-	if (unlikely(!target))
-		return -ENOENT;
+	if (unlikely(PTRISERR(target)))
+		return PTR2ERR(target);
 
 	if (_SOCK_CONNECTION(data->type))
 		err = unix_sock_connect_stream(file, target);
@@ -926,6 +926,8 @@ ssize_t unix_socket_sendmsg(posix_sock *file,
 			rlen = msg->msg_namelen -
 			       offsetof(struct sockaddr_un, sun_path);
 			remote = unix_addr_lookup(rname, rlen);
+			if (PTRISERR(remote))
+				return PTR2ERR(remote);
 
 			if (remote) {
 				wpipe = unix_sock_remotebpipe(file, remote);
@@ -1090,7 +1092,7 @@ int unix_socket_close(posix_sock *file)
 	uk_file_wunlock(file);
 
 	if (data->flags & UNIXSOCK_BOUND) {
-		r = unix_addr_release(data->bind.name, data->bind.namelen);
+		r = unix_addr_release(&data->bind);
 		UK_ASSERT(!r);
 		uk_free(d->allocator, (void *)data->bind.name);
 	}
