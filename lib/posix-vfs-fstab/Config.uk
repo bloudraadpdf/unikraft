@@ -54,6 +54,10 @@ config LIBPOSIX_VFS_FSTAB_MOUNT_DEV
 	bool "/dev: devfs"
 	select LIBUKFS_DEVFS
 
+config LIBPOSIX_VFS_FSTAB_MOUNT_PROC
+	bool "/proc: process filesystem"
+	select LIBUKFS_PROCFS
+
 endif # LIBPOSIX_VFS_FSTAB_BUILTIN || LIBPOSIX_VFS_FSTAB_USER
 
 endif # LIBPOSIX_VFS_FSTAB

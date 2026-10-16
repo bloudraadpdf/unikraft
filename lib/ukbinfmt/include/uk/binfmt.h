@@ -27,6 +27,8 @@ enum uk_binfmt_type {
 	UK_BINFMT_LOADER_TYPE_EXEC,
 };
 
+struct uk_vfs_path;
+
 struct uk_binfmt_loader_args {
 	const char *pathname; /* fully qualified */
 	char *progname;
@@ -39,6 +41,9 @@ struct uk_binfmt_loader_args {
 	__sz stack_limit;
 	__sz stack_size;
 	__sz image_data_size;
+#if CONFIG_LIBPOSIX_VFS
+	struct uk_vfs_path *executable;
+#endif
 };
 
 /* Loader load function.

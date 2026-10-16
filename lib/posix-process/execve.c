@@ -113,6 +113,9 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 	loader_args.pathname = (char *)pathname;
 	loader_args.auxv = NULL;
 	loader_args.image_data_size = 0;
+#if CONFIG_LIBPOSIX_VFS
+	loader_args.executable = NULL;
+#endif
 
 	/* Assume that if argv is set the caller follows the convention */
 	loader_args.progname = (argv && argv[0]) ? argv[0] : "<null>";
@@ -190,6 +193,9 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 		goto err_free_stack_new;
 	}
 	vm_new->image_data_size = loader_args.image_data_size;
+#if CONFIG_LIBPOSIX_VFS
+	vm_new->executable = loader_args.executable;
+#endif
 	rc = execve_auxv_init(vm_new, loader_args.auxv,
 			      (const __uptr *)((char *)stack_new + stack_size));
 	if (rc)

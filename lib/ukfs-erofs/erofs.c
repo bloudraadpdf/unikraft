@@ -449,7 +449,8 @@ static int node_rename(struct erofs_node *node __unused,
 
 static struct uk_fs_path node_readlink(struct erofs_node *node)
 {
-	return (struct uk_fs_path) { .s = node->link, .len = node->inode.i_size };
+	return uk_fs_path_copy(node->link, node->inode.i_size,
+			       uk_alloc_get_default());
 }
 
 static int node_kind(const struct erofs_node *node,
@@ -493,7 +494,7 @@ static const struct erofs_live_ops erofs_ops = {
 };
 
 UK_FS_TMPL_LIVE_GENERATE_STATIC(erofs, struct erofs_node *, node_compare,
-			      erofs_ops, 0);
+			      erofs_ops, 0, NULL);
 UK_FS_DRIVER_REGISTER(erofs, UK_FS_TMPL_LIVE_OP_VOPEN(erofs),
 		      UK_FS_VOPEN_VOL_MEMIMG | UK_FS_VOPEN_VOL_RAW |
 		      UK_FS_VOPEN_DATA_IGNORE);

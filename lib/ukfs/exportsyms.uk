@@ -1,4 +1,6 @@
 # Common boilerplate ops
+uk_fs_path_copy
+uk_fs_path_release
 uk_fs_common_nop_sync
 uk_fs_common_nop_rebind
 uk_fs_common_nop_graft

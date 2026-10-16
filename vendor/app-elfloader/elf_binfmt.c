@@ -67,6 +67,10 @@ static int uk_binfmt_load_elf(struct uk_binfmt_loader_args *args)
 		goto err_unload;
 
 	args->image_data_size = prog->image_data_size;
+#if CONFIG_LIBPOSIX_VFS
+	args->executable = prog->executable;
+	prog->executable = NULL;
+#endif
 	elf_release(prog);
 	return UK_BINFMT_HANDLED;
 err_unload:

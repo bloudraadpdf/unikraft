@@ -7,6 +7,7 @@ menuconfig LIBPOSIX_VFS
 	select LIBUKATOMIC
 	select LIBUKLOCK
 	select LIBUKLOCK_MUTEX
+	select LIBUKNOFAULT
 
 if LIBPOSIX_VFS
 

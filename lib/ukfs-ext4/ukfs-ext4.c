@@ -1259,7 +1259,8 @@ put_parent:
 }
 static struct uk_fs_path node_readlink(struct disk_node *node)
 {
-	return (struct uk_fs_path) { .s = node->link, .len = node->link_length };
+	return uk_fs_path_copy(node->link, node->link_length,
+			       uk_alloc_get_default());
 }
 static int node_kind(const struct disk_node *node, enum uk_fs_tmpl_node_kind kind)
 {
@@ -1290,6 +1291,7 @@ static const struct ext4_live_ops ext4_ops = {
 	.live_nodekind = node_kind, .live_state = node_state, .live_errnode = node_error,
 	.live_acquire = node_acquire, .live_release = node_release,
 };
-UK_FS_TMPL_LIVE_GENERATE_STATIC(ext4, struct disk_node *, node_compare, ext4_ops, 0);
+
+UK_FS_TMPL_LIVE_GENERATE_STATIC(ext4, struct disk_node *, node_compare, ext4_ops, 0, NULL);
 UK_FS_DRIVER_REGISTER(ext4, UK_FS_TMPL_LIVE_OP_VOPEN(ext4),
 		      UK_FS_VOPEN_VOL_RAW | UK_FS_VOPEN_DATA_IGNORE);

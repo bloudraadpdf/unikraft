@@ -80,8 +80,8 @@ int uk_sys_mknodat(const struct uk_file *f, const char *path,
 
 /* Remove/rename node */
 int uk_sys_unlinkat(const struct uk_file *f, const char *path, int flags);
-int uk_sys_renameat(const struct uk_file *olddir, const char *oldpath,
-		    const struct uk_file *newdir, const char *newpath,
+int uk_sys_renameat(struct uk_ofile *olddir, const char *oldpath,
+		    struct uk_ofile *newdir, const char *newpath,
 		    int flags);
 
 /* Mounting */

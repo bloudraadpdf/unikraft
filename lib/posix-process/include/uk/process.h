@@ -70,6 +70,18 @@ static inline int uk_sys_setrlimit(int resource, const struct rlimit *rlim)
 unsigned int uk_posix_nofile_limit(void);
 #endif
 
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING && CONFIG_LIBPOSIX_VFS
+struct posix_process;
+struct uk_vfs_path;
+struct posix_process *uk_posix_process_get(pid_t pid);
+void uk_posix_process_put(struct posix_process *process);
+bool uk_posix_process_attached(struct posix_process *process);
+pid_t uk_posix_process_next_pid(pid_t after);
+#if CONFIG_LIBPOSIX_PROCESS_EXECVE
+struct uk_vfs_path *uk_posix_process_executable(struct posix_process *process);
+#endif
+#endif
+
 pid_t uk_sys_gettid(void);
 pid_t uk_sys_getppid(void);
 pid_t uk_sys_getpid(void);

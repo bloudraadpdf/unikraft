@@ -1393,10 +1393,8 @@ struct uk_fs_path virtiofs_live_fs_readlink(struct viofs_node *n)
 	UK_ASSERT(virtiofs_node_fmode(n) == S_IFLNK);
 	UK_ASSERT(n->attr.size);
 	/* Symlink targets are cached on node creation */
-	return (struct uk_fs_path){
-		.s = viofs_node2sym(n)->target,
-		.len = n->attr.size
-	};
+	return uk_fs_path_copy(viofs_node2sym(n)->target, n->attr.size,
+			       uk_alloc_get_default());
 }
 
 UK_FS_TMPL_LIVE_OPSTABLE(virtiofs, virtiofs_live_ops);
@@ -1431,7 +1429,7 @@ int virtiofs_nodecmp(struct viofs_node *a, struct viofs_node *b)
 }
 
 UK_FS_TMPL_LIVE_GENERATE_STATIC(virtiofs, struct viofs_node *, virtiofs_nodecmp,
-				virtiofs_liveops, 0);
+				virtiofs_liveops, 0, NULL);
 
 UK_FS_DRIVER_REGISTER(virtiofs, UK_FS_TMPL_LIVE_OP_VOPEN(virtiofs),
 		      UK_FS_VOPEN_VOL_RAW | UK_FS_VOPEN_DATA_IGNORE);

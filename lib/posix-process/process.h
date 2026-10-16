@@ -67,6 +67,9 @@ struct posix_vm_context {
 	__vaddr_t stack_base;
 	__vaddr_t stack_top;
 	__sz image_data_size;
+#if CONFIG_LIBPOSIX_VFS
+	struct uk_vfs_path *executable;
+#endif
 #endif
 #if CONFIG_LIBPOSIX_PROCESS_BRK
 	struct {

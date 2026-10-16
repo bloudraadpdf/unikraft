@@ -1,0 +1,7 @@
+config LIBUKFS_PROCFS
+	bool "ukfs-procfs: Process filesystem"
+	depends on LIBPOSIX_PROCESS_EXECVE && LIBPOSIX_PROCESS_MULTITHREADING
+	depends on LIBPOSIX_VFS
+	select LIBUKFS
+	select LIBUKALLOC
+	select LIBUKLOCK_MUTEX

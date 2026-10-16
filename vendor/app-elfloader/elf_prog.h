@@ -43,10 +43,15 @@
 #include <uk/arch/ctx.h>
 #include <uk/essentials.h>
 
+struct uk_vfs_path;
+
 struct elf_prog {
 	struct uk_alloc *a;
 	const char *name;
 	const char *path; /* path to executable */
+#if CONFIG_LIBPOSIX_VFS
+	struct uk_vfs_path *executable;
+#endif
 	void *vabase;	/* base address of loaded image in virtual memory */
 	uintptr_t load_bias;
 	bool fixed_address;

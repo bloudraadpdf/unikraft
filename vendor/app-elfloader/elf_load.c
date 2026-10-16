@@ -42,6 +42,9 @@
  */
 
 #include <uk/config.h>
+#if CONFIG_LIBPOSIX_VFS
+#include <uk/vfs-path.h>
+#endif
 
 #include <libelf.h>
 #include <gelf.h>
@@ -743,6 +746,9 @@ static int elf_load_fd(struct elf_prog *elf_prog, Elf *elf, int fd)
 err_free_img:
 	elf_unload_vaimg(elf_prog);
 	free(elf_prog->interp.path);
+#if CONFIG_LIBPOSIX_VFS
+	uk_posix_vfs_path_release(elf_prog->executable);
+#endif
 	elf_prog->interp.path = NULL;
 err_out:
 	return ret;
@@ -944,6 +950,9 @@ static struct elf_prog *do_elf_load_vfs(struct uk_alloc *a, const char *path,
 					const char *progname, bool nointerp)
 {
 	int fd = -1;
+#if CONFIG_LIBPOSIX_VFS
+	struct uk_vfs_path *executable = NULL;
+#endif
 #if CONFIG_APPELFLOADER_VFSEXEC_EXECBIT
 	struct stat fd_stat;
 #endif /* CONFIG_APPELFLOADER_VFSEXEC_EXECBIT */
@@ -951,7 +960,13 @@ static struct elf_prog *do_elf_load_vfs(struct uk_alloc *a, const char *path,
 	Elf *elf;
 	int ret;
 
+#if CONFIG_LIBPOSIX_VFS
+	fd = uk_posix_vfs_exec_open(path, &executable);
+	if (fd < 0)
+		errno = -fd;
+#else
 	fd = open(path, O_RDONLY);
+#endif
 	if (unlikely(fd < 0)) {
 		uk_pr_err("%s: Failed to execute %s: %s\n",
 			  progname, path, strerror(errno));
@@ -994,6 +1009,10 @@ static struct elf_prog *do_elf_load_vfs(struct uk_alloc *a, const char *path,
 	elf_prog->a = a;
 	elf_prog->name = progname;
 	elf_prog->path = path;
+#if CONFIG_LIBPOSIX_VFS
+	elf_prog->executable = executable;
+	executable = NULL;
+#endif
 
 	ret = elf_load_parse(elf_prog, elf);
 	if (unlikely(ret < 0)) {
@@ -1034,10 +1053,16 @@ err_unload_vaimg:
 	elf_unload_vaimg(elf_prog);
 #endif /* !CONFIG_LIBPOSIX_MMAP */
 err_free_elf_prog:
+#if CONFIG_LIBPOSIX_VFS
+	uk_posix_vfs_path_release(elf_prog->executable);
+#endif
 	uk_free(a, elf_prog);
 err_end_elf:
 	elf_end(elf);
 err_close_fd:
+#if CONFIG_LIBPOSIX_VFS
+	uk_posix_vfs_path_release(executable);
+#endif
 	close(fd);
 err_out:
 	return ERR2PTR(ret);

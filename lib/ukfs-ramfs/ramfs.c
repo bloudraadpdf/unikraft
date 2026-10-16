@@ -1509,10 +1509,8 @@ int ramfs_live_fs_rename(struct ramfs_node *n,
 static
 struct uk_fs_path ramfs_live_fs_readlink(struct ramfs_node *n)
 {
-	return (struct uk_fs_path){
-		.s = n->sym_data.path,
-		.len = n->sym_data.len
-	};
+	return uk_fs_path_copy(n->sym_data.path, n->sym_data.len,
+			       uk_alloc_get_default());
 }
 
 /* Ops table, driver templating & registration */
@@ -1548,7 +1546,7 @@ static int ramfs_node_cmp(struct ramfs_node *a, struct ramfs_node *b)
 }
 
 UK_FS_TMPL_LIVE_GENERATE_STATIC(ramfs, struct ramfs_node *, ramfs_node_cmp,
-				ramfs_liveops, 0);
+				ramfs_liveops, 0, NULL);
 
 UK_FS_DRIVER_REGISTER(ramfs, UK_FS_TMPL_LIVE_OP_VOPEN(ramfs),
 		      UK_FS_VOPEN_VOL_IGNORE | UK_FS_VOPEN_DATA_IGNORE);

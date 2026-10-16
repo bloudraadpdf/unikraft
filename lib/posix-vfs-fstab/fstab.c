@@ -408,6 +408,11 @@ int init_vfs_fstab(struct uk_init_ctx *ictx __unused)
 		return r;
 #endif /* CONFIG_LIBPOSIX_VFS_FSTAB_MOUNT_DEV */
 
+#if CONFIG_LIBPOSIX_VFS_FSTAB_MOUNT_PROC
+	r = fstab_mount_special("/proc", "proc", "", 0, NULL);
+	if (r)
+		return r;
+#endif
 	uk_pr_debug("Mounted %d entries total\n", count);
 	return 0;
 }

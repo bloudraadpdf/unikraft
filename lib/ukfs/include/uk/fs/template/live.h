@@ -217,7 +217,7 @@ struct sname {								\
  * @param mode_constraints Open file mode constraints
  */
 #define UK_FS_TMPL_LIVE_GENERATE_STATIC(drv, nodetype, nodecmp,		\
-					ops_table, mode_constraints)	\
+					ops_table, mode_constraints, follow_op) \
 UK_FS_TMPL_LIVE_DECL_COMMON_STATIC(drv, nodetype);			\
 \
 UK_FS_TMPL_LIVE_GEN_COMMON_STATIC(drv, nodecmp, (ops_table).live_nodekind,\
@@ -248,7 +248,7 @@ UK_FS_TMPL_LIVE_GEN_FS_UNLINK_STATIC(drv, (ops_table).live_fs_unlink);	\
 UK_FS_TMPL_LIVE_GEN_FS_RENAME_STATIC(drv, (ops_table).live_fs_rename);	\
 UK_FS_TMPL_LIVE_GEN_FS_GRAFT_STATIC(drv);				\
 UK_FS_TMPL_LIVE_GEN_FS_READLINK_STATIC(drv, (ops_table).live_fs_readlink);\
-UK_FS_TMPL_LIVE_GEN_FSOPS_STATIC(drv, mode_constraints);		\
+UK_FS_TMPL_LIVE_GEN_FSOPS_STATIC(drv, mode_constraints, follow_op);		\
 \
 UK_FS_TMPL_LIVE_GEN_VOPEN_STATIC(drv, (ops_table).live_vopen,		\
 				 (ops_table).live_errnode,		\
@@ -1844,8 +1844,9 @@ attr UK_FS_TMPL_LIVE_DECL_FS_REBIND(drv)				\
  * @param drv Driver name
  * @param mode_constraints Open file mode constraints
  */
-#define UK_FS_TMPL_LIVE_GEN_FSOPS(drv, mode_constraints) \
-	UK_FS_TMPL_LIVE_GEN_FSOPS_ATTR(drv, mode_constraints, )
+#define UK_FS_TMPL_LIVE_GEN_FSOPS(drv, mode_constraints, follow_op) \
+	UK_FS_TMPL_LIVE_GEN_FSOPS_ATTR(drv, mode_constraints, follow_op,	\
+				    )
 
 /**
  * Generate the ukfs ops tables of `drv` with static linkage.
@@ -1855,8 +1856,8 @@ attr UK_FS_TMPL_LIVE_DECL_FS_REBIND(drv)				\
  * @param drv Driver name
  * @param mode_constraints Open file mode constraints
  */
-#define UK_FS_TMPL_LIVE_GEN_FSOPS_STATIC(drv, mode_constraints) \
-	UK_FS_TMPL_LIVE_GEN_FSOPS_ATTR(drv, mode_constraints, static)
+#define UK_FS_TMPL_LIVE_GEN_FSOPS_STATIC(drv, mode_constraints, follow_op) \
+	UK_FS_TMPL_LIVE_GEN_FSOPS_ATTR(drv, mode_constraints, follow_op, static)
 
 /**
  * INTERNAL. Generate the ukfs ops tables of `drv` with custom attributes.
@@ -1867,7 +1868,7 @@ attr UK_FS_TMPL_LIVE_DECL_FS_REBIND(drv)				\
  * @param mode_constraints Open file mode constraints
  * @param attr Ops table attributes
  */
-#define UK_FS_TMPL_LIVE_GEN_FSOPS_ATTR(drv, mode_constraints, attr)	\
+#define UK_FS_TMPL_LIVE_GEN_FSOPS_ATTR(drv, mode_constraints, follow_op, attr)	\
 attr const struct uk_fs_ops UK_FS_TMPL_LIVE_FSOPS_REG(drv) = {		\
 	.lookup = UK_FS_TMPL_LIVE_OP_FS_LOOKUP(drv),			\
 	.readlink = NULL,						\
@@ -1886,6 +1887,7 @@ attr const struct uk_fs_ops UK_FS_TMPL_LIVE_FSOPS_REG(drv) = {		\
 attr const struct uk_fs_ops UK_FS_TMPL_LIVE_FSOPS_SYM(drv) = {		\
 	.lookup = UK_FS_TMPL_LIVE_OP_FS_LOOKUP(drv),			\
 	.readlink = UK_FS_TMPL_LIVE_OP_FS_READLINK(drv),		\
+	.follow_link = (follow_op),					\
 	.listdir = NULL,						\
 	.create = NULL,							\
 	.unlink = NULL,							\

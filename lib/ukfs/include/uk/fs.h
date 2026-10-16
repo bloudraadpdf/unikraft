@@ -13,6 +13,7 @@
 #include <sys/statfs.h>
 
 #include <uk/assert.h>
+#include <uk/alloc.h>
 #include <uk/errptr.h>
 #include <uk/file.h>
 
@@ -173,17 +174,18 @@ typedef int (*uk_fs_lookup_func)(const struct uk_file *f,
 struct uk_fs_path {
 	const char *s; /* NUL-terminated string containing path */
 	size_t len; /* Length of string, same as returned by strlen(.s) */
+	struct uk_alloc *allocator;
 };
 
+struct uk_fs_path uk_fs_path_copy(const char *s, size_t len,
+				  struct uk_alloc *allocator);
+void uk_fs_path_release(struct uk_fs_path path);
+
 /**
- * Get the path pointed to by symlink `f` as efficiently as possible.
+ * Get an owned copy of the path pointed to by symlink `f`.
  *
- * The returned string is guaranteed a lifetime at least as long as `f`.
- * This operation should avoid any memory allocation or copying.
- * Callers must treat returned memory as immutable.
- *
- * This operation cannot meaningfully fail beyond critial I/O errors, signaled
- * by an error value in the string pointer.
+ * Release a successful result with uk_fs_path_release(). An error is returned
+ * in the string pointer, without an allocation. The result is immutable.
  *
  * @param f Symlink to read
  *
@@ -443,6 +445,8 @@ struct uk_fs_ops {
 	uk_fs_lookup_func lookup;
 	/* Symlink ops; must be NULL for non-symlinks */
 	uk_fs_readlink_func readlink;
+	/* Optional magic link: acquired target, NULL for path lookup, or error. */
+	const struct uk_file *(*follow_link)(const struct uk_file *f);
 	/* Directory ops; must be NULL for non-directories */
 	uk_fs_listdir_func listdir;
 	uk_fs_create_func create;

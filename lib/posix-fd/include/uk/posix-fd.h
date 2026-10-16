@@ -28,6 +28,8 @@ struct uk_ofile {
 	size_t pos; /* Current file read/write offset position */
 	struct uk_mutex lock; /* Lock for modifying open file state */
 	unsigned int mode;
+	void *context;
+	void (*destroy)(struct uk_ofile *of);
 #if CONFIG_LIBPOSIX_FD_HEAPOFD
 	__atomic refcnt;
 #endif /* CONFIG_LIBPOSIX_FD_HEAPOFD */
@@ -59,6 +61,8 @@ void uk_ofile_init(struct uk_ofile *of,
 	/* O_CLOEXEC is uniquely not a file description flag; ignore */
 	of->mode = mode & ~O_CLOEXEC;
 	of->pos = 0;
+	of->context = NULL;
+	of->destroy = NULL;
 }
 
 /* Mode bits from fcntl.h that open files are interested in */
@@ -132,7 +136,10 @@ struct uk_ofile *uk_ofile_new(const struct uk_file *f, unsigned int mode,
 static inline
 void uk_ofile_free(struct uk_ofile *of)
 {
-	return uk_free(uk_alloc_get_default(), of);
+	if (of->destroy)
+		of->destroy(of);
+	else
+		uk_free(uk_alloc_get_default(), of);
 }
 
 /**

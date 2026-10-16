@@ -1,0 +1,2 @@
+$(eval $(call addlib_s,libukfs_procfs,$(CONFIG_LIBUKFS_PROCFS)))
+LIBUKFS_PROCFS_SRCS-y += $(LIBUKFS_PROCFS_BASE)/procfs.c

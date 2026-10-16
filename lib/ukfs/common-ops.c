@@ -8,6 +8,32 @@
 
 #include <uk/errptr.h>
 #include <uk/fs/common-ops.h>
+#include <uk/arch/limits.h>
+#include <string.h>
+
+struct uk_fs_path uk_fs_path_copy(const char *s, size_t len,
+				  struct uk_alloc *allocator)
+{
+	char *copy;
+
+	if (len == __SZ_MAX)
+		return (struct uk_fs_path){ .s = ERR2PTR(-ENAMETOOLONG) };
+	copy = uk_malloc(allocator, len + 1);
+	if (!copy)
+		return (struct uk_fs_path){ .s = ERR2PTR(-ENOMEM) };
+	if (len)
+		memcpy(copy, s, len);
+	copy[len] = '\0';
+	return (struct uk_fs_path){
+		.s = copy, .len = len, .allocator = allocator
+	};
+}
+
+void uk_fs_path_release(struct uk_fs_path path)
+{
+	if (path.allocator)
+		uk_free(path.allocator, (void *)path.s);
+}
 
 int uk_fs_common_nop_sync(const struct uk_file *f __unused)
 {

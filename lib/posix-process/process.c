@@ -567,6 +567,7 @@ void pprocess_release(struct posix_process *pprocess)
 #endif /* CONFIG_LIBPOSIX_PROCESS_SIGNAL */
 
 	pprocess_vm_put(pprocess->vm_context, pprocess->pid);
+	pprocess->vm_context = NULL;
 	pid = pprocess->pid;
 
 	pid_process[pid] = NULL;
@@ -808,3 +809,47 @@ UK_SYSCALL_R_DEFINE(int, sched_getaffinity, int, pid, size_t, cpusetsize,
 #endif
 	return ret;
 }
+
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING && CONFIG_LIBPOSIX_VFS
+struct posix_process *uk_posix_process_get(pid_t pid)
+{
+	struct posix_process *process;
+
+	uk_mutex_lock(&pprocess_mutex);
+	process = pid2pprocess(pid);
+	if (process)
+		pprocess_acquire(process);
+	uk_mutex_unlock(&pprocess_mutex);
+	return process;
+}
+
+void uk_posix_process_put(struct posix_process *process)
+{
+	pprocess_put(process);
+}
+
+bool uk_posix_process_attached(struct posix_process *process)
+{
+	bool attached;
+
+	uk_mutex_lock(&pprocess_mutex);
+	attached = pid2pprocess(process->pid) == process;
+	uk_mutex_unlock(&pprocess_mutex);
+	return attached;
+}
+
+pid_t uk_posix_process_next_pid(pid_t after)
+{
+	pid_t next = 0;
+
+	uk_mutex_lock(&pprocess_mutex);
+	for (pid_t pid = MAX(after, 0) + 1; pid < TIDMAP_SIZE; pid++) {
+		if (pid_process[pid]) {
+			next = pid;
+			break;
+		}
+	}
+	uk_mutex_unlock(&pprocess_mutex);
+	return next;
+}
+#endif

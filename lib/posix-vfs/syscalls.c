@@ -573,8 +573,7 @@ static int _vfs_renameat(int olddfd, const char *oldname,
 		return ret;
 	if (unlikely((ret = _vfs_atfd(newdfd, newname, &newof))))
 		goto out_oldof;
-	ret = uk_sys_renameat(oldof ? oldof->file : NULL, oldname,
-			      newof ? newof->file : NULL, newname, flags);
+	ret = uk_sys_renameat(oldof, oldname, newof, newname, flags);
 	if (newof)
 		uk_ofile_release(newof);
 out_oldof:

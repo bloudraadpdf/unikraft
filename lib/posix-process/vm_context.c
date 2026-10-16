@@ -3,6 +3,9 @@
 #include <uk/alloc.h>
 #include <uk/process.h>
 #include <uk/process/events.h>
+#if CONFIG_LIBPOSIX_VFS
+#include <uk/vfs-path.h>
+#endif
 #if CONFIG_LIBUKVMEM
 #include <uk/vmem.h>
 #endif
@@ -91,6 +94,9 @@ void pprocess_vm_put(struct posix_vm_context *state, pid_t pid __maybe_unused)
 #endif
 #if CONFIG_LIBPOSIX_PROCESS_EXECVE
 		uk_free(state->allocator, state->auxv);
+#if CONFIG_LIBPOSIX_VFS
+		uk_posix_vfs_path_release(state->executable);
+#endif
 #endif
 		uk_free(state->allocator, state);
 	}
@@ -125,3 +131,18 @@ static int pprocess_vm_exit(void *arg)
 }
 
 POSIX_PROCESS_PPEXIT_HANDLER(pprocess_vm_exit);
+
+#if CONFIG_LIBPOSIX_PROCESS_EXECVE && CONFIG_LIBPOSIX_VFS
+struct uk_vfs_path *uk_posix_process_executable(struct posix_process *process)
+{
+	struct uk_vfs_path *path = NULL;
+
+	uk_mutex_lock(&pprocess_mutex);
+	if (process->vm_context)
+		path = process->vm_context->executable;
+	if (path)
+		uk_posix_vfs_path_acquire(path);
+	uk_mutex_unlock(&pprocess_mutex);
+	return path ? path : ERR2PTR(-ENOENT);
+}
+#endif
