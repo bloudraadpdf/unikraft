@@ -36,6 +36,17 @@ struct file_vma {
 	struct uk_fdio_vma_lifetime *lifetime;
 };
 
+struct uk_ofile *uk_fdio_vma_file(const struct uk_vma *vma, __off *offset)
+{
+	const struct file_vma *file = (const struct file_vma *)vma;
+
+	if (vma->ops != &uk_fdio_vma_ops)
+		return NULL;
+	*offset = file->offset;
+	uk_ofile_acquire(file->of);
+	return file->of;
+}
+
 #ifdef CONFIG_LIBUKVMEM_FILE_BASE
 static
 __vaddr_t file_vma_op_get_base(struct uk_vas *vas __unused,

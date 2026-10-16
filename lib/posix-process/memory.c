@@ -4,6 +4,9 @@
 #include <uk/process.h>
 #include <uk/vmem.h>
 #include <uk/vmem/vma_ops.h>
+#if CONFIG_LIBPOSIX_FDIO_VMA_COPY
+#include <uk/posix-file-vma.h>
+#endif
 #include "process.h"
 
 struct memory_pages {
@@ -34,6 +37,94 @@ static struct posix_vm_context *memory_current(void)
 		return thread->exec_vm;
 #endif
 	return thread->process->vm_context;
+}
+
+static bool memory_mapping(const struct uk_vma *vma,
+			   const struct posix_vm_context *state,
+			   struct uk_posix_process_mapping *map)
+{
+	*map = (struct uk_posix_process_mapping){
+		.start = vma->start, .end = vma->end, .attr = vma->attr,
+		.private = !!(vma->flags & UK_VMA_FLAG_PRIVATE)
+	};
+	if (vma->owner == state) {
+#if CONFIG_LIBPOSIX_PROCESS_BRK
+		if (vma->start >= (__vaddr_t)state->brk.base &&
+		    vma->end - (__vaddr_t)state->brk.base <=
+		    UK_PAGING_PAGE_ALIGN_UP(state->brk.pos))
+			map->name = "[heap]";
+#endif
+		return true;
+	}
+#if CONFIG_LIBPOSIX_PROCESS_EXECVE
+	if (vma->ops == &uk_vma_stack_ops &&
+	    vma->start < state->stack_top && vma->end > state->stack_base) {
+		map->start = MAX(vma->start, state->stack_base);
+		map->end = MIN(vma->end, state->stack_top);
+		map->private = true;
+		map->name = "[stack]";
+		return map->start < map->end;
+	}
+#endif
+	return false;
+}
+
+int uk_posix_process_maps(struct posix_process *process,
+			  struct uk_posix_process_mapping **output,
+			  size_t *count)
+{
+	struct uk_vas *vas = uk_vas_get_active();
+	struct posix_vm_context *state;
+	struct uk_posix_process_mapping entry, *maps = NULL;
+	const struct uk_vma *vma;
+	size_t length = 0, index = 0;
+	int rc = 0;
+
+	memory_lock(vas);
+	state = process->vm_context;
+	if (!state)
+		goto out;
+	for (vma = uk_vma_first(vas); vma; vma = uk_vma_next(vma))
+		if (memory_mapping(vma, state, &entry))
+			length++;
+	if (length > __SZ_MAX / sizeof(*maps)) {
+		rc = -ENOMEM;
+		goto out;
+	}
+	if (length) {
+		maps = uk_malloc(uk_alloc_get_default(),
+				 length * sizeof(*maps));
+		if (!maps) {
+			rc = -ENOMEM;
+			goto out;
+		}
+	}
+	for (vma = uk_vma_first(vas); vma; vma = uk_vma_next(vma)) {
+		if (!memory_mapping(vma, state, &entry))
+			continue;
+#if CONFIG_LIBPOSIX_FDIO_VMA_COPY
+		entry.file = uk_fdio_vma_file(vma, &entry.offset);
+#endif
+		maps[index++] = entry;
+	}
+out:
+	memory_unlock(vas);
+	*output = maps;
+	*count = rc ? 0 : length;
+	return rc;
+}
+
+void uk_posix_process_maps_release(struct uk_posix_process_mapping *maps,
+				   size_t count)
+{
+#if CONFIG_LIBPOSIX_FDIO_VMA_COPY
+	for (size_t index = 0; index < count; index++)
+		if (maps[index].file)
+			uk_ofile_release(maps[index].file);
+#else
+	(void)count;
+#endif
+	uk_free(uk_alloc_get_default(), maps);
 }
 
 static bool memory_is_data(bool private, unsigned long attr)

@@ -14,9 +14,12 @@
 #include <uk/process.h>
 #include <uk/posix-fdtab.h>
 #include <uk/vfs-path.h>
+#if CONFIG_LIBUKVMEM
+#include <uk/vmem.h>
+#endif
 
 enum proc_kind {
-	PROC_ROOT, PROC_SELF, PROC_PID, PROC_EXE, PROC_FDDIR, PROC_FD
+	PROC_ROOT, PROC_SELF, PROC_PID, PROC_EXE, PROC_FDDIR, PROC_FD, PROC_MAPS
 };
 
 struct proc_node {
@@ -119,7 +122,9 @@ static int node_kind(const struct proc_node *node,
 	bool directory = node->kind == PROC_ROOT || node->kind == PROC_PID ||
 			 node->kind == PROC_FDDIR;
 
-	return kind == UK_FS_TMPL_DIR ? directory : !directory;
+	return kind == UK_FS_TMPL_DIR ? directory :
+		node->kind == PROC_SELF || node->kind == PROC_EXE ||
+		node->kind == PROC_FD;
 }
 
 static struct proc_node *volume_open(union uk_fs_vopen_vol volume __unused,
@@ -135,6 +140,129 @@ static ssize_t node_io(struct proc_node *node, const struct iovec *iov __unused,
 		       unsigned long mount_flags __unused)
 {
 	return node_kind(node, UK_FS_TMPL_DIR) ? -EISDIR : -EINVAL;
+}
+
+#if CONFIG_LIBUKVMEM
+static int mapping_line(const struct uk_posix_process_mapping *map,
+			char *line, size_t capacity)
+{
+	struct uk_statx metadata = {0};
+	struct uk_fs_path path = {0};
+	const char *name = map->name;
+	size_t length = name ? strlen(name) : 0;
+	int used, rc = 0;
+
+	if (map->file) {
+		uk_file_rlock(map->file->file);
+		rc = uk_file_getstat(map->file->file, UK_STATX_BASIC_STATS,
+				     &metadata);
+		uk_file_runlock(map->file->file);
+		if (rc)
+			return rc;
+		path = uk_posix_vfs_ofile_name(map->file);
+		if (PTRISERR(path.s))
+			return PTR2ERR(path.s);
+		name = path.s;
+		length = path.len;
+	}
+	used = snprintf(line, capacity, "%lx-%lx %c%c%c%c %08lx %02x:%02x %llu",
+			(unsigned long)map->start, (unsigned long)map->end,
+			map->attr & UK_PAGING_PAGE_ATTR_PROT_READ ? 'r' : '-',
+			map->attr & UK_PAGING_PAGE_ATTR_PROT_WRITE ? 'w' : '-',
+			map->attr & UK_PAGING_PAGE_ATTR_PROT_EXEC ? 'x' : '-',
+			map->private ? 'p' : 's', (unsigned long)map->offset,
+			metadata.stx_dev_major, metadata.stx_dev_minor,
+			(unsigned long long)metadata.stx_ino);
+	if (used < 0 || (size_t)used >= capacity) {
+		rc = -EOVERFLOW;
+		goto out;
+	}
+	if (length && (size_t)used + 1 < capacity)
+		line[used++] = ' ';
+	for (size_t index = 0; index < length; index++) {
+		size_t bytes = name[index] == '\n' ? 4 : 1;
+
+		if (bytes >= capacity - used) {
+			rc = -ENAMETOOLONG;
+			goto out;
+		}
+		if (bytes == 4) {
+			memcpy(line + used, "\\012", 4);
+			used += 4;
+		} else {
+			line[used++] = name[index];
+		}
+	}
+	if ((size_t)used + 1 >= capacity) {
+		rc = -EOVERFLOW;
+		goto out;
+	}
+	line[used++] = '\n';
+	rc = used;
+out:
+	if (path.s)
+		uk_fs_path_release(path);
+	return rc;
+}
+
+static ssize_t maps_read(struct proc_node *node, const struct iovec *iov,
+			 size_t count, size_t offset)
+{
+	struct uk_posix_process_mapping *maps;
+	size_t length, vector = 0, position = 0, written = 0;
+	const size_t capacity = 4 * PATH_MAX + 160;
+	char *line;
+	int rc = uk_posix_process_maps(node->process, &maps, &length);
+
+	if (rc)
+		return rc;
+	line = uk_malloc(uk_alloc_get_default(), capacity);
+	if (!line) {
+		rc = -ENOMEM;
+		goto out;
+	}
+	for (size_t index = 0; index < length && vector < count; index++) {
+		rc = mapping_line(&maps[index], line, capacity);
+		if (rc < 0)
+			goto out;
+		if (offset >= (size_t)rc) {
+			offset -= rc;
+			continue;
+		}
+		size_t cursor = offset;
+
+		offset = 0;
+		while (cursor < (size_t)rc && vector < count) {
+			size_t bytes = MIN((size_t)rc - cursor,
+					   iov[vector].iov_len - position);
+
+			memcpy((char *)iov[vector].iov_base + position,
+			       line + cursor, bytes);
+			written += bytes;
+			cursor += bytes;
+			position += bytes;
+			if (position == iov[vector].iov_len) {
+				vector++;
+				position = 0;
+			}
+		}
+	}
+out:
+	uk_free(uk_alloc_get_default(), line);
+	uk_posix_process_maps_release(maps, length);
+	return written ? (ssize_t)written : rc < 0 ? rc : 0;
+}
+#endif
+
+static ssize_t node_read(struct proc_node *node, const struct iovec *iov,
+			 size_t count, size_t offset, long flags,
+			 unsigned long mount_flags)
+{
+#if CONFIG_LIBUKVMEM
+	if (node->kind == PROC_MAPS)
+		return maps_read(node, iov, count, offset);
+#endif
+	return node_io(node, iov, count, offset, flags, mount_flags);
 }
 
 static ssize_t node_mem(struct proc_node *node __unused,
@@ -189,6 +317,8 @@ static int node_stat(struct proc_node *node, unsigned int mask __unused,
 		uk_ofile_release(file);
 	}
 	metadata->stx_blksize = 4096;
+	if (node->kind == PROC_MAPS)
+		metadata->stx_mode = S_IFREG | 0444;
 	return 0;
 }
 
@@ -266,6 +396,11 @@ static int node_lookup(struct proc_node *node, const char *name, size_t length,
 	} else if (node->kind == PROC_PID && part == 2 &&
 		   !memcmp(name, "fd", 2)) {
 		found = node_new(PROC_FDDIR, node, NULL, -1);
+#if CONFIG_LIBUKVMEM
+	} else if (node->kind == PROC_PID && part == 4 &&
+		   !memcmp(name, "maps", 4)) {
+		found = node_new(PROC_MAPS, node, NULL, -1);
+#endif
 	} else if (node->kind == PROC_FDDIR) {
 		struct uk_fdtab *table;
 		struct uk_ofile *file;
@@ -318,6 +453,7 @@ static ssize_t node_list(struct proc_node *node, size_t *cursor, void *buffer,
 	char number[24];
 	size_t next, length, record, used = 0;
 	unsigned char type;
+	enum proc_kind kind;
 	__u64 inode;
 	pid_t pid;
 
@@ -354,12 +490,19 @@ static ssize_t node_list(struct proc_node *node, size_t *cursor, void *buffer,
 			inode = node_inode(PROC_FD, node->process) *
 				CONFIG_LIBPOSIX_FDTAB_MAXFDS + descriptor;
 		} else if (node->kind == PROC_PID) {
+#if CONFIG_LIBUKVMEM
+			if (*cursor >= 5)
+#else
 			if (*cursor >= 4)
+#endif
 				break;
-			name = *cursor == 2 ? "exe" : "fd";
-			type = *cursor == 2 ? DT_LNK : DT_DIR;
-			inode = node_inode(*cursor == 2 ? PROC_EXE : PROC_FDDIR,
-					   node->process);
+			name = *cursor == 2 ? "exe" :
+				*cursor == 3 ? "fd" : "maps";
+			type = *cursor == 2 ? DT_LNK :
+				*cursor == 3 ? DT_DIR : DT_REG;
+			kind = *cursor == 2 ? PROC_EXE :
+				*cursor == 3 ? PROC_FDDIR : PROC_MAPS;
+			inode = node_inode(kind, node->process);
 		} else if (*cursor == 2) {
 			name = "self";
 			type = DT_LNK;
@@ -453,7 +596,8 @@ static const struct uk_file *node_follow(const struct uk_file *file);
 
 UK_FS_TMPL_LIVE_OPSTABLE(procfs, procfs_live_ops);
 static const struct procfs_live_ops procfs_ops = {
-	.live_vopen = volume_open, .live_read = node_io, .live_write = node_io,
+	.live_vopen = volume_open,
+	.live_read = node_read, .live_write = node_io,
 	.live_mem = node_mem, .live_getstat = node_stat, .live_setstat = node_setstat,
 	.live_ctl = node_control, .live_fs_stat = volume_stat,
 	.live_fs_sync = volume_sync, .live_fs_lookup = node_lookup,
@@ -473,7 +617,7 @@ static const struct uk_file *node_follow(const struct uk_file *file)
 	struct uk_vfs_path *path;
 	const struct uk_file *target;
 
-	if (node->kind == PROC_SELF)
+	if (node->kind == PROC_SELF || node->kind == PROC_MAPS)
 		return NULL;
 	if (node->kind == PROC_FD) {
 		struct uk_ofile *descriptor = node_descriptor(node);

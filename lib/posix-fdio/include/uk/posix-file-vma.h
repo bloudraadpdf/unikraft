@@ -13,6 +13,10 @@
 #include <uk/vmem/vma_types.h>
 
 extern const struct uk_vma_ops uk_fdio_vma_ops;
+struct uk_vma;
+
+/* Caller holds the VAS mutation lock and releases the returned ofile. */
+struct uk_ofile *uk_fdio_vma_file(const struct uk_vma *vma, __off *offset);
 
 struct uk_fdio_vma_lifetime {
 	void (*acquire)(struct uk_fdio_vma_lifetime *lifetime);

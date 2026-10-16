@@ -110,6 +110,21 @@ int uk_posix_futex_pi(__u32 *address, int command, const __nsec *deadline,
 #if CONFIG_LIBUKVMEM
 struct uk_vas;
 struct uk_vma_ops;
+struct uk_ofile;
+struct uk_posix_process_mapping {
+	__vaddr_t start, end;
+	unsigned long attr;
+	bool private;
+	const char *name;
+	struct uk_ofile *file;
+	__off offset;
+};
+
+int uk_posix_process_maps(struct posix_process *process,
+			  struct uk_posix_process_mapping **output,
+			  size_t *count);
+void uk_posix_process_maps_release(struct uk_posix_process_mapping *maps,
+				   size_t count);
 int uk_posix_process_vm_map(struct uk_vas *vas, __vaddr_t *address,
 			    __sz length, unsigned long attr, unsigned long flags,
 			    const struct uk_vma_ops *ops, void *args);
