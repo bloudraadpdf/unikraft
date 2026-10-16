@@ -12,6 +12,7 @@
 #include <uk/socket_driver.h>
 #include <uk/posix-pipe.h>
 #include <uk/file/pollqueue.h>
+#include <uk/file/iovutil.h>
 
 #include "unixsock-bind.h"
 
@@ -41,6 +42,7 @@ struct unix_listenq {
 struct unix_sock_data {
 	int type;
 	int flags;
+	int sndbuf;
 	const struct uk_file *rpipe;
 	const struct uk_file *wpipe;
 	struct uk_poll_chain rio;
@@ -76,6 +78,7 @@ struct unix_sock_data *unix_sock_alloc(struct posix_socket_driver *d, int type)
 		return ERR2PTR(-ENOMEM);
 	*data = (struct unix_sock_data){
 		.type = type,
+		.sndbuf = UK_PIPE_CAPACITY,
 		.flags = 0,
 		.rpipe = NULL,
 		.wpipe = NULL,
@@ -498,6 +501,11 @@ int unix_socket_getsockopt(posix_sock *file, int level, int optname,
 		int val;
 
 		switch (optname) {
+		case SO_SNDBUF:
+			if (data->type == SOCK_DGRAM)
+				return -EOPNOTSUPP;
+			val = data->sndbuf;
+			break;
 		case SO_ACCEPTCONN:
 			val = !!(data->flags & UNIXSOCK_LISTEN);
 			break;
@@ -528,10 +536,8 @@ int unix_socket_getsockopt(posix_sock *file, int level, int optname,
 			return -ENOPROTOOPT;
 		}
 
-		if (unlikely(*optlen < sizeof(val)))
-			return -EINVAL;
-		*optlen = sizeof(val);
-		*((int *)optval) = val;
+		*optlen = MIN(*optlen, sizeof(val));
+		memcpy(optval, &val, *optlen);
 		return 0;
 	}
 	default:
@@ -540,13 +546,35 @@ int unix_socket_getsockopt(posix_sock *file, int level, int optname,
 }
 
 static
-int unix_socket_setsockopt(posix_sock *file __unused, int level, int optname,
-			   const void *optval __unused,
-			   socklen_t optlen __unused)
+int unix_socket_setsockopt(posix_sock *file, int level, int optname,
+			   const void *optval, socklen_t optlen)
 {
+	struct unix_sock_data *data = posix_sock_get_data(file);
 	switch (level) {
 	case SOL_SOCKET:
 		switch (optname) {
+		case SO_SNDBUF:
+		{
+			unsigned int requested;
+			size_t capacity;
+			int error;
+
+			if (data->type == SOCK_DGRAM)
+				return -EOPNOTSUPP;
+			if (optlen < sizeof(requested))
+				return -EINVAL;
+			memcpy(&requested, optval, sizeof(requested));
+			capacity = MAX(2 * MIN(requested, UK_PIPE_CAPACITY / 2),
+				       MIN(4608UL, UK_PIPE_CAPACITY));
+			if (data->wpipe) {
+				error = uk_pipefile_set_capacity(data->wpipe,
+								 capacity);
+				if (error)
+					return error;
+			}
+			data->sndbuf = capacity;
+			return 0;
+		}
 		/* silently ignore */
 		case SO_BROADCAST:
 		case SO_DONTROUTE:
@@ -607,6 +635,13 @@ int unix_sock_connect_stream(posix_sock *file, posix_sock *target)
 	err = uk_pipefile_create(pipes[1]);
 	if (unlikely(err))
 		goto err_release;
+
+	err = uk_pipefile_set_capacity(pipes[1][1], data->sndbuf);
+	if (unlikely(err)) {
+		uk_file_release(pipes[1][0]);
+		uk_file_release(pipes[1][1]);
+		goto err_release;
+	}
 
 	lmsg = &td->listen.q[td->listen.whead];
 	td->listen.count++;
@@ -736,9 +771,9 @@ ssize_t unix_socket_recvmsg(posix_sock *file, struct msghdr *msg, int flags)
 	struct unix_sock_data *data = posix_sock_get_data(file);
 	ssize_t ret;
 
-	if (unlikely(flags)) {
+	if (unlikely(flags & ~(MSG_PEEK | MSG_DONTWAIT))) {
 		uk_pr_warn("Unsupported recv flags: %x\n", flags);
-		return -ENOSYS;
+		return -EOPNOTSUPP;
 	}
 	if (!data->rpipe) {
 		if (likely(data->flags & UNIXSOCK_CONN))
@@ -748,7 +783,8 @@ ssize_t unix_socket_recvmsg(posix_sock *file, struct msghdr *msg, int flags)
 	}
 
 	uk_file_rlock(data->rpipe);
-	ret = uk_file_read(data->rpipe, msg->msg_iov, msg->msg_iovlen, 0, 0);
+	ret = uk_file_read(data->rpipe, msg->msg_iov, msg->msg_iovlen, 0,
+			   flags & MSG_PEEK ? UK_PIPE_READ_PEEK : 0);
 	uk_file_runlock(data->rpipe);
 	/* Get remote addr */
 	if (msg->msg_name) {
@@ -797,7 +833,7 @@ ssize_t unix_socket_sendmsg(posix_sock *file,
 	const struct uk_file *wpipe;
 	ssize_t ret;
 
-	if (unlikely(flags & ~MSG_NOSIGNAL)) {
+	if (unlikely(flags & ~(MSG_NOSIGNAL | MSG_DONTWAIT))) {
 		uk_pr_warn("Unsupported send flags: %x\n", flags);
 		return -ENOSYS;
 	}
@@ -844,9 +880,16 @@ ssize_t unix_socket_sendmsg(posix_sock *file,
 			: (msg->msg_name
 				? -ECONNREFUSED : -ENOTCONN);
 
+	if (data->type == SOCK_SEQPACKET &&
+	    uk_iov_len(msg->msg_iov, msg->msg_iovlen) >
+	    (size_t)data->sndbuf - 32) {
+		ret = -EMSGSIZE;
+		goto out_release;
+	}
 	uk_file_wlock(wpipe);
 	ret = uk_file_write(wpipe, msg->msg_iov, msg->msg_iovlen, 0,
-			    data->type != SOCK_STREAM ? O_DIRECT : 0);
+			    data->type != SOCK_STREAM ?
+				O_DIRECT | UK_PIPE_WRITE_ATOMIC : 0);
 	uk_file_wunlock(wpipe);
 	/* We ignore ancillary data for now */
 
@@ -854,6 +897,7 @@ ssize_t unix_socket_sendmsg(posix_sock *file,
 	if (!ret && data->type != SOCK_STREAM)
 		uk_pr_warn("0-length datagram write; message will be lost\n");
 
+out_release:
 	if (!_SOCK_CONNECTION(data->type) && remote) {
 		uk_file_release(wpipe);
 		if (ret == -EPIPE)

@@ -10,6 +10,13 @@
 #define __UKPOSIX_PIPE_H__
 
 #include <uk/file.h>
+#include <uk/bitops.h>
+
+#define UK_PIPE_CAPACITY UK_BIT(CONFIG_LIBPOSIX_PIPE_SIZE_ORDER)
+#define UK_PIPE_READ_PEEK UK_BIT(30)
+#define UK_PIPE_WRITE_ATOMIC UK_BIT(29)
+
+int uk_pipefile_set_capacity(const struct uk_file *file, size_t capacity);
 
 /* File creation */
 int uk_pipefile_create(struct uk_file *pipes[2]);
