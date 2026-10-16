@@ -38,6 +38,7 @@
 #include <uk/print.h>
 #include <uk/essentials.h>
 #include <uk/socket_driver.h>
+#include <uk/nofault.h>
 
 #include <lwip/sockets.h>
 #include <sys/socket.h>
@@ -225,13 +226,36 @@ lwip_posix_socket_setsockopt(posix_sock *file, int level,
 {
 	int lwip_fd;
 	int ret;
+	int ip_value = 0;
 
 	lwip_fd = _lwip_getfd(file);
 	UK_ASSERT(lwip_fd >= 0);
 
+	if (level == IPPROTO_IP &&
+	    (optname == IP_TTL || optname == IP_TOS || optname == IP_RECVERR)) {
+		if (optlen >= sizeof(ip_value)) {
+			if (!uk_nofault_try_read(ip_value, optval))
+				return -EFAULT;
+		} else if (optlen) {
+			unsigned char byte;
+
+			if (!uk_nofault_try_read(byte, optval))
+				return -EFAULT;
+			ip_value = byte;
+		} else if (optname == IP_TTL) {
+			return -EINVAL;
+		}
+		optval = &ip_value;
+		optlen = sizeof(ip_value);
+	}
 	if ((level == LINUX_SOL_TCP && optname == LINUX_TCP_FASTOPEN) ||
 	    (level == SOL_IP && optname == IP_RECVERR)) {
-		/* Ignore stuff that LWIP doesn't support */
+		int value;
+
+		if (optlen < sizeof(value))
+			return -EINVAL;
+		if (!uk_nofault_try_read(value, optval))
+			return -EFAULT;
 		return 0;
 	}
 	ret = lwip_setsockopt(lwip_fd, level, optname, optval, optlen);

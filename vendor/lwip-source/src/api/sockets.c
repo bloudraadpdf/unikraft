@@ -40,6 +40,7 @@
 #define _BSD_SOURCE
 
 #include <sys/time.h>
+#include <uk/nofault.h>
 
 #include "lwip/opt.h"
 
@@ -164,7 +165,31 @@ static void sockaddr_to_ipaddr_port(const struct sockaddr *sockaddr, ip_addr_t *
 #define IS_SOCK_ADDR_ALIGNED(name)      ((((mem_ptr_t)(name)) % 4) == 0)
 
 
-#define LWIP_SOCKOPT_CHECK_OPTLEN(sock, optlen, opttype) do { if ((optlen) < sizeof(opttype)) { done_socket(sock); return EINVAL; }}while(0)
+union lwip_sockopt_value {
+  int integer;
+  struct timeval timeout;
+  struct linger linger;
+  struct ifreq device;
+#if LWIP_IPV4
+  struct ip_mreq membership;
+#endif
+#if LWIP_IPV6
+  struct ipv6_mreq membership6;
+#endif
+};
+
+#define LWIP_SOCKOPT_CHECK_OPTLEN(sock, optlen, opttype) do { \
+  if (option_input && (optlen) < sizeof(opttype)) { \
+    done_socket(sock); return EINVAL; \
+  } \
+  LWIP_ASSERT("option value fits", sizeof(opttype) <= sizeof(option_value)); \
+  option_length = sizeof(opttype); \
+  if (option_input && \
+      uk_nofault_memcpy((char *)&option_value, (const char *)user_value, \
+                        option_length, 0) != option_length) { \
+    done_socket(sock); return EFAULT; \
+  } \
+} while (0)
 #define LWIP_SOCKOPT_CHECK_OPTLEN_CONN(sock, optlen, opttype) do { \
   LWIP_SOCKOPT_CHECK_OPTLEN(sock, optlen, opttype); \
   if ((sock)->conn == NULL) { done_socket(sock); return EINVAL; } }while(0)
@@ -2784,7 +2809,7 @@ lwip_getsockopt(int s, int level, int optname, void *optval, socklen_t *optlen)
     return -1;
   }
 
-  if ((NULL == optval) || (NULL == optlen)) {
+  if (NULL == optlen) {
     sock_set_errno(sock, EFAULT);
     done_socket(sock);
     return -1;
@@ -2897,6 +2922,10 @@ static int
 lwip_getsockopt_impl(int s, int level, int optname, void *optval, socklen_t *optlen)
 {
   int err = 0;
+  const int option_input = 0;
+  union lwip_sockopt_value option_value = {0};
+  size_t option_length = 0;
+  void *user_value = optval;
   struct lwip_sock *sock = tryget_socket(s);
   if (!sock) {
     return EBADF;
@@ -2907,6 +2936,8 @@ lwip_getsockopt_impl(int s, int level, int optname, void *optval, socklen_t *opt
     return err;
   }
 #endif
+
+  optval = &option_value;
 
   switch (level) {
 
@@ -3212,6 +3243,15 @@ lwip_getsockopt_impl(int s, int level, int optname, void *optval, socklen_t *opt
       break;
   } /* switch (level) */
 
+  if (!err) {
+    option_length = LWIP_MIN(option_length, *optlen);
+    if (uk_nofault_memcpy((char *)user_value, (const char *)&option_value,
+                          option_length, 0) != option_length) {
+      err = EFAULT;
+    } else {
+      *optlen = (socklen_t)option_length;
+    }
+  }
   done_socket(sock);
   return err;
 }
@@ -3227,12 +3267,6 @@ lwip_setsockopt(int s, int level, int optname, const void *optval, socklen_t opt
 #endif /* !LWIP_TCPIP_CORE_LOCKING */
 
   if (!sock) {
-    return -1;
-  }
-
-  if (NULL == optval) {
-    sock_set_errno(sock, EFAULT);
-    done_socket(sock);
     return -1;
   }
 
@@ -3318,6 +3352,10 @@ static int
 lwip_setsockopt_impl(int s, int level, int optname, const void *optval, socklen_t optlen)
 {
   int err = 0;
+  const int option_input = 1;
+  union lwip_sockopt_value option_value = {0};
+  size_t option_length = 0;
+  const void *user_value = optval;
   struct lwip_sock *sock = tryget_socket(s);
   if (!sock) {
     return EBADF;
@@ -3328,6 +3366,18 @@ lwip_setsockopt_impl(int s, int level, int optname, const void *optval, socklen_
     return err;
   }
 #endif
+
+  if (level == SOL_SOCKET && optname != SO_BINDTODEVICE) {
+    if (optlen < sizeof(int)) {
+      done_socket(sock);
+      return EINVAL;
+    }
+    if (!uk_nofault_try_read(option_value.integer, user_value)) {
+      done_socket(sock);
+      return EFAULT;
+    }
+  }
+  optval = &option_value;
 
   switch (level) {
 
