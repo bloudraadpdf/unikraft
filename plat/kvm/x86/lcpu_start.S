@@ -287,6 +287,11 @@ END(lcpu_start32)
 .code64
 .section .text.boot.64
 ENTRY(lcpu_start64)
+	/* Direct 64-bit entry must enforce supervisor write protection. */
+	movq	%cr0, %rax
+	orq	$UK_ARCH_X86_64_CR0_WP, %rax
+	movq	%rax, %cr0
+
 	/* Request basic CPU features and APIC ID
 	 * TODO: This APIC ID is limited to 256. Better get from leaf 0x1f
 	 */
