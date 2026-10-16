@@ -11,7 +11,21 @@
 
 #include <uk/file.h>
 
+#define UK_FILE_NOP_OPS(stat_func) { \
+	.read = uk_file_nop_read, \
+	.write = uk_file_nop_write, \
+	.mem = uk_file_nop_mem, \
+	.getstat = (stat_func), \
+	.setstat = uk_file_nop_setstat, \
+	.ctl = uk_file_nop_ctl \
+}
+
 extern const struct uk_file_ops uk_file_nops;
+extern const struct uk_file_ops uk_file_anon_ops;
+
+ssize_t uk_file_anon_noio(const struct uk_file *f,
+			  const struct iovec *iov, size_t iovcnt,
+			  size_t off, long flags);
 
 ssize_t uk_file_nop_read(const struct uk_file *f,
 			 const struct iovec *iov, size_t iovcnt,

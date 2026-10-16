@@ -200,9 +200,9 @@ static ssize_t signal_file_read(const struct uk_file *f,
 
 static const struct uk_file_ops signal_file_ops = {
 	.read = signal_file_read,
-	.write = uk_file_nop_write,
+	.write = uk_file_anon_noio,
 	.mem = uk_file_nop_mem,
-	.getstat = uk_file_nop_getstat,
+	.getstat = uk_file_anon_getstat,
 	.setstat = uk_file_nop_setstat,
 	.ctl = uk_file_nop_ctl
 };
@@ -269,7 +269,7 @@ const struct uk_file *signal_file_create(struct uk_alloc *a,
 #if CONFIG_LIBPOSIX_FDTAB
 static int signalfd_create(const uk_sigset_t *mask, int flags)
 {
-	unsigned int mode = O_RDONLY | UKFD_O_NOSEEK;
+	unsigned int mode = O_RDWR | UKFD_O_NOSEEK;
 	const struct uk_file *sigf;
 	int fd;
 

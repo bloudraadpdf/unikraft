@@ -187,6 +187,15 @@ typedef int (*uk_file_setstat_func)(const struct uk_file *f,
 typedef int (*uk_file_ctl_func)(const struct uk_file *f, int fam, int req,
 				uintptr_t arg1, uintptr_t arg2, uintptr_t arg3);
 
+/* Reopen an anonymous inode with POSIX access flags. Return a counted file
+ * reference or a negative error pointer. The operation must not block.
+ */
+typedef const struct uk_file *(*uk_file_reopen_func)(const struct uk_file *f,
+						  unsigned int mode);
+
+int uk_file_anon_getstat(const struct uk_file *f, unsigned int mask,
+			 struct uk_statx *arg);
+
 /* Destructor */
 /* what - bitwise OR of what to release:
  * UK_FILE_RELEASE_RES - file resources
@@ -204,6 +213,7 @@ struct uk_file_ops {
 	uk_file_getstat_func getstat;
 	uk_file_setstat_func setstat;
 	uk_file_ctl_func ctl;
+	uk_file_reopen_func reopen;
 };
 
 /* File struct */

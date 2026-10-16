@@ -834,7 +834,7 @@ struct uk_fs_path uk_posix_vfs_ofile_name(struct uk_ofile *file)
 	char target[64];
 	int length;
 
-	if (uk_fs_isfs(file->file) && file->destroy == vfs_ofile_destroy &&
+	if (file->destroy == vfs_ofile_destroy &&
 	    file->context)
 		return uk_posix_vfs_path_name(file->context);
 	if (!uk_file_getstat(file->file, UK_STATX_TYPE | UK_STATX_INO,
@@ -1000,6 +1000,7 @@ static struct uk_ofile *vfs_open_file(const struct uk_file *f, unsigned int mode
 	struct uk_ofile *of = NULL;
 	struct uk_vfs_path *identity;
 	struct uk_fs_path name;
+	const struct uk_file *opened = NULL;
 
 	identity = vfs_path_resolve(basedir, path, pathlen, uk_fs_issym(f));
 	if (PTRISERR(identity))
@@ -1013,8 +1014,30 @@ static struct uk_ofile *vfs_open_file(const struct uk_file *f, unsigned int mode
 		of = ERR2PTR(PTR2ERR(name.s));
 		goto out;
 	}
-	if (uk_fs_isfs(f))
+	if (uk_fs_isfs(f)) {
 		mode |= uk_fs_mode_constraints(f);
+	} else {
+		mode |= UKFD_O_NOSEEK;
+		if (f->ops->reopen) {
+			opened = f->ops->reopen(f, mode);
+			if (PTRISERR(opened)) {
+				of = ERR2PTR(PTR2ERR(opened));
+				opened = NULL;
+				goto out_name;
+			}
+			uk_posix_vfs_path_release(identity);
+			identity = vfs_path_get(NULL, opened, name.s, name.len);
+			if (PTRISERR(identity)) {
+				of = ERR2PTR(PTR2ERR(identity));
+				identity = NULL;
+				goto out_name;
+			}
+			f = opened;
+		} else if (!(mode & O_PATH)) {
+			of = ERR2PTR(-ENXIO);
+			goto out_name;
+		}
+	}
 	of = uk_ofile_new(f, mode, name.len);
 	if (of) {
 		memcpy(of->name, name.s, name.len + 1);
@@ -1022,7 +1045,10 @@ static struct uk_ofile *vfs_open_file(const struct uk_file *f, unsigned int mode
 		of->destroy = vfs_ofile_destroy;
 		identity = NULL;
 	}
+out_name:
 	uk_fs_path_release(name);
+	if (opened)
+		uk_file_release(opened);
 out:
 	uk_posix_vfs_path_release(identity);
 	return of ? of : ERR2PTR(-ENOMEM);
@@ -2296,6 +2322,10 @@ static struct uk_ofile *vfs_openat(struct uk_ofile *of, const char *path,
 	}
 
 	/* Check file type & perms */
+	if ((flags & O_DIRECTORY) && !uk_fs_isdir(target)) {
+		ret = ERR2PTR(-ENOTDIR);
+		goto out_targ;
+	}
 	if (!created && !(flags & O_PATH)) {
 		if (uk_fs_isdir(target)) {
 			if (unlikely((flags & O_WRONLY) || (flags & O_RDWR))) {
@@ -2306,9 +2336,6 @@ static struct uk_ofile *vfs_openat(struct uk_ofile *of, const char *path,
 				ret = ERR2PTR(err);
 				goto out_targ;
 			}
-		} else if (unlikely(flags & O_DIRECTORY)) {
-			ret = ERR2PTR(-ENOTDIR);
-			goto out_targ;
 		}
 		if (unlikely(uk_fs_issym(target))) {
 			ret = ERR2PTR(-ELOOP);
@@ -2336,7 +2363,7 @@ out_base:
 		uk_ofile_release(base);
 
 	/* Truncate if success and required */
-	if (!PTRISERR(ret) && (flags & O_TRUNC) &&
+	if (!PTRISERR(ret) && uk_fs_isfs(ret->file) && (flags & O_TRUNC) &&
 	    ((flags & O_WRONLY) || (flags & O_RDWR))) {
 		err = uk_sys_ftruncate(ret, 0);
 		if (unlikely(err)) {

@@ -66,7 +66,7 @@ int uk_sys_ioctl(struct uk_ofile *of, int cmd, void *arg)
 
 static int file_record_lock(struct uk_ofile *of, int cmd, struct flock *flock)
 {
-	struct uk_file_lock_request request = { .file = of->file->state };
+	struct uk_file_lock_request request = { .file = of->file };
 	const int description = cmd == F_OFD_SETLK || cmd == F_OFD_SETLKW || cmd == F_OFD_GETLK;
 	const int query = cmd == F_GETLK || cmd == F_OFD_GETLK;
 	off_t base = 0;
@@ -177,7 +177,7 @@ int uk_sys_fcntl(struct uk_ofile *of, int cmd, unsigned long arg)
 int uk_sys_flock(struct uk_ofile *of, int cmd)
 {
 	struct uk_file_lock_request request = {
-		.file = of->file->state, .owner = of, .kind = UK_FILE_LOCK_FLOCK,
+		.file = of->file, .owner = of, .kind = UK_FILE_LOCK_FLOCK,
 		.start = 0, .end = LLONG_MAX, .pid = -1
 	};
 	if (of->mode & O_PATH)

@@ -5,6 +5,8 @@
  */
 
 #include <errno.h>
+#include <string.h>
+#include <uk/arch/limits.h>
 
 #include <uk/file/nops.h>
 
@@ -53,17 +55,44 @@ int uk_file_nop_ctl(const struct uk_file *f __unused, int fam __unused,
 	return -ENOSYS;
 }
 
-const struct uk_file_ops uk_file_nops = {
-	.read = uk_file_nop_read,
-	.write = uk_file_nop_write,
-	.mem = uk_file_nop_mem,
-	.getstat = uk_file_nop_getstat,
-	.setstat = uk_file_nop_setstat,
-	.ctl = uk_file_nop_ctl
-};
+const struct uk_file_ops uk_file_nops =
+	UK_FILE_NOP_OPS(uk_file_nop_getstat);
 
 void uk_file_static_release(const struct uk_file *f __maybe_unused,
 			    int what __unused)
 {
 	uk_pr_warn("Destructor called on static file: %p\n", f);
 }
+
+ssize_t uk_file_anon_noio(const struct uk_file *file __unused,
+			  const struct iovec *iov __unused,
+			  size_t count __unused, size_t offset __unused,
+			  long flags __unused)
+{
+	return -EINVAL;
+}
+
+int uk_file_anon_getstat(const struct uk_file *file __unused,
+			 unsigned int mask __unused, struct uk_statx *stat)
+{
+	static const char inode;
+
+	memset(stat, 0, sizeof(*stat));
+	stat->stx_mask = UK_STATX_TYPE | UK_STATX_MODE | UK_STATX_NLINK |
+		UK_STATX_UID | UK_STATX_GID | UK_STATX_INO | UK_STATX_SIZE |
+		UK_STATX_BLOCKS;
+	stat->stx_mode = 0600;
+	stat->stx_nlink = 1;
+	stat->stx_ino = (uintptr_t)&inode;
+	stat->stx_blksize = __PAGE_SIZE;
+	return 0;
+}
+
+const struct uk_file_ops uk_file_anon_ops = {
+	.read = uk_file_anon_noio,
+	.write = uk_file_anon_noio,
+	.mem = uk_file_nop_mem,
+	.getstat = uk_file_anon_getstat,
+	.setstat = uk_file_nop_setstat,
+	.ctl = uk_file_nop_ctl
+};

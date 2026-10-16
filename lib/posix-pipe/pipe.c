@@ -11,6 +11,8 @@
 #include <uk/atomic.h>
 #include <uk/alloc.h>
 #include <uk/essentials.h>
+#include <uk/list.h>
+#include <uk/mutex.h>
 #include <uk/file/nops.h>
 #include <uk/file/iovutil.h>
 #include <uk/posix-fd.h>
@@ -20,7 +22,6 @@
 #include <uk/posix-fdtab.h>
 #include <uk/syscall.h>
 #endif /* CONFIG_LIBPOSIX_FDTAB */
-
 
 #define PIPE_SIZE (1L << CONFIG_LIBPOSIX_PIPE_SIZE_ORDER)
 
@@ -59,23 +60,55 @@ struct pipe_node {
 	struct pipe_msg *volatile head;
 	struct pipe_msg *tail;
 	struct pipe_msg *free;
-	unsigned int flags;
+	unsigned int readers;
+	unsigned int writers;
 	struct pipe_msg msgs[PIPE_MSGCOUNT];
 	char buf[PIPE_SIZE];
 };
 
-#define PIPE_HUP    1
-#define PIPE_FIN    2
-
 struct pipe_alloc {
 	struct uk_alloc *alloc;
-	struct uk_file rf;
-	struct uk_file wf;
-	uk_file_refcnt rref;
-	uk_file_refcnt wref;
-	struct uk_file_state fstate;
+	struct uk_mutex lock;
+	struct uk_list_head ends;
+	unsigned int references;
 	struct pipe_node node;
 };
+
+struct pipe_end {
+	struct uk_file file;
+	uk_file_refcnt references;
+	struct uk_file_state state;
+	struct uk_list_head link;
+	unsigned int mode;
+};
+
+static void pipe_events(struct pipe_alloc *pipe)
+{
+	struct pipe_node *node = &pipe->node;
+	struct pipe_end *end;
+	bool writable = !node->head ||
+		(PIPE_SPACE(node->tail->end, node->head->start) &&
+		 (node->tail->next == node->tail || node->free));
+
+	uk_list_for_each_entry(end, &pipe->ends, link) {
+		uk_pollevent events = 0;
+
+		if (!(end->mode & (O_PATH | O_WRONLY))) {
+			if (node->head)
+				events |= UKFD_POLLIN;
+			if (!node->writers)
+				events |= EPOLLHUP;
+		}
+		if (!(end->mode & O_PATH) &&
+		    (end->mode & (O_WRONLY | O_RDWR))) {
+			if (writable)
+				events |= UKFD_POLLOUT;
+			if (!node->readers)
+				events |= EPOLLERR;
+		}
+		uk_file_event_assign(&end->file, events);
+	}
+}
 
 static void pipebuf_iovread(const char *buf, pipeidx head, size_t toread,
 			    const struct iovec *iov, size_t iovcnt)
@@ -136,8 +169,7 @@ static ssize_t pipe_read(const struct uk_file *f,
 	m = d->head;
 	for (;;) {
 		if (!m) {
-			uk_file_event_clear(f, UKFD_POLLIN);
-			if (d->flags & PIPE_HUP)
+			if (!d->writers)
 				return 0;
 			else
 				return -EAGAIN;
@@ -148,7 +180,6 @@ static ssize_t pipe_read(const struct uk_file *f,
 				continue;
 			if (!m->next) {
 				d->tail = NULL;
-				uk_file_event_clear(f, UKFD_POLLIN);
 			}
 
 			start = m->start;
@@ -174,7 +205,6 @@ static ssize_t pipe_read(const struct uk_file *f,
 				while (!uk_compare_exchange_n(&m->start,
 							      &start,
 							      PIPE_SIZE));
-				uk_file_event_clear(f, UKFD_POLLIN);
 
 				canread = MIN(PIPE_USED(start, m->end), toread);
 
@@ -196,7 +226,6 @@ static ssize_t pipe_read(const struct uk_file *f,
 	}
 	UK_ASSERT(canread);
 	pipebuf_iovread(d->buf, start, canread, iov, iovcnt);
-	uk_file_event_set(f, UKFD_POLLOUT);
 
 	return canread;
 }
@@ -212,7 +241,6 @@ static ssize_t pipe_write(const struct uk_file *f,
 	size_t capacity;
 	pipeidx whead;
 	pipeidx wend;
-	int empty = 0;
 
 	UK_ASSERT(f->vol == PIPE_VOLID);
 	if (unlikely(off))
@@ -220,13 +248,13 @@ static ssize_t pipe_write(const struct uk_file *f,
 	if (unlikely(!iov))
 		return -EFAULT;
 
-	d = (struct pipe_node *)f->node;
-	if (unlikely(d->flags & PIPE_HUP))
-		return -EPIPE;
-
 	towrite = uk_iov_len(iov, iovcnt);
 	if (unlikely(!towrite))
 		return 0;
+
+	d = (struct pipe_node *)f->node;
+	if (unlikely(!d->readers))
+		return -EPIPE;
 
 	tail = d->tail;
 	if (!tail || tail->next != tail) { /* Empty or last msg is packet */
@@ -241,7 +269,6 @@ static ssize_t pipe_write(const struct uk_file *f,
 			UK_ASSERT(!d->head);
 			whead = 0;
 			wend = PIPE_SIZE;
-			empty = 1;
 		}
 		capacity = PIPE_SPACE(whead, wend);
 		canwrite = MIN(capacity, towrite);
@@ -275,14 +302,10 @@ static ssize_t pipe_write(const struct uk_file *f,
 	}
 	UK_ASSERT(canwrite);
 	pipebuf_iovwrite(d->buf, whead, canwrite, iov, iovcnt);
-	if (canwrite == capacity)
-		uk_file_event_clear(f, UKFD_POLLOUT);
-	if (empty)
-		uk_file_event_set(f, UKFD_POLLIN);
 	return canwrite;
 
 out_full:
-	uk_file_event_clear(f, UKFD_POLLOUT);
+
 	return -EAGAIN;
 }
 
@@ -290,6 +313,7 @@ static int pipe_getstat(const struct uk_file *f, unsigned mask __unused,
 			struct uk_statx *arg)
 {
 	/* All data is immediately available, ignore mask */
+	memset(arg, 0, sizeof(*arg));
 	arg->stx_mask = UK_STATX_TYPE | UK_STATX_MODE | UK_STATX_INO;
 	arg->stx_blksize = 1;
 	arg->stx_mode = S_IFIFO | 0600;
@@ -297,97 +321,150 @@ static int pipe_getstat(const struct uk_file *f, unsigned mask __unused,
 	return 0;
 }
 
-static const struct uk_file_ops rpipe_ops = {
-	.read = pipe_read,
-	.write = uk_file_nop_write,
-	.mem = uk_file_nop_mem,
-	.getstat = pipe_getstat,
-	.setstat = uk_file_nop_setstat,
-	.ctl = uk_file_nop_ctl
-};
-
-static const struct uk_file_ops wpipe_ops = {
-	.read = uk_file_nop_read,
-	.write = pipe_write,
-	.mem = uk_file_nop_mem,
-	.getstat = pipe_getstat,
-	.setstat = uk_file_nop_setstat,
-	.ctl = uk_file_nop_ctl
-};
-
-
-static void pipe_release(const struct uk_file *f, int what)
+static struct pipe_alloc *pipe_from_file(const struct uk_file *file)
 {
-	struct pipe_node *d;
-
-	UK_ASSERT(f->vol == PIPE_VOLID);
-	d = (struct pipe_node *)f->node;
-	if (what & UK_FILE_RELEASE_RES) {
-		/* Atomically set the HUP flag */
-		uk_or(&d->flags, PIPE_HUP);
-		/* If was already set, we can free node */
-		/* Update w/ EPOLL(HUP|IN) for read & EPOLLERR for write */
-		uk_file_event_set(f, EPOLLHUP|EPOLLIN|EPOLLERR);
-	}
-	if (what & UK_FILE_RELEASE_OBJ) {
-		/* Atomically set the FIN flag */
-		if (uk_or(&d->flags, PIPE_FIN) & PIPE_FIN) {
-			/* If was already set, we free everything */
-			struct pipe_alloc *al = __containerof(f->state,
-							      struct pipe_alloc,
-							      fstate);
-
-			uk_free(al->alloc, al);
-		}
-	}
+	return __containerof((struct pipe_node *)file->node,
+			     struct pipe_alloc, node);
 }
 
+static ssize_t pipe_io(const struct uk_file *file,
+		       const struct iovec *iov, size_t count, size_t off,
+		       long flags, bool write)
+{
+	struct pipe_alloc *pipe = pipe_from_file(file);
+	const struct pipe_end *end = __containerof(file, struct pipe_end, file);
+	ssize_t result;
 
-/* File creation */
+	if ((end->mode & O_PATH) ||
+	    (write ? !(end->mode & (O_WRONLY | O_RDWR)) :
+		     !!(end->mode & O_WRONLY)))
+		return -EBADF;
+	uk_mutex_lock(&pipe->lock);
+	result = write ? pipe_write(file, iov, count, off, flags) :
+			 pipe_read(file, iov, count, off, flags);
+	pipe_events(pipe);
+	uk_mutex_unlock(&pipe->lock);
+	return result;
+}
+
+static ssize_t pipe_read_end(const struct uk_file *file,
+			     const struct iovec *iov, size_t count,
+			     size_t off, long flags)
+{
+	return pipe_io(file, iov, count, off, flags, false);
+}
+
+static ssize_t pipe_write_end(const struct uk_file *file,
+			      const struct iovec *iov, size_t count,
+			      size_t off, long flags)
+{
+	return pipe_io(file, iov, count, off, flags, true);
+}
+
+static const struct uk_file *pipe_reopen(const struct uk_file *file,
+					 unsigned int mode);
+
+static const struct uk_file_ops pipe_ops = {
+	.read = pipe_read_end,
+	.write = pipe_write_end,
+	.mem = uk_file_nop_mem,
+	.getstat = pipe_getstat,
+	.setstat = uk_file_nop_setstat,
+	.ctl = uk_file_nop_ctl,
+	.reopen = pipe_reopen
+};
+
+static void pipe_release(const struct uk_file *file, int what)
+{
+	struct pipe_alloc *pipe = pipe_from_file(file);
+	struct pipe_end *end = __containerof(file, struct pipe_end, file);
+	bool last = false;
+
+	uk_mutex_lock(&pipe->lock);
+	if (what & UK_FILE_RELEASE_RES) {
+		uk_list_del(&end->link);
+		if (!(end->mode & O_PATH)) {
+			if (!(end->mode & O_WRONLY))
+				pipe->node.readers--;
+			if (end->mode & (O_WRONLY | O_RDWR))
+				pipe->node.writers--;
+		}
+		pipe_events(pipe);
+	}
+	if (what & UK_FILE_RELEASE_OBJ)
+		last = !--pipe->references;
+	uk_mutex_unlock(&pipe->lock);
+	if (what & UK_FILE_RELEASE_OBJ)
+		uk_free(pipe->alloc, end);
+	if (last)
+		uk_free(pipe->alloc, pipe);
+}
+
+static struct pipe_end *pipe_open(struct pipe_alloc *pipe, unsigned int mode)
+{
+	struct pipe_end *end = uk_malloc(pipe->alloc, sizeof(*end));
+
+	if (!end)
+		return NULL;
+	end->references = UK_FILE_REFCNT_INIT_VALUE(end->references);
+	end->state = UK_FILE_STATE_INIT_VALUE(end->state);
+	end->mode = mode;
+	end->file = (struct uk_file){
+		.vol = PIPE_VOLID,
+		.node = &pipe->node,
+		.refcnt = &end->references,
+		.state = &end->state,
+		.ops = &pipe_ops,
+		._release = pipe_release
+	};
+	uk_mutex_lock(&pipe->lock);
+	pipe->references++;
+	if (!(mode & O_PATH)) {
+		if (!(mode & O_WRONLY))
+			pipe->node.readers++;
+		if (mode & (O_WRONLY | O_RDWR))
+			pipe->node.writers++;
+	}
+	uk_list_add_tail(&end->link, &pipe->ends);
+	pipe_events(pipe);
+	uk_mutex_unlock(&pipe->lock);
+	return end;
+}
+
+static const struct uk_file *pipe_reopen(const struct uk_file *file,
+					 unsigned int mode)
+{
+	struct pipe_end *end = pipe_open(pipe_from_file(file), mode);
+
+	return end ? &end->file : ERR2PTR(-ENOMEM);
+}
 
 int uk_pipefile_create(struct uk_file *pipes[2])
 {
-	struct uk_alloc *a;
-	struct pipe_alloc *al;
+	struct uk_alloc *allocator = uk_alloc_get_default();
+	struct pipe_alloc *pipe = uk_zalloc(allocator, sizeof(*pipe));
+	struct pipe_end *reader, *writer;
 
-	a = uk_alloc_get_default();
-	al = uk_malloc(a, sizeof(*al));
-	if (unlikely(!al))
+	if (!pipe)
 		return -ENOMEM;
-
-	al->alloc = a;
-
-	al->node.head = NULL;
-	al->node.tail = NULL;
-	al->node.flags = 0;
-	al->node.free = &al->node.msgs[0];
+	pipe->alloc = allocator;
+	uk_mutex_init(&pipe->lock);
+	UK_INIT_LIST_HEAD(&pipe->ends);
+	pipe->node.free = &pipe->node.msgs[0];
 	for (int i = 0; i < PIPE_MSGCOUNT - 1; i++)
-		al->node.msgs[i].next = &al->node.msgs[i + 1];
-	al->node.msgs[PIPE_MSGCOUNT - 1].next = NULL;
-
-	al->fstate = UK_FILE_STATE_INIT_VALUE(al->fstate);
-	al->rref = UK_FILE_REFCNT_INIT_VALUE(al->rref);
-	al->wref = UK_FILE_REFCNT_INIT_VALUE(al->wref);
-	al->rf = (struct uk_file){
-		.vol = PIPE_VOLID,
-		.node = &al->node,
-		.refcnt = &al->rref,
-		.state = &al->fstate,
-		.ops = &rpipe_ops,
-		._release = pipe_release
-	};
-	al->wf = (struct uk_file){
-		.vol = PIPE_VOLID,
-		.node = &al->node,
-		.refcnt = &al->wref,
-		.state = &al->fstate,
-		.ops = &wpipe_ops,
-		._release = pipe_release
-	};
-	uk_file_event_set(&al->wf, UKFD_POLLOUT);
-
-	pipes[0] = &al->rf;
-	pipes[1] = &al->wf;
+		pipe->node.msgs[i].next = &pipe->node.msgs[i + 1];
+	reader = pipe_open(pipe, O_RDONLY);
+	if (!reader) {
+		uk_free(allocator, pipe);
+		return -ENOMEM;
+	}
+	writer = pipe_open(pipe, O_WRONLY);
+	if (!writer) {
+		uk_file_release(&reader->file);
+		return -ENOMEM;
+	}
+	pipes[0] = &reader->file;
+	pipes[1] = &writer->file;
 	return 0;
 }
 

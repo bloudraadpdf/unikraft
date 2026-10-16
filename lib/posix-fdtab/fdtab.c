@@ -161,7 +161,7 @@ static void file_close(struct uk_fdtab *tab, struct fdval value)
 #if CONFIG_LIBVFSCORE
 	if (!(value.flags & UK_FDTAB_VFSCORE))
 #endif
-		uk_file_lock_release(((struct uk_ofile *)value.p)->file->state,
+		uk_file_lock_release(((struct uk_ofile *)value.p)->file,
 				     tab, UK_FILE_LOCK_PROCESS);
 	file_rel(value.p, value.flags);
 }

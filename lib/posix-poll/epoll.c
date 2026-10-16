@@ -462,7 +462,7 @@ struct uk_file *uk_epollfile_create(void)
 		.node = &al->list,
 		.refcnt = &al->frefcnt,
 		.state = &al->fstate,
-		.ops = &uk_file_nops,
+		.ops = &uk_file_anon_ops,
 		._release = epoll_release
 	};
 	/* ret */
@@ -484,7 +484,7 @@ int uk_sys_epoll_create(int flags)
 	if (unlikely(!f))
 		return -ENOMEM;
 
-	mode = O_RDONLY|UKFD_O_NOSEEK;
+	mode = O_RDWR | UKFD_O_NOSEEK;
 	if (flags & EPOLL_CLOEXEC)
 		mode |= O_CLOEXEC;
 

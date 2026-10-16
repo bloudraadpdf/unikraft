@@ -121,6 +121,8 @@ static struct uk_fs_path path_name_locked(struct uk_vfs_path *path,
 	size_t length = 0, offset;
 	char *buffer;
 
+	if (!uk_fs_isfs(path->file))
+		return uk_fs_path_copy(path->name, path->length, allocator);
 	for (position = path; position->parent; position = position->parent) {
 		if (position->length >= PATH_MAX ||
 		    length > PATH_MAX - position->length - 1)
@@ -198,6 +200,8 @@ struct uk_vfs_path *vfs_path_find(const struct uk_file *file,
 		}
 	}
 	uk_mutex_unlock(&path_lock);
+	if (!found && !uk_fs_isfs(file))
+		return vfs_path_get(NULL, file, name->s, name->len);
 	return found ? found : ERR2PTR(-ENOENT);
 }
 

@@ -23,10 +23,19 @@ static struct uk_waitq lock_waitq = UK_WAIT_QUEUE_INITIALIZER(lock_waitq);
 static struct file_lock *held;
 static struct lock_waiter *waiting;
 
-static int same_owner(const struct uk_file_lock_request *a,
-                      const struct uk_file_lock_request *b)
+static int same_file(const struct uk_file *a, const struct uk_file *b)
 {
-    return a->file == b->file && a->kind == b->kind && a->owner == b->owner;
+	if (a->ops->getstat == uk_file_anon_getstat &&
+	    b->ops->getstat == uk_file_anon_getstat)
+		return 1;
+	return a->vol == b->vol && a->node == b->node;
+}
+
+static int same_owner(const struct uk_file_lock_request *a,
+		      const struct uk_file_lock_request *b)
+{
+	return same_file(a->file, b->file) && a->kind == b->kind &&
+		a->owner == b->owner;
 }
 
 static int overlaps(const struct uk_file_lock_request *a,
@@ -36,11 +45,12 @@ static int overlaps(const struct uk_file_lock_request *a,
 }
 
 static int conflicts(const struct uk_file_lock_request *a,
-                     const struct uk_file_lock_request *b)
+		     const struct uk_file_lock_request *b)
 {
-    return a->file == b->file && !same_owner(a, b) &&
-        (a->kind == UK_FILE_LOCK_FLOCK) == (b->kind == UK_FILE_LOCK_FLOCK) &&
-        (a->type == F_WRLCK || b->type == F_WRLCK) && overlaps(a, b);
+	return same_file(a->file, b->file) && !same_owner(a, b) &&
+		(a->kind == UK_FILE_LOCK_FLOCK) ==
+		(b->kind == UK_FILE_LOCK_FLOCK) &&
+		(a->type == F_WRLCK || b->type == F_WRLCK) && overlaps(a, b);
 }
 
 static struct file_lock *find_conflict(const struct uk_file_lock_request *request)
@@ -51,28 +61,32 @@ static struct file_lock *find_conflict(const struct uk_file_lock_request *reques
     return NULL;
 }
 
-static void remove_owner(struct uk_file_state *file, const void *owner,
-                         enum uk_file_lock_kind kind)
+static void remove_owner(const struct uk_file *file, const void *owner,
+			 enum uk_file_lock_kind kind)
 {
-    struct file_lock **entry = &held;
-    while (*entry) {
-        struct file_lock *lock = *entry;
-        if (lock->value.file == file && lock->value.owner == owner && lock->value.kind == kind) {
-            *entry = lock->next;
-            uk_free(uk_alloc_get_default(), lock);
-        } else {
-            entry = &lock->next;
-        }
-    }
-    uk_waitq_wake_up(&lock_waitq);
+	struct file_lock **entry = &held;
+
+	while (*entry) {
+		struct file_lock *lock = *entry;
+
+		if (same_file(lock->value.file, file) &&
+		    lock->value.owner == owner &&
+		    lock->value.kind == kind) {
+			*entry = lock->next;
+			uk_free(uk_alloc_get_default(), lock);
+		} else {
+			entry = &lock->next;
+		}
+	}
+	uk_waitq_wake_up(&lock_waitq);
 }
 
-void uk_file_lock_release(struct uk_file_state *file, const void *owner,
-                          enum uk_file_lock_kind kind)
+void uk_file_lock_release(const struct uk_file *file, const void *owner,
+			  enum uk_file_lock_kind kind)
 {
-    uk_mutex_lock(&lock_mutex);
-    remove_owner(file, owner, kind);
-    uk_mutex_unlock(&lock_mutex);
+	uk_mutex_lock(&lock_mutex);
+	remove_owner(file, owner, kind);
+	uk_mutex_unlock(&lock_mutex);
 }
 
 static int replace_range(const struct uk_file_lock_request *request)

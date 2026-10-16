@@ -163,8 +163,8 @@ void uk_ofile_release(struct uk_ofile *of)
 	const int last_ref = uk_refcount_release(&of->refcnt);
 
 	if (unlikely(last_ref)) {
-		uk_file_lock_release(of->file->state, of, UK_FILE_LOCK_DESCRIPTION);
-		uk_file_lock_release(of->file->state, of, UK_FILE_LOCK_FLOCK);
+		uk_file_lock_release(of->file, of, UK_FILE_LOCK_DESCRIPTION);
+		uk_file_lock_release(of->file, of, UK_FILE_LOCK_FLOCK);
 		uk_file_release(of->file);
 		uk_ofile_free(of);
 	}

@@ -213,9 +213,9 @@ static void timerfd_release(const struct uk_file *f, int what)
 
 static const struct uk_file_ops timerfd_ops = {
 	.read = timerfd_read,
-	.write = uk_file_nop_write,
+	.write = uk_file_anon_noio,
 	.mem = uk_file_nop_mem,
-	.getstat = uk_file_nop_getstat,
+	.getstat = uk_file_anon_getstat,
 	.setstat = uk_file_nop_setstat,
 	.ctl = uk_file_nop_ctl
 };
@@ -291,7 +291,7 @@ int uk_sys_timerfd_create(clockid_t id, int flags)
 {
 	int ret;
 	struct uk_file *timerf;
-	unsigned int mode = O_RDONLY|UKFD_O_NOSEEK;
+	unsigned int mode = O_RDWR | UKFD_O_NOSEEK;
 
 	/* Get file */
 	timerf = uk_timerfile_create(id);
