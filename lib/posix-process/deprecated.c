@@ -317,94 +317,6 @@ UK_SYSCALL_R_DEFINE(int, prctl, int, option,
 	return -EINVAL;
 }
 
-int uk_sys_prlimit64(int pid, unsigned int resource,
-		     struct rlimit *new_limit, struct rlimit *old_limit)
-{
-	if (unlikely(pid != 0))
-		uk_pr_debug("Do not support prlimit64 on PID %u, use current process\n",
-			    pid);
-
-	/*
-	 * Lookup if resource can be set/retrieved
-	 */
-	switch (resource) {
-	case RLIMIT_DATA:
-	case RLIMIT_STACK:
-	case RLIMIT_AS:
-		break;
-#if CONFIG_LIBPOSIX_FDTAB
-	case RLIMIT_NOFILE:
-		break;
-#endif
-	default:
-		uk_pr_err("Unsupported resource %u\n",
-			  resource);
-		return -EINVAL;
-	}
-
-	/*
-	 * Set resource
-	 */
-	if (new_limit) {
-		switch (resource) {
-		default:
-			uk_pr_err("Ignore updating resource %u: cur = %llu, max = %llu\n",
-				  resource,
-				  (unsigned long long) new_limit->rlim_cur,
-				  (unsigned long long) new_limit->rlim_max);
-			break;
-		}
-	}
-
-	/*
-	 * Get resource
-	 */
-	if (!old_limit)
-		return 0;
-	switch (resource) {
-	case RLIMIT_STACK:
-		old_limit->rlim_cur = __STACK_SIZE;
-		old_limit->rlim_max = __STACK_SIZE;
-		break;
-	case RLIMIT_AS:
-		old_limit->rlim_cur = RLIM_INFINITY;
-		old_limit->rlim_max = RLIM_INFINITY;
-		break;
-
-#if CONFIG_LIBPOSIX_FDTAB
-	case RLIMIT_NOFILE:
-		old_limit->rlim_cur = CONFIG_LIBPOSIX_FDTAB_MAXFDS;
-		old_limit->rlim_max = CONFIG_LIBPOSIX_FDTAB_MAXFDS;
-		break;
-#endif
-
-	default:
-		break;
-	}
-
-	uk_pr_debug("Resource %u: cur = %llu, max = %llu\n",
-		    resource,
-		    (unsigned long long) old_limit->rlim_cur,
-		    (unsigned long long) old_limit->rlim_max);
-	return 0;
-}
-
-UK_LLSYSCALL_R_DEFINE(int, prlimit64, int, pid, unsigned int, resource,
-		      struct rlimit *, new_limit, struct rlimit *, old_limit)
-{
-	return uk_sys_prlimit64(pid, resource, new_limit, old_limit);
-}
-
-UK_SYSCALL_R_DEFINE(int, getrlimit, int, resource, struct rlimit *, rlim)
-{
-	return uk_sys_getrlimit(resource, rlim);
-}
-
-UK_SYSCALL_R_DEFINE(int, setrlimit, int, resource, const struct rlimit *, rlim)
-{
-	return uk_sys_setrlimit(resource, rlim);
-}
-
 UK_SYSCALL_R_DEFINE(int, getrusage, int, who,
 		    struct rusage *, usage)
 {
@@ -414,12 +326,3 @@ UK_SYSCALL_R_DEFINE(int, getrusage, int, who,
 	memset(usage, 0, sizeof(*usage));
 	return 0;
 }
-
-#if UK_LIBC_SYSCALLS
-int prlimit(pid_t pid __unused, int resource, const struct rlimit *new_limit,
-	    struct rlimit *old_limit)
-{
-	return uk_syscall_e_prlimit64(0, (long) resource,
-				      (long) new_limit, (long) old_limit);
-}
-#endif /* UK_LIBC_SYSCALLS */

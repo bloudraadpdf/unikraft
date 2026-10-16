@@ -290,6 +290,13 @@ struct posix_process *pprocess_create(struct uk_alloc *a,
 	UK_INIT_LIST_HEAD(&pprocess->children);
 
 	pprocess->state = POSIX_PROCESS_RUNNING;
+#if CONFIG_LIBPOSIX_FDTAB
+	uk_mutex_lock(&pprocess_mutex);
+	pprocess->nofile_limit = parent_pprocess ? parent_pprocess->nofile_limit :
+		(struct rlimit) { CONFIG_LIBPOSIX_FDTAB_MAXFDS,
+				  CONFIG_LIBPOSIX_FDTAB_MAXFDS };
+	uk_mutex_unlock(&pprocess_mutex);
+#endif
 
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 	ret = pprocess_signal_pdesc_alloc(pprocess);

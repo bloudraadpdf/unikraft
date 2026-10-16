@@ -2,6 +2,7 @@ menuconfig LIBPOSIX_PROCESS
 	bool "posix-process: Process-related functions"
 	select LIBNOLIBC if !HAVE_LIBC
 	select LIBUKLCPU
+	select LIBUKNOFAULT
 
 if LIBPOSIX_PROCESS
 

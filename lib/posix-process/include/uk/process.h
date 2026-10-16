@@ -35,6 +35,7 @@
 #define __UK_PROCESS_H__
 
 #include <stdbool.h>
+#include <errno.h>
 
 #include <stddef.h> /* NULL */
 #include <sys/resource.h>
@@ -53,18 +54,21 @@
 #endif /* CONFIG_LIBPOSIX_PROCESS_MULTITHREADING  */
 
 int uk_sys_prlimit64(int pid, unsigned int resource,
-		     struct rlimit *new_limit, struct rlimit *old_limit);
+		     const struct rlimit *new_limit, struct rlimit *old_limit);
 
 static inline int uk_sys_getrlimit(int resource, struct rlimit *rlim)
 {
-	return uk_sys_prlimit64(0, resource, NULL, rlim);
+	return rlim ? uk_sys_prlimit64(0, resource, NULL, rlim) : -EFAULT;
 }
 
 static inline int uk_sys_setrlimit(int resource, const struct rlimit *rlim)
 {
-	return uk_sys_prlimit64(0, resource,
-				DECONST(struct rlimit *, rlim), NULL);
+	return rlim ? uk_sys_prlimit64(0, resource, rlim, NULL) : -EFAULT;
 }
+
+#if CONFIG_LIBPOSIX_FDTAB
+unsigned int uk_posix_nofile_limit(void);
+#endif
 
 pid_t uk_sys_gettid(void);
 pid_t uk_sys_getppid(void);

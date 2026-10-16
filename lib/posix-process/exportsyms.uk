@@ -65,3 +65,4 @@ uk_posix_signal_wait_end
 uk_posix_signal_file_poll_register
 uk_posix_signal_file_poll_unregister
 uk_posix_process_exit_requested
+uk_posix_nofile_limit

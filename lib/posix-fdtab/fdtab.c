@@ -28,9 +28,9 @@
 #include <uk/posix-fdtab-legacy.h>
 #endif /* CONFIG_LIBPOSIX_FDTAB_LEGACY_SHIM */
 
-#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+#if CONFIG_LIBPOSIX_PROCESS
 #include <uk/process.h>
-#endif /* CONFIG_LIBPOSIX_PROCESS_MULTITHREADING */
+#endif /* CONFIG_LIBPOSIX_PROCESS */
 
 #if CONFIG_LIBPOSIX_PROCESS_EXECVE
 #include <uk/event.h>
@@ -163,6 +163,25 @@ static void file_close(struct uk_fdtab *tab, struct fdval value)
 	file_rel(value.p, value.flags);
 }
 
+static unsigned int fdtab_limit(void)
+{
+#if CONFIG_LIBPOSIX_PROCESS
+	return uk_posix_nofile_limit();
+#else
+	return UK_FDTAB_SIZE;
+#endif
+}
+
+static int fdtab_put(const void *entry, int min)
+{
+	struct uk_fmap map = active_fdtab->fmap;
+	int fd;
+
+	map.bmap.size = fdtab_limit();
+	fd = uk_fmap_put(&map, entry, min);
+	return fd < (int)map.bmap.size ? fd : -EMFILE;
+}
+
 /* Ops */
 
 int uk_fdtab_open_desc(struct uk_ofile *of, unsigned int mode)
@@ -171,9 +190,7 @@ int uk_fdtab_open_desc(struct uk_ofile *of, unsigned int mode)
 	const void *entry = fdtab_encode(of,
 		(mode & O_CLOEXEC) ? UK_FDTAB_CLOEXEC : 0);
 
-	fd = uk_fmap_put(&active_fdtab->fmap, entry, 0);
-	if (unlikely(fd >= UK_FDTAB_SIZE))
-		return -ENFILE;
+	fd = fdtab_put(entry, 0);
 	return fd;
 }
 
@@ -256,14 +273,14 @@ int uk_fdtab_legacy_open(struct vfscore_file *vf)
 
 	fhold(vf);
 	entry = fdtab_encode(vf, UK_FDTAB_VFSCORE);
-	fd = uk_fmap_put(&active_fdtab->fmap, entry, 0);
-	if (fd >= UK_FDTAB_SIZE)
+	fd = fdtab_put(entry, 0);
+	if (fd < 0)
 		goto err_out;
 	vf->fd = fd;
 	return fd;
 err_out:
 	fdrop(vf);
-	return -ENFILE;
+	return fd;
 }
 
 struct vfscore_file *uk_fdtab_legacy_get(int fd)
@@ -586,7 +603,7 @@ int uk_sys_dup3(int oldfd, int newfd, int flags)
 	if (oldfd == newfd)
 		return -EINVAL;
 	if (oldfd < 0 || oldfd >= UK_FDTAB_SIZE ||
-	    newfd < 0 || newfd >= UK_FDTAB_SIZE)
+	    newfd < 0 || (unsigned int)newfd >= fdtab_limit())
 		return -EBADF;
 	if (flags & ~O_CLOEXEC)
 		return -EINVAL;
@@ -620,7 +637,7 @@ int uk_sys_dup2(int oldfd, int newfd)
 		return uk_sys_dup3(oldfd, newfd, 0);
 }
 
-int uk_sys_dup_min(int oldfd, int min, int flags)
+static int fdtab_dup(int oldfd, int min, int flags, bool check_min)
 {
 	struct fdval dup;
 	const void *newent;
@@ -634,21 +651,30 @@ int uk_sys_dup_min(int oldfd, int min, int flags)
 	dup = _fdtab_get(active_fdtab, oldfd);
 	if (!dup.p)
 		return -EBADF;
+	if (check_min && (min < 0 || (unsigned int)min >= fdtab_limit())) {
+		file_rel(dup.p, dup.flags);
+		return -EINVAL;
+	}
 	dup.flags &= ~UK_FDTAB_CLOEXEC;
 	dup.flags |= flags ? UK_FDTAB_CLOEXEC : 0;
 
 	newent = fdtab_encode(dup.p, dup.flags);
-	fd = uk_fmap_put(&active_fdtab->fmap, newent, min);
-	if (fd >= UK_FDTAB_SIZE) {
+	fd = fdtab_put(newent, min);
+	if (fd < 0) {
 		file_rel(dup.p, dup.flags);
-		return -ENFILE;
+		return fd;
 	}
 	return fd;
 }
 
+int uk_sys_dup_min(int oldfd, int min, int flags)
+{
+	return fdtab_dup(oldfd, min, flags, true);
+}
+
 int uk_sys_dup(int oldfd)
 {
-	return uk_sys_dup_min(oldfd, 0, 0);
+	return fdtab_dup(oldfd, 0, 0, false);
 }
 
 /* Userspace Syscalls */

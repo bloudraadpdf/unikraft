@@ -82,6 +82,9 @@ struct posix_process {
 	struct uk_list_head threads;
 	struct uk_alloc *_a;
 	struct posix_vm_context *vm_context;
+#if CONFIG_LIBPOSIX_FDTAB
+	struct rlimit nofile_limit;
+#endif
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 	struct uk_signal_pdesc *signal;
 #endif /* CONFIG_LIBPOSIX_PROCESS_SIGNAL */
