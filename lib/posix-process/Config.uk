@@ -110,10 +110,17 @@ config LIBPOSIX_PROCESS_SYSV_IPC
 
 config LIBPOSIX_PROCESS_SYSV_SHM
 	bool "System V shared memory"
+	depends on ARCH_X86_64 || ARCH_ARM_64
 	depends on LIBPOSIX_PROCESS_MULTITHREADING && LIBPOSIX_FDIO_VMA_COPY
 	select LIBPOSIX_PROCESS_SYSV_IPC
 	select LIBUKFS_RAMFS
 	select LIBPOSIX_FD_HEAPOFD
+
+config LIBPOSIX_PROCESS_SYSV_SEM
+	bool "System V semaphores"
+	depends on ARCH_X86_64 || ARCH_ARM_64
+	depends on LIBPOSIX_PROCESS_SIGNAL
+	select LIBPOSIX_PROCESS_SYSV_IPC
 
 config LIBPOSIX_PROCESS_DEBUG
 	bool "Enable debug messages"

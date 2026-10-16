@@ -137,7 +137,15 @@ anonymous RAMfs backing and distinct shared mappings. Mapping lifetime
 callbacks track splits, partial unmaps, protection changes and final removal.
 VM-context release detaches mappings on exec and exit. It receives the
 exiting PID explicitly because cleanup can run on a kernel thread.
-Tokoloshe's shared-memory and mapping probes pass all eight library/linking
-combinations per architecture, including a spawned child's attachment,
+Tokoloshe's shared-memory and mapping probes pass eight checks per architecture across
+both libraries and linking modes, including a spawned child's attachment,
 implicit exit cleanup, delayed removal and stale-ID rejection. Huge-page
 segments return `EOPNOTSUPP`; the allocator has no huge-page pool.
+
+`CONFIG_LIBPOSIX_PROCESS_SYSV_SEM` provides semaphore sets, atomic operation
+arrays, timed waits and signal interruption. `CLONE_SYSVSEM` shares a
+reference-counted undo list. Exec retains it; final thread exit applies its
+adjustments. `SETVAL` and `SETALL` clear adjustments, and removal wakes
+waiters with `EIDRM`. The Tokoloshe semaphore probe passes with both
+libraries and linking modes on AMD64 and ARM64. Robust-owner and shared
+memory regressions also pass on both architectures.
