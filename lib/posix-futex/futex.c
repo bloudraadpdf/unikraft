@@ -64,6 +64,7 @@
 #include <uk/spinlock.h>
 #include <uk/lcpu.h>
 #include <uk/plat/time.h>
+#include <uk/posix-time.h>
 
 /** @struct uk_futex
  *  @brief Futex structure.
@@ -111,6 +112,11 @@ static int futex_wait(uint32_t *uaddr, uint32_t val, const __nsec *timeout)
 		uk_spin_unlock(&futex_list_lock);
 		uk_lcpu_restore_irqf(irqf);
 		return -EAGAIN;
+	}
+	if (timeout && *timeout <= ukplat_monotonic_clock()) {
+		uk_spin_unlock(&futex_list_lock);
+		uk_lcpu_restore_irqf(irqf);
+		return -ETIMEDOUT;
 	}
 	uk_list_add_tail(&f.list_node, &futex_list);
 
@@ -266,6 +272,40 @@ static int futex_cmp_requeue(uint32_t *uaddr, uint32_t val, uint32_t val2,
 	return woken_uaddr1 + waiters_uaddr2;
 }
 
+static int futex_deadline(const struct timespec *timeout, int cmd,
+			  int flags, __nsec *deadline)
+{
+	struct timespec clock;
+	__nsec target;
+	__nsec now = ukplat_monotonic_clock();
+	__nsec duration;
+	int ret;
+
+	if (timeout->tv_sec < 0 || timeout->tv_nsec < 0 ||
+	    timeout->tv_nsec >= UKARCH_NSEC_PER_SEC)
+		return -EINVAL;
+	if ((__u64)timeout->tv_sec >
+	    (INT64_MAX - timeout->tv_nsec) / UKARCH_NSEC_PER_SEC)
+		target = INT64_MAX;
+	else
+		target = ukarch_time_sec_to_nsec(timeout->tv_sec) +
+			timeout->tv_nsec;
+	if (cmd == FUTEX_WAIT_BITSET) {
+		if (!(flags & FUTEX_CLOCK_REALTIME)) {
+			*deadline = target;
+			return 0;
+		}
+		ret = uk_sys_clock_gettime(CLOCK_REALTIME, &clock);
+		if (ret)
+			return ret;
+		duration = ukarch_time_sec_to_nsec(clock.tv_sec) +
+			clock.tv_nsec;
+		target = target > duration ? target - duration : 0;
+	}
+	*deadline = target > INT64_MAX - now ? INT64_MAX : now + target;
+	return 0;
+}
+
 /**
  * According to man pages, there exists no libc wrapper for futex
  *
@@ -286,7 +326,8 @@ UK_LLSYSCALL_R_DEFINE(int, futex, uint32_t *, uaddr, int, futex_op,
 		      uint32_t *, uaddr2, uint32_t, val3)
 {
 	__nsec timeout_ns;
- 	int cmd = futex_op & FUTEX_CMD_MASK;
+	int cmd = futex_op & FUTEX_CMD_MASK;
+	int ret;
 
 	/* Reject invalid combinations of the realtime clock flag */
 	if (futex_op & FUTEX_CLOCK_REALTIME && !(
@@ -296,22 +337,13 @@ UK_LLSYSCALL_R_DEFINE(int, futex, uint32_t *, uaddr, int, futex_op,
 		cmd == FUTEX_WAIT_REQUEUE_PI))
 		return -ENOSYS;
 
-	/*
-	 * N.B. CLOCK_(MONOTONIC|REALTIME|...) are at the moment all the same in
-	 * Unikraft. Therefore, we can just use CLOCK_MONOTONIC for timeouts in
-	 * the following code.
-	 */
+	if (timeout && (cmd == FUTEX_WAIT || cmd == FUTEX_WAIT_BITSET)) {
+		ret = futex_deadline(timeout, cmd, futex_op, &timeout_ns);
+		if (ret)
+			return ret;
+	}
 	switch (cmd) {
 	case FUTEX_WAIT:
-		/*
-		 * `timeout` is relative to "now" (whenever that is). To
-		 * simplify the implementation regarding overflows, we will only
-		 * honor the nanosecond part of the timespec.
-		 */
-		if (timeout)
-			timeout_ns = ukplat_monotonic_clock() +
-				     ukarch_time_sec_to_nsec(timeout->tv_sec) +
-				     timeout->tv_nsec;
 		return futex_wait(uaddr, val, timeout ? &timeout_ns : NULL);
 
 	case FUTEX_WAIT_BITSET:
@@ -322,10 +354,6 @@ UK_LLSYSCALL_R_DEFINE(int, futex, uint32_t *, uaddr, int, futex_op,
 		 */
 		if (val3 != UINT32_MAX)
 			return -ENOSYS;
-
-		if (timeout)
-			timeout_ns = ukarch_time_sec_to_nsec(timeout->tv_sec)
-				     + timeout->tv_nsec;
 
 		return futex_wait(uaddr, val, timeout ? &timeout_ns : NULL);
 

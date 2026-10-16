@@ -5,6 +5,7 @@ menuconfig LIBPOSIX_FUTEX
 	select LIBUKLOCK
 	select LIBUKDEBUG
 	select LIBUKLCPU
+	select LIBPOSIX_TIME
 	default n
 	help
 		Linux-compatible futex calls
