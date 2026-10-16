@@ -20,4 +20,9 @@ config LIBUKFILE_FINALIZERS
 config LIBUKFILE_POLLED
 	bool
 
+config LIBUKFILE_TEST
+	bool "Enable file lifetime tests"
+	default n
+	select LIBUKTEST
+
 endif

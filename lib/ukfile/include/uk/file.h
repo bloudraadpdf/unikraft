@@ -323,7 +323,7 @@ typedef struct uk_file_finref uk_file_refcnt;
 #define uk_file_refcnt_acquire		uk_file_finref_acquire
 #define uk_file_refcnt_acquire_weak	uk_file_finref_acquire_weak
 #define uk_file_refcnt_try_acquire	uk_file_finref_try_acquire
-#define uk_file_refcnt_release		uk_file_finref_release
+#define uk_file_refcnt_release_strong	uk_file_finref_release_strong
 #define uk_file_refcnt_release_weak	uk_file_finref_release_weak
 
 #else /* !CONFIG_LIBUKFILE_FINALIZERS */
@@ -337,7 +337,12 @@ typedef struct uk_swrefcount uk_file_refcnt;
 #define uk_file_refcnt_acquire		uk_swrefcount_acquire
 #define uk_file_refcnt_acquire_weak	uk_swrefcount_acquire_weak
 #define uk_file_refcnt_try_acquire	uk_swrefcount_try_acquire
-#define uk_file_refcnt_release		uk_swrefcount_release
+static inline
+int uk_file_refcnt_release_strong(uk_file_refcnt *refcnt)
+{
+	return uk_refcount_release(&refcnt->strong);
+}
+
 #define uk_file_refcnt_release_weak	uk_swrefcount_release_weak
 
 #endif /* !CONFIG_LIBUKFILE_FINALIZERS */
@@ -440,21 +445,20 @@ int uk_file_try_acquire(const struct uk_file *f)
 }
 
 static inline
-void uk_file_release(const struct uk_file *f)
-{
-	int r = uk_file_refcnt_release(f->refcnt);
-
-	if (r)
-		f->_release(f, r);
-}
-
-static inline
 void uk_file_release_weak(const struct uk_file *f)
 {
 	int r = uk_file_refcnt_release_weak(f->refcnt);
 
 	if (r)
 		f->_release(f, r);
+}
+
+static inline
+void uk_file_release(const struct uk_file *f)
+{
+	if (uk_file_refcnt_release_strong(f->refcnt))
+		f->_release(f, UK_FILE_RELEASE_RES);
+	uk_file_release_weak(f);
 }
 
 #if CONFIG_LIBUKFILE_FINALIZERS

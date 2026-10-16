@@ -5,3 +5,7 @@ CXXINCLUDES-$(CONFIG_LIBUKFILE)   += -I$(LIBUKFILE_BASE)/include
 
 LIBUKFILE_SRCS-y += $(LIBUKFILE_BASE)/pollqueue.c
 LIBUKFILE_SRCS-y += $(LIBUKFILE_BASE)/file-nops.c
+
+ifneq ($(filter y,$(CONFIG_LIBUKFILE_TEST) $(CONFIG_LIBUKTEST_ALL)),)
+	LIBUKFILE_SRCS-y += $(LIBUKFILE_BASE)/tests/test_file_release.c
+endif

@@ -17,10 +17,13 @@
 
 typedef void (*uk_file_finalize_func)(void *);
 
-/* Finalizer registration block */
+/* Registration owns its callback block until .complete(arg), called once
+ * after finalization or cancellation. Callbacks run without the registry lock.
+ */
 struct uk_file_finalize_cb {
 	struct uk_file_finalize_cb *next;
 	uk_file_finalize_func fin; /* Finalizer */
+	uk_file_finalize_func complete;
 	void *arg; /* Argument to pass to .fin() */
 };
 
@@ -60,27 +63,35 @@ int uk_file_finref_try_acquire(struct uk_file_finref *r)
 static inline
 void uk_file_finref_finalize(struct uk_file_finref *r)
 {
-	struct uk_file_finalize_cb *fin = r->fins;
+	for (;;) {
+		struct uk_file_finalize_cb *fin;
+		uk_file_finalize_func callback, complete;
+		void *arg;
 
-	while (fin) {
-		/* The call might free fin, read next before */
-		struct uk_file_finalize_cb *next = fin->next;
-
-		fin->fin(fin->arg);
-		fin = next;
+		uk_mutex_lock(&r->lock);
+		fin = r->fins;
+		if (!fin) {
+			uk_mutex_unlock(&r->lock);
+			break;
+		}
+		r->fins = fin->next;
+		fin->next = NULL;
+		callback = fin->fin;
+		complete = fin->complete;
+		arg = fin->arg;
+		uk_mutex_unlock(&r->lock);
+		callback(arg);
+		complete(arg);
 	}
 }
 
 static inline
-int uk_file_finref_release(struct uk_file_finref *r)
+int uk_file_finref_release_strong(struct uk_file_finref *r)
 {
-	int ret = 0;
-
-	if (uk_refcount_release(&r->cnt.strong)) {
-		ret = UK_SWREFCOUNT_LAST_STRONG;
-		uk_file_finref_finalize(r);
-	}
-	return ret | uk_swrefcount_release_weak(&r->cnt);
+	if (!uk_refcount_release(&r->cnt.strong))
+		return 0;
+	uk_file_finref_finalize(r);
+	return 1;
 }
 
 static inline
@@ -94,6 +105,7 @@ void uk_file_finref_register(struct uk_file_finref *r,
 			     struct uk_file_finalize_cb *cb)
 {
 	UK_ASSERT(uk_refcount_read(&r->cnt.strong));
+	UK_ASSERT(cb->fin && cb->complete);
 	uk_mutex_lock(&r->lock);
 	cb->next = r->fins;
 	r->fins = cb;
@@ -104,15 +116,20 @@ static inline
 void uk_file_finref_unregister(struct uk_file_finref *r,
 			       struct uk_file_finalize_cb *cb)
 {
-	if (uk_refcount_read(&r->cnt.strong)) {
-		struct uk_file_finalize_cb **p;
+	struct uk_file_finalize_cb **p;
 
-		uk_mutex_lock(&r->lock);
-		for (p = &r->fins; *p && *p != cb; p = &(*p)->next);
-		if (*p)
-			*p = (*p)->next;
-		uk_mutex_unlock(&r->lock);
+	uk_mutex_lock(&r->lock);
+	for (p = &r->fins; *p && *p != cb; p = &(*p)->next)
+		;
+	if (*p) {
+		*p = cb->next;
+		cb->next = NULL;
+	} else {
+		cb = NULL;
 	}
+	uk_mutex_unlock(&r->lock);
+	if (cb)
+		cb->complete(cb->arg);
 }
 
 #endif /* __UKFILE_FINAL_H__ */

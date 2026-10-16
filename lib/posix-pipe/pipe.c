@@ -377,6 +377,7 @@ static const struct uk_file_ops pipe_ops = {
 static void pipe_release(const struct uk_file *file, int what)
 {
 	struct pipe_alloc *pipe = pipe_from_file(file);
+	struct uk_alloc *allocator = pipe->alloc;
 	struct pipe_end *end = __containerof(file, struct pipe_end, file);
 	bool last = false;
 
@@ -395,9 +396,9 @@ static void pipe_release(const struct uk_file *file, int what)
 		last = !--pipe->references;
 	uk_mutex_unlock(&pipe->lock);
 	if (what & UK_FILE_RELEASE_OBJ)
-		uk_free(pipe->alloc, end);
+		uk_free(allocator, end);
 	if (last)
-		uk_free(pipe->alloc, pipe);
+		uk_free(allocator, pipe);
 }
 
 static struct pipe_end *pipe_open(struct pipe_alloc *pipe, unsigned int mode)
