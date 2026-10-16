@@ -1034,8 +1034,23 @@ static struct uk_ofile *vfs_open_file(const struct uk_file *f, unsigned int mode
 			}
 			f = opened;
 		} else if (!(mode & O_PATH)) {
-			of = ERR2PTR(-ENXIO);
-			goto out_name;
+			struct uk_statx status = {0};
+			int rc = uk_file_getstat(f, UK_STATX_TYPE, &status);
+
+			if (rc) {
+				of = ERR2PTR(rc);
+				goto out_name;
+			}
+			switch (status.stx_mode & S_IFMT) {
+			case S_IFBLK:
+				mode &= ~UKFD_O_NOSEEK;
+				break;
+			case S_IFCHR:
+				break;
+			default:
+				of = ERR2PTR(-ENXIO);
+				goto out_name;
+			}
 		}
 	}
 	of = uk_ofile_new(f, mode, name.len);
