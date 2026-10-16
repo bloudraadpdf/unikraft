@@ -138,7 +138,11 @@ UK_LLSYSCALL_R_DEFINE(int, waitid, idtype_t, idtype, id_t, id,
 		      siginfo_t *, infop, int, options,
 		      struct rusage * __unused, rusage)
 {
+	siginfo_t local_info;
 	int ret;
+
+	if (!infop)
+		infop = &local_info;
 
 	if (options)
 		if (unlikely(!(options & (WEXITED | WSTOPPED | WCONTINUED |
@@ -159,13 +163,7 @@ UK_LLSYSCALL_R_DEFINE(int, waitid, idtype_t, idtype, id_t, id,
 		return -EINVAL;
 	}
 
-	/* POSIX.1-2008 requires that infop must not be NULL, yet Linux
-	 * violates the standard and returns the pid of the waited child
-	 * when that happens. wait(2) discourages applications to rely on
-	 * that behavior, still for backwards compatibility we implement
-	 * Linux's behavior nevertheless.
-	 */
-	return (infop && ret >= 0) ? 0 : ret;
+	return ret >= 0 ? 0 : ret;
 }
 #else /* !CONFIG_LIBPOSIX_PROCESS_MULTIPROCESS */
 UK_SYSCALL_R_DEFINE(pid_t, wait4, pid_t, pid,
