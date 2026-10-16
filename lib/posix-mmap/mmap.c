@@ -88,7 +88,7 @@ static int do_mmap(void **addr, size_t len, int prot, int flags, int fd,
 		return -EOVERFLOW;
 
 	if (*addr) {
-		if (flags & MAP_FIXED)
+		if ((flags & MAP_FIXED) && !(flags & MAP_FIXED_NOREPLACE))
 			vflags |= UK_VMA_MAP_REPLACE;
 
 		vaddr = (__vaddr_t)*addr;
@@ -207,7 +207,7 @@ static int do_mmap(void **addr, size_t len, int prot, int flags, int fd,
 	/* MAP_NORESERVE : Ignored for now */
 
 	rc = uk_vma_map(vas, &vaddr, len, vattr, vflags, NULL, vops, vargs);
-	if (unlikely(rc && !(flags & MAP_FIXED) &&
+	if (unlikely(rc && !(flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) &&
 		     vaddr != UK_PAGING_VADDR_ANY)) {
 		/* If addr was meant as a hint and we fail to map, we retry
 		 * without specifying an address.
