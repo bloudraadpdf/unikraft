@@ -7,6 +7,7 @@
 #ifndef __UK_BINFMT_H__
 #define __UK_BINFMT_H__
 
+#include <stdbool.h>
 #include <uk/alloc.h>
 #include <uk/arch/ctx.h>
 #include <uk/essentials.h>
@@ -41,6 +42,7 @@ struct uk_binfmt_loader_args {
 	__sz stack_limit;
 	__sz stack_size;
 	__sz image_data_size;
+	bool stack_executable;
 #if CONFIG_LIBPOSIX_VFS
 	struct uk_vfs_path *executable;
 #endif

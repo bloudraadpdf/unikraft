@@ -113,6 +113,7 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 	loader_args.pathname = (char *)pathname;
 	loader_args.auxv = NULL;
 	loader_args.image_data_size = 0;
+	loader_args.stack_executable = false;
 #if CONFIG_LIBPOSIX_VFS
 	loader_args.executable = NULL;
 #endif
@@ -204,6 +205,11 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 	{
 		__vaddr_t bottom = (__vaddr_t)stack_new;
 
+		if (loader_args.stack_executable) {
+			rc = pprocess_stack_executable(bottom);
+			if (rc)
+				goto err_free_stack_new;
+		}
 		rc = pprocess_stack_trim(vm_new, &bottom,
 					 bottom + stack_size, loader_args.ctx.sp);
 		if (rc)

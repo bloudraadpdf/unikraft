@@ -288,6 +288,22 @@ out:
 #endif
 
 #if CONFIG_LIBPOSIX_PROCESS_EXECVE
+int pprocess_stack_executable(__vaddr_t address)
+{
+	struct uk_vas *vas = uk_vas_get_active();
+	const struct uk_vma *vma;
+	int rc = -ENOTSUP;
+
+	memory_lock(vas);
+	vma = uk_vma_find(vas, address);
+	if (vma && vma->ops == &uk_vma_stack_ops)
+		rc = uk_vma_set_attr(vas, vma->start, vma->end - vma->start,
+				     UK_PAGING_PAGE_ATTR_PROT_RWX,
+				     UK_VMA_FLAG_STRICT_VMA_CHECK);
+	memory_unlock(vas);
+	return rc;
+}
+
 int pprocess_stack_trim(struct posix_vm_context *state,
 			__vaddr_t *bottom, __vaddr_t top, __vaddr_t sp)
 {

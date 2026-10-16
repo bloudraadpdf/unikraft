@@ -163,6 +163,7 @@ int pprocess_memory_brk(struct posix_vm_context *state, __sz position);
 #endif
 #if CONFIG_LIBUKVMEM && CONFIG_LIBPOSIX_PROCESS_EXECVE
 int pprocess_memory_stack(__vaddr_t address);
+int pprocess_stack_executable(__vaddr_t address);
 int pprocess_stack_trim(struct posix_vm_context *state,
 			__vaddr_t *bottom, __vaddr_t top, __vaddr_t sp);
 #endif

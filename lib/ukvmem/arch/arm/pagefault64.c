@@ -25,7 +25,7 @@ static int vmem_arch_pagefault(void *data)
 	unsigned long dfsc;
 	struct uk_vas *vas;
 	__vaddr_t vaddr;
-	__u64 esr;
+	__u64 esr, ec;
 	int rc;
 
 	ctx = (struct uk_lcpu_except_err_ctx *)data;
@@ -34,10 +34,12 @@ static int vmem_arch_pagefault(void *data)
 	vaddr = (__vaddr_t)uk_lcpu_except_err_ctx_get_fault_addr(ctx);
 	esr = uk_lcpu_arm64_except_err_ctx_get_esr(ctx);
 
-	if (esr & UK_ARCH_ARM64_ESR_ISS_ABRT_WnR_BIT)
-		faulttype = UK_VMA_FAULT_WRITE;
-	else if (esr & UK_ARCH_ARM64_ESR_ISS_ABRT_ISV_BIT)
+	ec = UK_ARCH_ARM64_ESR_EC_FROM(esr);
+	if (ec == UK_ARCH_ARM64_ESR_EL1_EC_MMU_IABRT_EL0 ||
+	    ec == UK_ARCH_ARM64_ESR_EL1_EC_MMU_IABRT_EL1)
 		faulttype = UK_VMA_FAULT_EXEC;
+	else if (esr & UK_ARCH_ARM64_ESR_ISS_ABRT_WnR_BIT)
+		faulttype = UK_VMA_FAULT_WRITE;
 	else
 		faulttype = UK_VMA_FAULT_READ;
 

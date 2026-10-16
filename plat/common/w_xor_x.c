@@ -23,10 +23,10 @@
 #endif /* CONFIG_UKPLAT_MEMRNAME */
 
 #ifdef CONFIG_ARCH_ARM_64
-#define enable_wxn() ({					\
+#define disable_wxn() ({					\
 	__u64 reg;					\
 	reg = UK_ARCH_ARM64_SYSREG_READ64(SCTLR_EL1);	\
-	reg |= UK_ARCH_ARM64_SCTLR_EL1_WXN_BIT;		\
+	reg &= ~UK_ARCH_ARM64_SCTLR_EL1_WXN_BIT;		\
 	UK_ARCH_ARM64_SYSREG_WRITE64(SCTLR_EL1, reg);	\
 	uk_arch_arm64_isb();				\
 })
@@ -45,12 +45,6 @@ void __weak enforce_w_xor_x(void)
 			continue;
 
 		UK_ASSERT_VALID_MRD(d);
-
-#ifdef CONFIG_ARCH_ARM_64
-		/* Skip RW regions. These will be protected by WXN */
-		if (d->flags & UKPLAT_MEMRF_WRITE)
-			continue;
-#endif /* CONFIG_ARCH_ARM64 */
 
 		/* We expect platforms to provide sane sections,
 		 * that is, if multiple sections reside in the same
@@ -84,14 +78,13 @@ void __weak enforce_w_xor_x(void)
 				  (prot & UK_PAGING_PAGE_ATTR_PROT_WRITE) ? 'W' : '-',
 				  (prot & UK_PAGING_PAGE_ATTR_PROT_EXEC) ? 'X' : '-',
 				  rc);
+#ifdef CONFIG_ARCH_ARM_64
+			UK_CRASH("Cannot protect kernel memory\n");
+#endif
 		}
 	}
 #ifdef CONFIG_ARCH_ARM_64
-	/* Enable WXN to protect RW regions.
-	 * This saves us from manually updating the PTEs.
-	 */
-	uk_pr_debug("Enabling WXN\n");
-	enable_wxn();
+	disable_wxn();
 	uk_paging_tlb_flush();
 #endif /* CONFIG_ARCH_ARM64 */
 }

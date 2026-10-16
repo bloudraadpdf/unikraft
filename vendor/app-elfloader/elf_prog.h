@@ -55,6 +55,7 @@ struct elf_prog {
 	void *vabase;	/* base address of loaded image in virtual memory */
 	uintptr_t load_bias;
 	bool fixed_address;
+	bool stack_executable;
 	size_t valen;	/* length of loaded image in virtual memory */
 	size_t image_data_size;
 

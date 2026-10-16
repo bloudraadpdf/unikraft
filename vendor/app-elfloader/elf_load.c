@@ -79,7 +79,7 @@ static int get_phdr_mmap_prot(GElf_Phdr *phdr)
 		mmap_prot |= PROT_READ;
 	if (phdr->p_flags & PF_W)
 		mmap_prot |= PROT_WRITE;
-	if (phdr->p_flags & PROT_EXEC)
+	if (phdr->p_flags & PF_X)
 		mmap_prot |= PROT_EXEC;
 
 	return mmap_prot;
@@ -151,6 +151,7 @@ static int elf_load_parse(struct elf_prog *elf_prog, Elf *elf)
 		goto err_out;
 	}
 	elf_prog->fixed_address = ehdr.e_type == ET_EXEC;
+	elf_prog->stack_executable = false;
 
 	/*
 	 * Scan program headers
@@ -175,6 +176,9 @@ static int elf_load_parse(struct elf_prog *elf_prog, Elf *elf)
 			elf_prog->interp.required = true;
 			continue;
 		}
+
+		if (phdr.p_type == PT_GNU_STACK)
+			elf_prog->stack_executable = !!(phdr.p_flags & PF_X);
 
 		if (phdr.p_type != PT_LOAD) {
 			/* We do not need to look further into headers

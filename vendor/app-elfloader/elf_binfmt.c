@@ -67,6 +67,7 @@ static int uk_binfmt_load_elf(struct uk_binfmt_loader_args *args)
 		goto err_unload;
 
 	args->image_data_size = prog->image_data_size;
+	args->stack_executable = prog->stack_executable;
 #if CONFIG_LIBPOSIX_VFS
 	args->executable = prog->executable;
 	prog->executable = NULL;
