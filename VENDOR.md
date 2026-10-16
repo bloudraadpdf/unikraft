@@ -100,6 +100,8 @@ mask syscall preserves overlapping input and output. Futex waits validate
 and convert their clock deadlines, support requeue operations and wake for
 pending signals. Waiter removal follows the waiter node after a requeue.
 `waitid` accepts a null output buffer with the Linux return value.
+`nanosleep` registers pending-signal wake-ups, preserves the remaining
+duration on interruption and rejects negative seconds.
 
 The ELF loader returns the auxiliary vector on the new application stack.
 Each process VM context retains its own vector for `PR_GET_AUXV` and releases
@@ -109,6 +111,6 @@ stack before the caller stack is released. Other `prctl` operations return
 
 The default one-CPU AMD64 and ARM64 builds pass the applicable C library
 checks with static and dynamic application linking. Each architecture
-passes all 22 additional signal, futex, wait, auxiliary-vector and dynamic
+passes all 26 additional signal, futex, wait, auxiliary-vector and dynamic
 TLS probes. These checks do not establish full Linux compatibility,
 process memory protection or snapshot acceptance.

@@ -47,6 +47,9 @@
 #include <uk/process.h>
 #endif
 #include <uk/posix-time.h>
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+#include <uk/posix-signal-wait.h>
+#endif
 
 #if CONFIG_HAVE_SCHED
 #include <uk/sched.h>
@@ -79,42 +82,75 @@ static void __spin_wait(__nsec nsec)
 }
 #endif
 
+#if CONFIG_HAVE_SCHED
+static int nanosleep_wait(__nsec deadline)
+{
+	struct uk_thread *thread = uk_thread_current();
+	int ret = 0;
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+	struct uk_posix_signal_wait signal;
+
+	ret = uk_posix_signal_wait_init(&signal, NULL, NULL, 0);
+	if (ret)
+		return ret;
+#endif
+	while (ukplat_monotonic_clock() < deadline) {
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+		ret = uk_posix_signal_wait_check(&signal);
+		if (ret)
+			break;
+#elif CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+		if (uk_posix_process_exit_requested()) {
+			ret = -EINTR;
+			break;
+		}
+#endif
+		uk_thread_block_until(thread, (__snsec)deadline);
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+		if (uk_load_n(&signal.interrupted))
+			uk_thread_wake(thread);
+#endif
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+		if (uk_posix_process_exit_requested())
+			uk_thread_wake(thread);
+#endif
+		uk_sched_yield();
+	}
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+	uk_posix_signal_wait_end(&signal, ret);
+#endif
+	return ret;
+}
+#endif
+
 int uk_sys_nanosleep(const struct timespec *req, struct timespec *rem)
 {
-	__nsec before, after, diff, nsec;
+	__nsec before, after, deadline, nsec;
+	int ret;
 
-	if (!req || req->tv_nsec < 0 || req->tv_nsec > 999999999) {
+	if (!req || req->tv_sec < 0 || req->tv_nsec < 0 ||
+	    req->tv_nsec >= UKARCH_NSEC_PER_SEC)
 		return -EINVAL;
-	}
-
-	nsec = (__nsec) req->tv_sec * 1000000000L;
-	nsec += req->tv_nsec;
+	if ((__u64)req->tv_sec >
+	    (INT64_MAX - req->tv_nsec) / UKARCH_NSEC_PER_SEC)
+		nsec = INT64_MAX;
+	else
+		nsec = ukarch_time_sec_to_nsec(req->tv_sec) + req->tv_nsec;
 	before = ukplat_monotonic_clock();
-
+	deadline = nsec > INT64_MAX - before ? INT64_MAX : before + nsec;
 #if CONFIG_HAVE_SCHED
-	struct uk_thread *thread = uk_thread_current();
-
-	uk_thread_block_timeout(thread, nsec);
-#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
-	if (uk_posix_process_exit_requested())
-		uk_thread_wake(thread);
-#endif
-	uk_sched_yield();
+	ret = nanosleep_wait(deadline);
 #else
 	__spin_wait(nsec);
+	ret = 0;
 #endif
-
-	after = ukplat_monotonic_clock();
-	diff = after - before;
-
-	if (diff < nsec) {
-		if (rem) {
-			rem->tv_sec = ukarch_time_nsec_to_sec(nsec - diff);
-			rem->tv_nsec = ukarch_time_subsec(nsec - diff);
-		}
-		return -EINTR;
+	if (ret == -EINTR && rem) {
+		after = ukplat_monotonic_clock();
+		nsec = deadline > after ? deadline - after : 0;
+		rem->tv_sec = ukarch_time_nsec_to_sec(nsec);
+		rem->tv_nsec = ukarch_time_subsec(nsec);
 	}
-	return 0;
+	return ret;
 }
 
 UK_SYSCALL_R_DEFINE(int, nanosleep, const struct timespec*, req,
