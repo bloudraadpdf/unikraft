@@ -4,6 +4,9 @@
 #include <uk/process.h>
 #include <uk/process/events.h>
 #include "process.h"
+#if CONFIG_LIBPOSIX_PROCESS_SYSV_SHM
+#include "sysv.h"
+#endif
 
 struct posix_vm_context *pprocess_vm_alloc(struct uk_alloc *allocator)
 {
@@ -36,13 +39,16 @@ int pprocess_vm_init(struct posix_process *process, struct posix_process *parent
 	return 0;
 }
 
-void pprocess_vm_put(struct posix_vm_context *state)
+void pprocess_vm_put(struct posix_vm_context *state, pid_t pid __maybe_unused)
 {
 	if (!state)
 		return;
 	uk_mutex_lock(&pprocess_mutex);
 	UK_ASSERT(state->references);
 	if (!--state->references) {
+#if CONFIG_LIBPOSIX_PROCESS_SYSV_SHM
+		pprocess_shm_release(state, pid);
+#endif
 #if CONFIG_LIBPOSIX_PROCESS_BRK
 		pprocess_brk_free(state);
 #endif
@@ -60,7 +66,7 @@ void pprocess_vm_replace(struct posix_process *process,
 	UK_ASSERT(state);
 	uk_arch_mb();
 	uk_mutex_lock(&pprocess_mutex);
-	pprocess_vm_put(process->vm_context);
+	pprocess_vm_put(process->vm_context, process->pid);
 	process->vm_context = state;
 	uk_mutex_unlock(&pprocess_mutex);
 }
@@ -72,7 +78,7 @@ static int pprocess_vm_exit(void *arg)
 
 	uk_mutex_lock(&pprocess_mutex);
 	process = pid2pprocess(event->pid);
-	pprocess_vm_put(process->vm_context);
+	pprocess_vm_put(process->vm_context, process->pid);
 	process->vm_context = NULL;
 	uk_mutex_unlock(&pprocess_mutex);
 	return 0;

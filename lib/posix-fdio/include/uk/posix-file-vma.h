@@ -14,10 +14,19 @@
 
 extern const struct uk_vma_ops uk_fdio_vma_ops;
 
+struct uk_fdio_vma_lifetime {
+	void (*acquire)(struct uk_fdio_vma_lifetime *lifetime);
+	void (*release)(struct uk_fdio_vma_lifetime *lifetime);
+};
+
 struct uk_fdio_vma_args {
 	struct uk_ofile *of;
 	__off offset;
+	struct uk_fdio_vma_lifetime *lifetime;
 };
+
+int uk_fdio_unmap_lifetime(struct uk_vas *vas,
+			   struct uk_fdio_vma_lifetime *lifetime);
 
 /**
  * Creates a new file mapping. See uk_vma_map() for a description of the
@@ -33,11 +42,13 @@ struct uk_fdio_vma_args {
 static inline
 int uk_fdio_map_file(struct uk_vas *vas, __vaddr_t *vaddr,
 		     __sz len, unsigned long attr, unsigned long flags,
-		     struct uk_ofile *of, __off offset)
+		     struct uk_ofile *of, __off offset,
+		     struct uk_fdio_vma_lifetime *lifetime)
 {
 	struct uk_fdio_vma_args args = {
 		.of = of,
 		.offset = offset,
+		.lifetime = lifetime,
 	};
 
 	return uk_vma_map(vas, vaddr, len, attr, flags, __NULL,

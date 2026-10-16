@@ -109,11 +109,12 @@ it with the context. `AT_EXECFN` and `AT_RANDOM` data are copied to the new
 stack before the caller stack is released. Other `prctl` operations return
 `EINVAL` rather than reporting success without an implementation.
 
-The default one-CPU AMD64 and ARM64 builds pass the applicable C library
-checks with static and dynamic application linking. Each architecture
-passes all 26 additional signal, futex, wait, auxiliary-vector and dynamic
-TLS probes. These checks do not establish full Linux compatibility,
-process memory protection or snapshot acceptance.
+Tokoloshe retains the initial one-CPU AMD64 and ARM64 C library results
+and their remaining compatibility gaps. Each architecture passes the 26
+initial signal, futex, wait, auxiliary-vector and dynamic TLS probes with
+static and dynamic application linking. These checks do not establish full
+C library or Linux compatibility, process memory protection or snapshot
+acceptance.
 
 Robust futex lists are registered per thread. Thread exit marks owned locks
 with `FUTEX_OWNER_DIED` and wakes waiters before clearing the child TID.
@@ -130,3 +131,13 @@ object retains its deadline across application syscalls. It does not read
 application TLS as kernel state. Application entry and signal delivery use
 the same return path. Tokoloshe's cancellation, register-context and signal
 origin probes pass with both libraries and linking modes on AMD64 and ARM64.
+
+`CONFIG_LIBPOSIX_PROCESS_SYSV_SHM` provides keyed shared-memory segments,
+anonymous RAMfs backing and distinct shared mappings. Mapping lifetime
+callbacks track splits, partial unmaps, protection changes and final removal.
+VM-context release detaches mappings on exec and exit. It receives the
+exiting PID explicitly because cleanup can run on a kernel thread.
+Tokoloshe's shared-memory and mapping probes pass all eight library/linking
+combinations per architecture, including a spawned child's attachment,
+implicit exit cleanup, delayed removal and stale-ID rejection. Huge-page
+segments return `EOPNOTSUPP`; the allocator has no huge-page pool.

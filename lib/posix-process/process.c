@@ -381,7 +381,7 @@ struct posix_process *pprocess_create(struct uk_alloc *a,
 	return pprocess;
 
 err_free_pprocess:
-	pprocess_vm_put(pprocess->vm_context);
+	pprocess_vm_put(pprocess->vm_context, pprocess->pid);
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 	pprocess_signal_pdesc_free(pprocess);
 #endif /* CONFIG_LIBPOSIX_PROCESS_SIGNAL */
@@ -521,7 +521,7 @@ pid_t uk_posix_process_run(uk_posix_process_mainlike_func fn,
 	return pid;
 
 err_free_thread:
-	pprocess_vm_put(vm_new);
+	pprocess_vm_put(vm_new, ukthread2pid(child));
 	/* also issues exit events */
 	uk_thread_release(child);
 
@@ -564,7 +564,7 @@ void pprocess_release(struct posix_process *pprocess)
 	pprocess_signal_pdesc_free(pprocess);
 #endif /* CONFIG_LIBPOSIX_PROCESS_SIGNAL */
 
-	pprocess_vm_put(pprocess->vm_context);
+	pprocess_vm_put(pprocess->vm_context, pprocess->pid);
 	pid = pprocess->pid;
 
 	pid_process[pid] = NULL;

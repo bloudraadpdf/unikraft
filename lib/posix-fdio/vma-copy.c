@@ -33,6 +33,7 @@ struct file_vma {
 	__off offset;
 	struct file_page *pages;
 	int shared;
+	struct uk_fdio_vma_lifetime *lifetime;
 };
 
 #ifdef CONFIG_LIBUKVMEM_FILE_BASE
@@ -92,6 +93,9 @@ int file_vma_op_new(struct uk_vas *vas, __vaddr_t vaddr __unused,
 	fvma->pages = NULL;
 	fvma->shared = shared;
 	fvma->base.name = uk_ofile_name(args->of, "file");
+	fvma->lifetime = args->lifetime;
+	if (fvma->lifetime)
+		fvma->lifetime->acquire(fvma->lifetime);
 
 	*vma = &fvma->base;
 	return 0;
@@ -186,6 +190,8 @@ void file_vma_op_destroy(struct uk_vma *vma)
 	UK_ASSERT(fvma->of);
 	file_pages_release(fvma, 0);
 	uk_ofile_release(fvma->of);
+	if (fvma->lifetime)
+		fvma->lifetime->release(fvma->lifetime);
 }
 
 static inline
@@ -294,6 +300,9 @@ int file_vma_op_split(struct uk_vma *vma, __vaddr_t vaddr,
 	v->of = fvma->of;
 	v->shared = fvma->shared;
 	v->pages = NULL;
+	v->lifetime = fvma->lifetime;
+	if (v->lifetime)
+		v->lifetime->acquire(v->lifetime);
 	struct file_page **entry = &fvma->pages;
 	while (*entry) {
 		struct file_page *page = *entry;
@@ -321,7 +330,8 @@ int file_vma_op_merge(struct uk_vma *vma, struct uk_vma *next)
 	UK_ASSERT(next->start > vma->start);
 
 	/* Only merge if this is the same open file description ... */
-	if (fvma->of != nvma->of || fvma->shared != nvma->shared)
+	if (fvma->of != nvma->of || fvma->shared != nvma->shared ||
+	    fvma->lifetime != nvma->lifetime)
 		return -EPERM;
 	/* ... and the VMAs map contiguous file ranges */
 	off = next->start - vma->start;
@@ -334,6 +344,25 @@ int file_vma_op_merge(struct uk_vma *vma, struct uk_vma *next)
 		fvma->pages = page;
 	}
 	/* We release the file in the destructor */
+	return 0;
+}
+
+int uk_fdio_unmap_lifetime(struct uk_vas *vas,
+			   struct uk_fdio_vma_lifetime *lifetime)
+{
+	struct uk_vma *vma, *next;
+	int rc;
+
+	uk_list_for_each_entry_safe(vma, next, &vas->vma_list, vma_list) {
+		struct file_vma *file = (struct file_vma *)vma;
+
+		if (vma->ops != &uk_fdio_vma_ops ||
+		    file->lifetime != lifetime)
+			continue;
+		rc = uk_vma_unmap(vas, vma->start, vma->end - vma->start, 0);
+		if (rc)
+			return rc;
+	}
 	return 0;
 }
 

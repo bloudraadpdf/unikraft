@@ -233,7 +233,7 @@ err_free_stack_new:
 	if (signal_actions)
 		pprocess_signal_sigaction_release(signal_actions);
 #endif
-	pprocess_vm_put(vm_new);
+	pprocess_vm_put(vm_new, uk_pprocess_current()->pid);
 	uk_free(stack_allocator, stack_new);
 
 	return rc;

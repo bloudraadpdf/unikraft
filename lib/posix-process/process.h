@@ -123,7 +123,7 @@ struct posix_thread {
 extern struct posix_process *pid_process[TIDMAP_SIZE];
 struct posix_vm_context *pprocess_vm_alloc(struct uk_alloc *allocator);
 int pprocess_vm_init(struct posix_process *process, struct posix_process *parent);
-void pprocess_vm_put(struct posix_vm_context *state);
+void pprocess_vm_put(struct posix_vm_context *state, pid_t pid);
 void pprocess_vm_replace(struct posix_process *process,
 			struct posix_vm_context *state);
 #if CONFIG_LIBPOSIX_PROCESS_BRK

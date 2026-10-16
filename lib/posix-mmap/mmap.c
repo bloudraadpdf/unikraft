@@ -66,7 +66,7 @@ static int do_mmap(void **addr, size_t len, int prot, int flags, int fd,
 	struct uk_vma_file_args vfscore_vma_args;
 #endif /* CONFIG_LIBVFSCORE */
 #if CONFIG_LIBPOSIX_FDIO
-	struct uk_fdio_vma_args fdio_vma_args;
+	struct uk_fdio_vma_args fdio_vma_args = {0};
 #endif /* CONFIG_LIBPOSIX_FDIO */
 #endif /* CONFIG_LIBPOSIX_FDTAB */
 	void *vargs;
