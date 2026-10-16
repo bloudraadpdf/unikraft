@@ -40,12 +40,14 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <limits.h>
 
 #include <uk/socket.h>
 #include <uk/file.h>
 #include <uk/file/nops.h>
 #include <uk/posix-fd.h>
 #include <uk/posix-fdio.h>
+#include <uk/nofault.h>
 #include <uk/errptr.h>
 #include <uk/print.h>
 #include <uk/trace.h>
@@ -604,6 +606,7 @@ UK_SYSCALL_R_DEFINE(int, getsockopt, int, sock, int, level, int, optname,
 		    void *restrict, optval, socklen_t *restrict, optlen)
 {
 	int ret;
+	socklen_t length;
 	struct uk_ofile *of;
 
 	trace_posix_socket_getsockopt(sock, level, optname, optval, optlen);
@@ -614,9 +617,21 @@ UK_SYSCALL_R_DEFINE(int, getsockopt, int, sock, int, level, int, optname,
 		goto out;
 	}
 
+	if (!uk_nofault_try_read(length, optlen)) {
+		ret = -EFAULT;
+		goto release;
+	}
+	if (length > INT_MAX) {
+		ret = -EINVAL;
+		goto release;
+	}
 	uk_file_rlock(of->file);
-	ret = posix_socket_getsockopt(of->file, level, optname, optval, optlen);
+	ret = posix_socket_getsockopt(of->file, level, optname,
+				      optval, &length);
 	uk_file_runlock(of->file);
+	if (!ret && !uk_nofault_try_write(length, optlen))
+		ret = -EFAULT;
+release:
 	uk_ofile_release(of);
 
 out:
@@ -640,18 +655,20 @@ UK_SYSCALL_R_DEFINE(int, setsockopt, int, sock, int, level, int, optname,
 
 	trace_posix_socket_setsockopt(sock, level, optname, optval, optlen);
 
-	if (unlikely(!optval))
-		return -EFAULT;
-
 	of = socketfd_get(sock);
 	if (unlikely(PTRISERR(of))) {
 		ret = PTR2ERR(of);
 		goto out;
 	}
 
-	uk_file_rlock(of->file);
+	if (optlen > INT_MAX) {
+		ret = -EINVAL;
+		uk_ofile_release(of);
+		goto out;
+	}
+	uk_file_wlock(of->file);
 	ret = posix_socket_setsockopt(of->file, level, optname, optval, optlen);
-	uk_file_runlock(of->file);
+	uk_file_wunlock(of->file);
 	uk_ofile_release(of);
 
 out:

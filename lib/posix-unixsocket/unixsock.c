@@ -9,6 +9,7 @@
 
 #include <uk/assert.h>
 #include <uk/essentials.h>
+#include <uk/nofault.h>
 #include <uk/socket_driver.h>
 #include <uk/posix-pipe.h>
 #include <uk/file/pollqueue.h>
@@ -590,8 +591,8 @@ int unix_socket_getsockopt(posix_sock *file, int level, int optname,
 		}
 
 		*optlen = MIN(*optlen, sizeof(val));
-		memcpy(optval, &val, *optlen);
-		return 0;
+		return uk_nofault_memcpy(optval, (const char *)&val,
+					 *optlen, 0) == *optlen ? 0 : -EFAULT;
 	}
 	default:
 		return -ENOSYS;
@@ -614,7 +615,8 @@ int unix_socket_setsockopt(posix_sock *file, int level, int optname,
 
 			if (optlen < sizeof(requested))
 				return -EINVAL;
-			memcpy(&requested, optval, sizeof(requested));
+			if (!uk_nofault_try_read(requested, optval))
+				return -EFAULT;
 			capacity = MAX(2 * MIN(requested, UK_PIPE_CAPACITY / 2),
 				       MIN(4608UL, UK_PIPE_CAPACITY));
 			if (data->budget) {
