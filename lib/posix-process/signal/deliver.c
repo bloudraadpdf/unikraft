@@ -12,13 +12,16 @@
 #include <uk/prio.h>
 #include <uk/process.h>
 #include <uk/syscall.h>
+#if CONFIG_LIBUKVMEM
+#include <uk/vmem.h>
+#endif
 
 #include "process.h"
 #include "sigset.h"
 #include "signal.h"
 #include "siginfo.h"
 
-static void uk_sigact_term(int __unused sig)
+static void __noreturn uk_sigact_term(int sig)
 {
 	struct posix_process *pprocess;
 
@@ -238,7 +241,6 @@ void sys_error_handler(struct ukarch_execenv *ee __unused, long arg)
 	struct ukarch_auxspcb *auxspcb;
 	struct sys_error_desc *error;
 	struct posix_thread *pthread;
-	struct posix_process *pproc;
 	struct uk_signal sig = {0};
 
 	/* Now we can enable IRQs */
@@ -252,42 +254,32 @@ void sys_error_handler(struct ukarch_execenv *ee __unused, long arg)
 	auxspcb = ukarch_auxsp_get_cb(error->auxsp);
 	uk_lcpu_sysctx_load((struct uk_lcpu_sysctx *)auxspcb->uksysctx);
 
-	/* Derive current process and thread */
-	pproc = uk_pprocess_current();
-	UK_ASSERT(pproc);
-
 	pthread = uk_pthread_current();
 	UK_ASSERT(pthread);
 
 	pprocess_enter_application();
 
-	/* If the application masks or ignores this signal, panic.
-	 * A general-purpose OS would terminate the application.
-	 * Being a unikernel, we treat this as a non-recoverable
-	 * error instead.
-	 */
 	if (!pprocess_signal_is_deliverable(pthread, error->signum))
-		goto err_panic;
-
-	if (KERN_SIGACTION(pproc, error->signum)->ks_handler == SIG_DFL)
-		goto err_panic;
+		uk_sigact_term(error->signum);
 
 	/* Prepare siginfo */
-	set_siginfo_kill(error->signum, &sig.siginfo);
-	if (error->code) {
-		sig.siginfo.si_code = error->code;
-		sig.siginfo.si_addr = (void *)error->vaddr;
+	sig.siginfo.si_signo = error->signum;
+	sig.siginfo.si_code = error->code ? error->code : SI_KERNEL;
+	sig.siginfo.si_addr = (void *)error->vaddr;
+	if (!error->code && error->signum == SIGSEGV) {
+		sig.siginfo.si_code = SEGV_MAPERR;
+#if CONFIG_LIBUKVMEM
+		struct uk_vas *vas = uk_vas_get_active();
+
+		uk_mutex_lock(&vas->mutation_lock);
+		if (uk_vma_find(vas, error->vaddr))
+			sig.siginfo.si_code = SEGV_ACCERR;
+		uk_mutex_unlock(&vas->mutation_lock);
+#endif
 	}
 
 	/* Execute standard delivery path */
 	do_deliver(pthread, &sig, ee, NULL);
-
-	return;
-
-err_panic:
-	/* FIXME: Cascading faulting */
-	UK_CRASH("Cannot deliver signal %d for fault at 0x%lx\n",
-		 error->signum, error->vaddr);
 }
 
 void pprocess_signal_restore_mask(uk_sigset_t mask)
