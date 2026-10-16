@@ -4,6 +4,7 @@
  * You may not use this file except in compliance with the License.
  */
 
+#include <errno.h>
 #include <uk/arch/ctx.h>
 #include <uk/essentials.h>
 #include <uk/event.h>
@@ -48,7 +49,9 @@ int sys_error_handler_except(int signum,
 				UKARCH_EXECENV_END_ALIGN);
 
 	handler_desc = (struct sys_error_desc *)handler_sp;
-	handler_desc->signum = signum;
+	handler_desc->signum = signum == SIGSEGV &&
+		uk_lcpu_except_err_ctx_get_handler_err(trap_ctx) == -ENOMEM ?
+		SIGKILL : signum;
 	handler_desc->code = 0;
 	handler_desc->auxsp = auxsp;
 	handler_desc->vaddr = uk_lcpu_except_err_ctx_get_fault_addr(trap_ctx);

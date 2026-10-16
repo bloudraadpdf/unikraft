@@ -29,7 +29,8 @@ static void file_fault_dispatch(struct ukarch_execenv *execenv, long arg)
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 		if (pprocess_application_context(execenv->regs)) {
 			struct sys_error_desc error = {
-				.signum = rc == -ENXIO ? SIGBUS : SIGSEGV,
+				.signum = rc == -ENOMEM ? SIGKILL :
+					rc == -ENXIO ? SIGBUS : SIGSEGV,
 				.code = rc == -ENXIO ? BUS_ADRERR : 0,
 				.auxsp = fault->auxsp,
 				.vaddr = fault->address,
