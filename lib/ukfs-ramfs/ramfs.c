@@ -1544,7 +1544,7 @@ static const struct ramfs_live_ops ramfs_liveops = {
 
 static int ramfs_node_cmp(struct ramfs_node *a, struct ramfs_node *b)
 {
-	return a - b;
+	return (__uptr)a < (__uptr)b ? -1 : a == b ? 0 : 1;
 }
 
 UK_FS_TMPL_LIVE_GENERATE_STATIC(ramfs, struct ramfs_node *, ramfs_node_cmp,

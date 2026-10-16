@@ -1427,7 +1427,7 @@ static const struct virtiofs_live_ops virtiofs_liveops = {
 static
 int virtiofs_nodecmp(struct viofs_node *a, struct viofs_node *b)
 {
-	return a < b ? -1 : a == b ? 0 : 1;
+	return (uintptr_t)a < (uintptr_t)b ? -1 : a == b ? 0 : 1;
 }
 
 UK_FS_TMPL_LIVE_GENERATE_STATIC(virtiofs, struct viofs_node *, virtiofs_nodecmp,

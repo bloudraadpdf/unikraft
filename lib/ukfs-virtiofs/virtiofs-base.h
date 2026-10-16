@@ -95,7 +95,7 @@ struct uk_virtiofs_dev *virtiofs_rb_dev_key(struct viofs_dev *d)
 static
 int virtiofs_rb_dev_cmp(struct uk_virtiofs_dev *a, struct uk_virtiofs_dev *b)
 {
-	return a < b ? -1 : a == b ? 0 : 1;
+	return (uintptr_t)a < (uintptr_t)b ? -1 : a == b ? 0 : 1;
 }
 
 static inline

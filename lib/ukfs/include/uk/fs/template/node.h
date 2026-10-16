@@ -531,7 +531,7 @@ static int UK_FS_TMPL_NODE_LIVE_NODECMP(drv)(				\
 	UK_FS_TMPL_NODE_LIVE_NODETYPE(drv) a,				\
 	UK_FS_TMPL_NODE_LIVE_NODETYPE(drv) b)				\
 {									\
-	return a < b ? -1 : a == b ? 0 : 1;				\
+	return (uintptr_t)a < (uintptr_t)b ? -1 : a == b ? 0 : 1;				\
 }									\
 \
 static UK_FS_TMPL_NODE_NODETYPE(drv)					\
