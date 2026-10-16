@@ -43,6 +43,10 @@ struct unix_sock_data {
 	int type;
 	int flags;
 	int sndbuf;
+	const struct uk_file *budget;
+	struct uk_poll_chain budget_io;
+	struct uk_poll_chain dgram_io;
+	struct uk_pollq *events;
 	const struct uk_file *rpipe;
 	const struct uk_file *wpipe;
 	struct uk_poll_chain rio;
@@ -67,6 +71,7 @@ struct unix_sock_data {
 
 #define UNIXSOCK_RDEV   0x100
 #define UNIXSOCK_WREV   0x200
+#define UNIXSOCK_BREV   0x400
 
 
 static inline
@@ -83,7 +88,22 @@ struct unix_sock_data *unix_sock_alloc(struct posix_socket_driver *d, int type)
 		.rpipe = NULL,
 		.wpipe = NULL,
 	};
+	if (type == SOCK_DGRAM) {
+		data->budget = uk_pipefile_budget_create(data->sndbuf);
+		if (!data->budget) {
+			uk_free(d->allocator, data);
+			return ERR2PTR(-ENOMEM);
+		}
+	}
 	return data;
+}
+
+static void unix_sock_free(struct posix_socket_driver *driver,
+			   struct unix_sock_data *data)
+{
+	if (data->budget)
+		uk_file_release(data->budget);
+	uk_free(driver->allocator, data);
 }
 
 static inline
@@ -216,13 +236,13 @@ void *unix_socket_create(struct posix_socket_driver *d,
 		return ERR2PTR(-ESOCKTNOSUPPORT);
 
 	data = unix_sock_alloc(d, type);
-	if (likely(data))
+	if (likely(!PTRISERR(data)))
 		if (type == SOCK_DGRAM) {
 			/* Create rpipe */
 			struct uk_file *pipes[2];
 			int r = uk_pipefile_create(pipes);
 			if (unlikely(r)) {
-				uk_free(d->allocator, data);
+				unix_sock_free(d, data);
 				data = ERR2PTR(r);
 			} else {
 				data->rpipe = pipes[0];
@@ -230,6 +250,35 @@ void *unix_socket_create(struct posix_socket_driver *d,
 			}
 		}
 	return data;
+}
+
+static void unix_sock_dgram_events(struct unix_sock_data *data)
+{
+	if (uk_file_poll_immediate(data->budget, UKFD_POLLOUT) &&
+	    (!data->wpipe ||
+	     uk_file_poll_immediate(data->wpipe, UKFD_POLLOUT)))
+		uk_pollq_set(data->events, UKFD_POLLOUT);
+	else
+		uk_pollq_clear(data->events, UKFD_POLLOUT);
+}
+
+static void unix_sock_dgram_wakeup(uk_pollevent events __unused,
+				   enum uk_poll_chain_op operation __unused,
+				   struct uk_poll_chain *chain)
+{
+	unix_sock_dgram_events(chain->arg);
+}
+
+static void unix_sock_dgram_poll(struct unix_sock_data *data)
+{
+	if (data->wpipe && !(data->flags & UNIXSOCK_WREV)) {
+		data->dgram_io =
+			UK_POLL_CHAIN_CALLBACK(UKFD_POLLOUT,
+					       unix_sock_dgram_wakeup, data);
+		uk_pollq_register(&data->wpipe->state->pollq, &data->dgram_io);
+		data->flags |= UNIXSOCK_WREV;
+	}
+	unix_sock_dgram_events(data);
 }
 
 static
@@ -269,8 +318,14 @@ void unix_socket_poll_setup(posix_sock *file)
 			data->flags |= UNIXSOCK_WREV;
 		}
 	} else {
-		/* DGRAM sockets could in theory always write somewhere */
-		posix_sock_event_set(file, UKFD_POLLOUT);
+		data->events = sockq;
+		data->budget_io =
+			UK_POLL_CHAIN_CALLBACK(UKFD_POLLOUT,
+					       unix_sock_dgram_wakeup, data);
+		uk_pollq_register(&data->budget->state->pollq,
+				  &data->budget_io);
+		data->flags |= UNIXSOCK_BREV;
+		unix_sock_dgram_poll(data);
 	}
 }
 
@@ -331,9 +386,9 @@ err_release:
 	uk_file_release(pipes[0][0]);
 	uk_file_release(pipes[0][1]);
 err_free:
-	uk_free(d->allocator, dat[1]);
+	unix_sock_free(d, dat[1]);
 err_free0:
-	uk_free(d->allocator, dat[0]);
+	unix_sock_free(d, dat[0]);
 	return ret;
 }
 
@@ -502,8 +557,6 @@ int unix_socket_getsockopt(posix_sock *file, int level, int optname,
 
 		switch (optname) {
 		case SO_SNDBUF:
-			if (data->type == SOCK_DGRAM)
-				return -EOPNOTSUPP;
 			val = data->sndbuf;
 			break;
 		case SO_ACCEPTCONN:
@@ -559,14 +612,17 @@ int unix_socket_setsockopt(posix_sock *file, int level, int optname,
 			size_t capacity;
 			int error;
 
-			if (data->type == SOCK_DGRAM)
-				return -EOPNOTSUPP;
 			if (optlen < sizeof(requested))
 				return -EINVAL;
 			memcpy(&requested, optval, sizeof(requested));
 			capacity = MAX(2 * MIN(requested, UK_PIPE_CAPACITY / 2),
 				       MIN(4608UL, UK_PIPE_CAPACITY));
-			if (data->wpipe) {
+			if (data->budget) {
+				error = uk_pipefile_budget_set(data->budget,
+							       capacity);
+				if (error)
+					return error;
+			} else if (data->wpipe) {
 				error = uk_pipefile_set_capacity(data->wpipe,
 								 capacity);
 				if (error)
@@ -686,11 +742,19 @@ int unix_sock_connect_dgram(posix_sock *file, posix_sock *target)
 
 	if (data->wpipe) {
 		UK_ASSERT(data->flags & UNIXSOCK_CONN);
+		if (data->flags & UNIXSOCK_WREV) {
+			uk_pollq_unregister(&data->wpipe->state->pollq,
+					    &data->dgram_io);
+			data->flags &= ~UNIXSOCK_WREV;
+		}
 		uk_file_release(data->wpipe);
+		if (data->remote)
+			uk_file_release_weak(data->remote);
 	}
 	data->wpipe = bpipe;
 	data->remote = target;
 	data->flags |= UNIXSOCK_CONN;
+	unix_sock_dgram_poll(data);
 	return 0;
 }
 
@@ -887,23 +951,21 @@ ssize_t unix_socket_sendmsg(posix_sock *file,
 		goto out_release;
 	}
 	uk_file_wlock(wpipe);
-	ret = uk_file_write(wpipe, msg->msg_iov, msg->msg_iovlen, 0,
-			    data->type != SOCK_STREAM ?
-				O_DIRECT | UK_PIPE_WRITE_ATOMIC : 0);
+	if (data->budget)
+		ret = uk_pipefile_write_packet(wpipe, msg->msg_iov,
+					       msg->msg_iovlen, data->budget);
+	else
+		ret = uk_file_write(wpipe, msg->msg_iov, msg->msg_iovlen, 0,
+				    data->type != SOCK_STREAM ?
+					O_DIRECT | UK_PIPE_WRITE_ATOMIC : 0);
 	uk_file_wunlock(wpipe);
 	/* We ignore ancillary data for now */
 
-	/* 0-length datagrams will be silently lost; warn */
-	if (!ret && data->type != SOCK_STREAM)
-		uk_pr_warn("0-length datagram write; message will be lost\n");
-
 out_release:
-	if (!_SOCK_CONNECTION(data->type) && remote) {
+	if (!_SOCK_CONNECTION(data->type) && remote)
 		uk_file_release(wpipe);
-		if (ret == -EPIPE)
-			/* Convert a broken endpoint to connection refused */
-			ret = -ECONNREFUSED;
-	}
+	if (data->type == SOCK_DGRAM && ret == -EPIPE)
+		ret = -ECONNREFUSED;
 	return ret;
 }
 
@@ -977,6 +1039,10 @@ int unix_sock_shutdown(posix_sock *file, int how, int notify)
 					    &data->wio);
 			uk_pollq_unregister(&data->wpipe->state->pollq,
 					    &data->werr);
+		} else if (data->flags & UNIXSOCK_WREV) {
+			uk_pollq_unregister(&data->wpipe->state->pollq,
+					    &data->dgram_io);
+			data->flags &= ~UNIXSOCK_WREV;
 		}
 		uk_file_release(data->wpipe);
 		data->wpipe = NULL;
@@ -1012,6 +1078,13 @@ int unix_socket_close(posix_sock *file)
 	struct unix_sock_data *data = posix_sock_get_data(file);
 
 	uk_file_wlock(file);
+	if (data->flags & UNIXSOCK_BREV) {
+		uk_pollq_unregister(&data->budget->state->pollq,
+				    &data->budget_io);
+		data->flags &= ~UNIXSOCK_BREV;
+	}
+	if (data->type == SOCK_DGRAM && data->rpipe)
+		uk_pipefile_discard(data->rpipe);
 	r = unix_sock_shutdown(file, SHUT_RDWR, 0);
 	posix_sock_set_data(file, NULL);
 	uk_file_wunlock(file);
@@ -1041,7 +1114,7 @@ int unix_socket_close(posix_sock *file)
 		uk_file_release_weak(data->remote);
 	if (data->type == SOCK_DGRAM)
 		uk_file_release(data->bpipe);
-	uk_free(d->allocator, data);
+	unix_sock_free(d, data);
 	return r;
 }
 

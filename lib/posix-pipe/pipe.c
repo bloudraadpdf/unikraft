@@ -50,8 +50,89 @@ static const char PIPE_VOLID[] = "pipe_vol";
 
 typedef __u32 pipeidx;
 
+struct pipe_budget {
+	struct uk_file file;
+	uk_file_refcnt references;
+	struct uk_file_state state;
+	struct uk_mutex lock;
+	struct uk_alloc *allocator;
+	size_t capacity;
+	size_t used;
+};
+
+static const char PIPE_BUDGET_VOLID[] = "pipe_budget";
+
+static void pipe_budget_events(struct pipe_budget *budget)
+{
+	if (budget->used <= budget->capacity / 4)
+		uk_file_event_set(&budget->file, UKFD_POLLOUT);
+	else
+		uk_file_event_clear(&budget->file, UKFD_POLLOUT);
+}
+
+static void pipe_budget_release(const struct uk_file *file, int what)
+{
+	struct pipe_budget *budget = file->node;
+
+	if (what & UK_FILE_RELEASE_OBJ)
+		uk_free(budget->allocator, budget);
+}
+
+struct uk_file *uk_pipefile_budget_create(size_t capacity)
+{
+	struct uk_alloc *allocator = uk_alloc_get_default();
+	struct pipe_budget *budget = uk_zalloc(allocator, sizeof(*budget));
+
+	if (!budget)
+		return NULL;
+	budget->references = UK_FILE_REFCNT_INIT_VALUE(budget->references);
+	budget->state = UK_FILE_STATE_INIT_VALUE(budget->state);
+	uk_mutex_init(&budget->lock);
+	budget->allocator = allocator;
+	budget->capacity = capacity;
+	budget->file = (struct uk_file){
+		.vol = PIPE_BUDGET_VOLID,
+		.node = budget,
+		.refcnt = &budget->references,
+		.state = &budget->state,
+		.ops = &uk_file_nops,
+		._release = pipe_budget_release
+	};
+	pipe_budget_events(budget);
+	return &budget->file;
+}
+
+int uk_pipefile_budget_set(const struct uk_file *file, size_t capacity)
+{
+	struct pipe_budget *budget = file->node;
+
+	if (file->vol != PIPE_BUDGET_VOLID || capacity < 32 ||
+	    capacity > PIPE_SIZE)
+		return -EINVAL;
+	uk_mutex_lock(&budget->lock);
+	budget->capacity = capacity;
+	pipe_budget_events(budget);
+	uk_mutex_unlock(&budget->lock);
+	return 0;
+}
+
+static void pipe_budget_return(const struct uk_file *file, size_t charge)
+{
+	struct pipe_budget *budget = file->node;
+
+	uk_mutex_lock(&budget->lock);
+	UK_ASSERT(budget->used >= charge);
+	budget->used -= charge;
+	pipe_budget_events(budget);
+	uk_mutex_unlock(&budget->lock);
+	uk_file_release(file);
+}
+
 struct pipe_msg {
 	struct pipe_msg *next;
+	const struct uk_file *budget;
+	size_t charge;
+	size_t length;
 	pipeidx start;
 	pipeidx end;
 };
@@ -90,7 +171,8 @@ static void pipe_events(struct pipe_alloc *pipe)
 	struct pipe_end *end;
 	bool writable = node->used < node->limit &&
 		(!node->head ||
-		 (PIPE_SPACE(node->tail->end, node->head->start) &&
+		 ((!node->used ||
+		   PIPE_SPACE(node->tail->end, node->head->start)) &&
 		  (node->tail->next == node->tail || node->free)));
 
 	uk_list_for_each_entry(end, &pipe->ends, link) {
@@ -157,6 +239,8 @@ static ssize_t pipe_read(const struct uk_file *f,
 	struct pipe_msg *prev;
 	size_t canread;
 	size_t consumed;
+	const struct uk_file *budget = NULL;
+	size_t charge = 0;
 	pipeidx start;
 
 	UK_ASSERT(f->vol == PIPE_VOLID);
@@ -166,10 +250,9 @@ static ssize_t pipe_read(const struct uk_file *f,
 		return -EFAULT;
 
 	toread = uk_iov_len(iov, iovcnt);
-	if (unlikely(!toread))
-		return 0;
-
 	d = (struct pipe_node *)f->node;
+	if (unlikely(!toread) && (!d->head || d->head->next == d->head))
+		return 0;
 	m = d->head;
 	for (;;) {
 		if (!m) {
@@ -180,7 +263,9 @@ static ssize_t pipe_read(const struct uk_file *f,
 		}
 
 		if (flags & UK_PIPE_READ_PEEK) {
-			canread = MIN(PIPE_USED(m->start, m->end), toread);
+			canread = MIN(m->next == m ?
+				      PIPE_USED(m->start, m->end) : m->length,
+				      toread);
 			pipebuf_iovread(d->buf, m->start, canread, iov, iovcnt);
 			return canread;
 		}
@@ -193,9 +278,11 @@ static ssize_t pipe_read(const struct uk_file *f,
 			}
 
 			start = m->start;
-			consumed = PIPE_USED(start, m->end);
+			consumed = m->length;
 			canread = MIN(consumed, toread);
-			UK_ASSERT(canread); /* 0-length packets not allowed */
+			budget = m->budget;
+			charge = m->charge;
+			m->budget = NULL;
 			prev = uk_exchange_n(&d->free, m);
 			m->next = prev;
 		} else { /* Stream msg; always last in queue */
@@ -236,10 +323,11 @@ static ssize_t pipe_read(const struct uk_file *f,
 		}
 		break;
 	}
-	UK_ASSERT(canread);
 	pipebuf_iovread(d->buf, start, canread, iov, iovcnt);
 	UK_ASSERT(d->used >= consumed);
 	d->used -= consumed;
+	if (budget)
+		pipe_budget_return(budget, charge);
 
 	return canread;
 }
@@ -264,7 +352,7 @@ static ssize_t pipe_write(const struct uk_file *f,
 		return -EFAULT;
 
 	towrite = uk_iov_len(iov, iovcnt);
-	if (unlikely(!towrite))
+	if (unlikely(!towrite) && !(flags & UK_PIPE_WRITE_ATOMIC))
 		return 0;
 
 	d = (struct pipe_node *)f->node;
@@ -286,11 +374,12 @@ static ssize_t pipe_write(const struct uk_file *f,
 			whead = 0;
 			wend = PIPE_SIZE;
 		}
-		capacity = MIN(PIPE_SPACE(whead, wend), available);
+		capacity = MIN(d->used ? PIPE_SPACE(whead, wend) : PIPE_SIZE,
+			       available);
 		if ((flags & UK_PIPE_WRITE_ATOMIC) && towrite > capacity)
 			return -EAGAIN;
 		canwrite = MIN(capacity, towrite);
-		if (!canwrite)
+		if (!canwrite && towrite)
 			goto out_full;
 		wend = PIPE_IDX(whead + canwrite);
 
@@ -299,6 +388,8 @@ static ssize_t pipe_write(const struct uk_file *f,
 			goto out_full;
 		d->free = m->next;
 
+		m->budget = NULL;
+		m->length = canwrite;
 		m->start = whead;
 		m->end = wend;
 		m->next = (flags & O_DIRECT) ? NULL : m;
@@ -312,7 +403,8 @@ static ssize_t pipe_write(const struct uk_file *f,
 		UK_ASSERT(d->head);
 		whead = tail->end;
 		wend = d->head->start;
-		capacity = MIN(PIPE_SPACE(whead, wend), available);
+		capacity = MIN(d->used ? PIPE_SPACE(whead, wend) : PIPE_SIZE,
+			       available);
 		if ((flags & UK_PIPE_WRITE_ATOMIC) && towrite > capacity)
 			return -EAGAIN;
 		canwrite = MIN(towrite, capacity);
@@ -320,7 +412,6 @@ static ssize_t pipe_write(const struct uk_file *f,
 			goto out_full;
 		tail->end = PIPE_IDX(whead + canwrite);
 	}
-	UK_ASSERT(canwrite);
 	pipebuf_iovwrite(d->buf, whead, canwrite, iov, iovcnt);
 	d->used += canwrite;
 	return canwrite;
@@ -360,6 +451,82 @@ int uk_pipefile_set_capacity(const struct uk_file *file, size_t capacity)
 	pipe_events(pipe);
 	uk_mutex_unlock(&pipe->lock);
 	return 0;
+}
+
+ssize_t uk_pipefile_write_packet(const struct uk_file *file,
+				 const struct iovec *iov, size_t count,
+				 const struct uk_file *account)
+{
+	struct pipe_alloc *pipe = pipe_from_file(file);
+	struct pipe_budget *budget = account->node;
+	const struct pipe_end *end = __containerof(file, struct pipe_end, file);
+	size_t length = uk_iov_len(iov, count);
+	ssize_t result;
+
+	if (file->vol != PIPE_VOLID || account->vol != PIPE_BUDGET_VOLID)
+		return -EINVAL;
+	if ((end->mode & O_PATH) || !(end->mode & (O_WRONLY | O_RDWR)))
+		return -EBADF;
+	uk_mutex_lock(&pipe->lock);
+	uk_mutex_lock(&budget->lock);
+	if (length > budget->capacity - 32) {
+		result = -EMSGSIZE;
+	} else if (budget->used > budget->capacity ||
+		   length + 32 > budget->capacity - budget->used) {
+		result = -EAGAIN;
+	} else {
+		result = pipe_write(file, iov, count, 0,
+				    O_DIRECT | UK_PIPE_WRITE_ATOMIC);
+		if (result >= 0) {
+			struct pipe_msg *message = pipe->node.tail;
+
+			UK_ASSERT((size_t)result == length);
+			uk_file_acquire(account);
+			message->budget = account;
+			message->charge = length + 32;
+			budget->used += message->charge;
+		}
+	}
+	pipe_budget_events(budget);
+	uk_mutex_unlock(&budget->lock);
+	pipe_events(pipe);
+	uk_mutex_unlock(&pipe->lock);
+	return result;
+}
+
+static void pipe_discard(struct pipe_node *node)
+{
+	struct pipe_msg *message = node->head;
+
+	while (message) {
+		struct pipe_msg *next = message->next;
+
+		if (message->budget) {
+			pipe_budget_return(message->budget, message->charge);
+			message->budget = NULL;
+		}
+		if (next == message)
+			break;
+		message = next;
+	}
+	node->head = NULL;
+	node->tail = NULL;
+	node->used = 0;
+	node->free = &node->msgs[0];
+	for (int i = 0; i < PIPE_MSGCOUNT - 1; i++)
+		node->msgs[i].next = &node->msgs[i + 1];
+	node->msgs[PIPE_MSGCOUNT - 1].next = NULL;
+}
+
+void uk_pipefile_discard(const struct uk_file *file)
+{
+	struct pipe_alloc *pipe = pipe_from_file(file);
+
+	UK_ASSERT(file->vol == PIPE_VOLID);
+	uk_mutex_lock(&pipe->lock);
+	pipe_discard(&pipe->node);
+	pipe_events(pipe);
+	uk_mutex_unlock(&pipe->lock);
 }
 
 static ssize_t pipe_io(const struct uk_file *file,
@@ -425,10 +592,15 @@ static void pipe_release(const struct uk_file *file, int what)
 			if (end->mode & (O_WRONLY | O_RDWR))
 				pipe->node.writers--;
 		}
+		if (!pipe->node.readers && !pipe->node.writers)
+			pipe_discard(&pipe->node);
 		pipe_events(pipe);
 	}
-	if (what & UK_FILE_RELEASE_OBJ)
+	if (what & UK_FILE_RELEASE_OBJ) {
 		last = !--pipe->references;
+		if (last)
+			pipe_discard(&pipe->node);
+	}
 	uk_mutex_unlock(&pipe->lock);
 	if (what & UK_FILE_RELEASE_OBJ)
 		uk_free(allocator, end);
