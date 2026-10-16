@@ -463,10 +463,12 @@ static int signal_thread_locked(int tgid, int tid, int signum,
 		return -EAGAIN;
 	}
 
-	if (siginfo)
+	if (siginfo) {
 		set_siginfo_sigqueue(signum, &sig->siginfo, siginfo);
-	else
+	} else {
 		set_siginfo_kill(signum, &sig->siginfo);
+		sig->siginfo.si_code = SI_TKILL;
+	}
 
 	rc = pprocess_signal_enqueue(pproc, pthread, sig);
 	if (unlikely(rc)) {
