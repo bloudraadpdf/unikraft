@@ -149,3 +149,13 @@ adjustments. `SETVAL` and `SETALL` clear adjustments, and removal wakes
 waiters with `EIDRM`. The Tokoloshe semaphore probe passes with both
 libraries and linking modes on AMD64 and ARM64. Robust-owner and shared
 memory regressions also pass on both architectures.
+
+`CONFIG_LIBPOSIX_PROCESS_SYSV_MSG` provides typed message queues, byte and
+message-count limits, blocking send/receive, signal interruption and removal
+wake-ups. Receive selection includes negative type limits, `MSG_EXCEPT` and
+`MSG_COPY`. Fault-safe copies report invalid application buffers.
+The basic and blocking queue probes pass all eight cases per architecture
+with both libraries and linking modes. The PostgreSQL IPC probe also passes
+all four cases per architecture, including its shared-memory lock, 17-entry
+semaphore set and PID ownership across a spawned process. Server execution
+requires separate qualification.

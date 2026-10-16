@@ -122,6 +122,12 @@ config LIBPOSIX_PROCESS_SYSV_SEM
 	depends on LIBPOSIX_PROCESS_SIGNAL
 	select LIBPOSIX_PROCESS_SYSV_IPC
 
+config LIBPOSIX_PROCESS_SYSV_MSG
+	bool "System V message queues"
+	depends on ARCH_X86_64 || ARCH_ARM_64
+	depends on LIBPOSIX_PROCESS_SIGNAL
+	select LIBPOSIX_PROCESS_SYSV_IPC
+
 config LIBPOSIX_PROCESS_DEBUG
 	bool "Enable debug messages"
 
