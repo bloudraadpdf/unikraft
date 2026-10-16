@@ -17,6 +17,7 @@
 #endif
 
 #include "process.h"
+#include "../rseq.h"
 #include "sigset.h"
 #include "signal.h"
 #include "siginfo.h"
@@ -129,6 +130,7 @@ static bool do_deliver(struct posix_thread *pthread, struct uk_signal *sig,
 		goto out_restore_mask;
 	}
 
+	pprocess_rseq_interrupt(execenv);
 	pprocess_signal_arch_prepare(sig, &action, execenv, &saved_mask);
 	prepared = true;
 

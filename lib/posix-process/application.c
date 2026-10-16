@@ -9,6 +9,7 @@
 
 #include "process.h"
 #include "application.h"
+#include "rseq.h"
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 #include "signal/signal.h"
 #endif
@@ -26,6 +27,7 @@ static void prepare_application(struct ukarch_execenv *execenv)
 	__nsec now;
 #endif
 
+	pprocess_rseq_interrupt(execenv);
 	uk_lcpu_disable_irq();
 	if (!pprocess_application_context(execenv->regs))
 		return;
@@ -102,6 +104,7 @@ static void application_irq_dispatch(struct ukarch_execenv *execenv, long auxsp)
 
 	uk_lcpu_sysctx_load((struct uk_lcpu_sysctx *)cb->uksysctx);
 	uk_lcpu_enable_irq();
+	pprocess_rseq_interrupt(execenv);
 #if CONFIG_LIBPOSIX_PROCESS_PREEMPT
 	uk_pthread_current()->application_deadline = 0;
 	uk_sched_yield();

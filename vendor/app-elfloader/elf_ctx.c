@@ -86,6 +86,8 @@
 #define AT_UCACHEBSIZE		21
 #define AT_SECURE		23
 #define AT_RANDOM		25
+#define AT_RSEQ_FEATURE_SIZE	27
+#define AT_RSEQ_ALIGN		28
 #define AT_EXECFN		31
 #define AT_SYSINFO_EHDR		33
 #define AT_SYSINFO		32
@@ -361,6 +363,10 @@ int elf_ctx_init(struct ukarch_ctx *ctx, struct elf_prog *prog,
 		 */
 		{ AT_SYSINFO_EHDR, (uintptr_t)vdso_image_addr },
 #endif /* CONFIG_APPELFLOADER_VDSO */
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+		{ AT_RSEQ_FEATURE_SIZE, 20 },
+		{ AT_RSEQ_ALIGN, 32 },
+#endif /* CONFIG_LIBPOSIX_PROCESS_MULTITHREADING */
 		{ AT_IGNORE, 0x0 }
 	};
 	struct auxv_entry auxv_null = { AT_NULL, 0x0 };

@@ -104,6 +104,9 @@ struct posix_process {
 
 struct posix_thread {
 	pid_t tid;
+	void *rseq_area;
+	__u32 rseq_length;
+	__u32 rseq_signature;
 	void *robust_list;
 #if CONFIG_LIBPOSIX_PROCESS_SYSV_SEM
 	struct sysv_sem_undo *sem_undo;
