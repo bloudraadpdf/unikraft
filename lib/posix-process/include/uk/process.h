@@ -73,6 +73,10 @@ unsigned int uk_posix_nofile_limit(void);
 #if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING && CONFIG_LIBPOSIX_VFS
 struct posix_process;
 struct uk_vfs_path;
+#if CONFIG_LIBPOSIX_FDTAB
+struct uk_fdtab;
+struct uk_fdtab *uk_posix_process_fdtable(struct posix_process *process);
+#endif
 struct posix_process *uk_posix_process_get(pid_t pid);
 void uk_posix_process_put(struct posix_process *process);
 bool uk_posix_process_attached(struct posix_process *process);

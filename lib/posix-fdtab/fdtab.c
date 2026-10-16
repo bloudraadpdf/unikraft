@@ -22,6 +22,8 @@
 #include <uk/essentials.h>
 #include <uk/refcount.h>
 #include <uk/thread.h>
+#include <uk/spinlock.h>
+#include <uk/lcpu.h>
 #endif /* CONFIG_LIBPOSIX_FDTAB_MULTITAB */
 
 #if CONFIG_LIBPOSIX_FDTAB_LEGACY_SHIM
@@ -68,6 +70,7 @@ static struct uk_fdtab init_fdtab = {
 
 /* Every thread keeps its own fdtab reference */
 static __uk_tls struct uk_fdtab *active_fdtab;
+static uk_spinlock fdtab_thread_lock = UK_SPINLOCK_INITIALIZER();
 
 #else /* !CONFIG_LIBPOSIX_FDTAB_MULTITAB */
 
@@ -357,9 +360,9 @@ static struct fdval _fdtab_get(struct uk_fdtab *tab, int fd)
 	return ret;
 }
 
-struct uk_ofile *uk_fdtab_get(int fd)
+struct uk_ofile *uk_fdtab_get_from(struct uk_fdtab *table, int fd)
 {
-	struct fdval v = _fdtab_get(active_fdtab, fd);
+	struct fdval v = _fdtab_get(table, fd);
 
 #if CONFIG_LIBPOSIX_FDTAB_LEGACY_SHIM
 	/* Report legacy files as not present if called through new API */
@@ -370,6 +373,69 @@ struct uk_ofile *uk_fdtab_get(int fd)
 #endif /* CONFIG_LIBPOSIX_FDTAB_LEGACY_SHIM */
 	return (struct uk_ofile *)v.p;
 }
+
+struct uk_ofile *uk_fdtab_get(int fd)
+{
+	return uk_fdtab_get_from(active_fdtab, fd);
+}
+
+int uk_fdtab_next(struct uk_fdtab *table, int start)
+{
+	for (int fd = MAX(start, 0); fd < UK_FDTAB_SIZE; fd++) {
+		if (uk_fmap_lookup(&table->fmap, fd))
+			return fd;
+	}
+	return -1;
+}
+
+#if CONFIG_LIBPOSIX_FDTAB_MULTITAB
+static void fdtab_free(struct uk_fdtab *tab);
+
+struct uk_fdtab *uk_fdtab_get_thread(struct uk_thread *thread)
+{
+	struct uk_fdtab *table;
+	unsigned long flags = uk_lcpu_save_irqf();
+
+	uk_spin_lock(&fdtab_thread_lock);
+	table = uk_thread_uktls_var(thread, active_fdtab);
+	if (table)
+		uk_refcount_acquire(&table->refcnt);
+	uk_spin_unlock(&fdtab_thread_lock);
+	uk_lcpu_restore_irqf(flags);
+	return table;
+}
+
+static struct uk_fdtab *fdtab_exchange_thread(struct uk_thread *thread,
+					      struct uk_fdtab *table)
+{
+	struct uk_fdtab *previous;
+	unsigned long flags = uk_lcpu_save_irqf();
+
+	uk_spin_lock(&fdtab_thread_lock);
+	previous = uk_thread_uktls_var(thread, active_fdtab);
+	uk_thread_uktls_var(thread, active_fdtab) = table;
+	uk_spin_unlock(&fdtab_thread_lock);
+	uk_lcpu_restore_irqf(flags);
+	return previous;
+}
+#endif
+
+void uk_fdtab_put(struct uk_fdtab *table)
+{
+#if CONFIG_LIBPOSIX_FDTAB_MULTITAB
+	if (uk_refcount_release(&table->refcnt))
+		fdtab_free(table);
+#else
+	(void)table;
+#endif
+}
+
+#if !CONFIG_LIBPOSIX_FDTAB_MULTITAB
+struct uk_fdtab *uk_fdtab_get_thread(struct uk_thread *thread __unused)
+{
+	return active_fdtab;
+}
+#endif
 
 static void fdtab_cleanup(struct uk_fdtab *tab, int all)
 {
@@ -411,9 +477,8 @@ static int fdtab_handle_execve(void *data)
 		struct uk_fdtab *copy = fdtab_duplicate(tab);
 		if (!copy)
 			return -ENOMEM;
-		uk_thread_uktls_var(edat->thread, active_fdtab) = copy;
-		if (uk_refcount_release(&tab->refcnt))
-			fdtab_free(tab);
+		fdtab_exchange_thread(edat->thread, copy);
+		uk_fdtab_put(tab);
 		tab = copy;
 	}
 	fdtab_cleanup(tab, 0);
@@ -498,22 +563,22 @@ static int fdtab_thread_init(struct uk_thread *child,
 {
 	struct uk_fdtab *tab;
 
-	if (!parent)
+	if (!parent) {
 		tab = &init_fdtab;
-	else
-		tab = uk_thread_uktls_var(parent, active_fdtab);
-	uk_refcount_acquire(&tab->refcnt);
-	uk_thread_uktls_var(child, active_fdtab) = tab;
+		uk_refcount_acquire(&tab->refcnt);
+	} else {
+		tab = uk_fdtab_get_thread(parent);
+	}
+	fdtab_exchange_thread(child, tab);
 	return 0;
 }
 
 static void fdtab_thread_term(struct uk_thread *child)
 {
-	struct uk_fdtab *tab = uk_thread_uktls_var(child, active_fdtab);
+	struct uk_fdtab *tab = fdtab_exchange_thread(child, NULL);
 
-	/* If a thread has acquired an fdtab ref over its life, release it */
-	if (tab && uk_refcount_release(&tab->refcnt))
-		fdtab_free(tab);
+	if (tab)
+		uk_fdtab_put(tab);
 }
 
 UK_THREAD_INIT(fdtab_thread_init, fdtab_thread_term);
@@ -561,10 +626,10 @@ static int fdtab_clone(void *arg)
 			return -ENOMEM;
 		/* Compat stop-gap: release previous duplicate ref */
 		UK_ASSERT(uk_thread_uktls_var(child, active_fdtab) == tab);
+		fdtab_exchange_thread(child, newtab);
 		r = uk_refcount_release(&tab->refcnt);
 		UK_ASSERT(!r); /* Cannot have been the last ref */
 	}
-	uk_thread_uktls_var(child, active_fdtab) = newtab;
 	return UK_EVENT_HANDLED_CONT;
 }
 

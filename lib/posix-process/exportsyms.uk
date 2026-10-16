@@ -81,3 +81,7 @@ uk_posix_process_next_pid
 uk_posix_process_executable
 
 uk_posix_process_attached
+
+#if CONFIG_LIBPOSIX_FDTAB && CONFIG_LIBPOSIX_PROCESS_MULTITHREADING && CONFIG_LIBPOSIX_VFS
+uk_posix_process_fdtable
+#endif

@@ -293,7 +293,7 @@ static int pipe_getstat(const struct uk_file *f, unsigned mask __unused,
 	arg->stx_mask = UK_STATX_TYPE | UK_STATX_MODE | UK_STATX_INO;
 	arg->stx_blksize = 1;
 	arg->stx_mode = S_IFIFO | 0600;
-	arg->stx_ino = (uintptr_t)f;
+	arg->stx_ino = (uintptr_t)f->node;
 	return 0;
 }
 

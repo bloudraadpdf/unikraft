@@ -26,7 +26,7 @@
 
 static const char TIMERFD_VOLID[] = "timerfd_vol";
 
-#define TIMERFD_FNAME "timerfd"
+#define TIMERFD_FNAME "anon_inode:[timerfd]"
 #define TIMERFD_FNAME_LEN (sizeof(TIMERFD_FNAME) - 1)
 
 struct timerfd_node {

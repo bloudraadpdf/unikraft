@@ -12,10 +12,11 @@
 #include <uk/mutex.h>
 #include <uk/list.h>
 #include <uk/process.h>
+#include <uk/posix-fdtab.h>
 #include <uk/vfs-path.h>
 
 enum proc_kind {
-	PROC_ROOT, PROC_SELF, PROC_PID, PROC_EXE
+	PROC_ROOT, PROC_SELF, PROC_PID, PROC_EXE, PROC_FDDIR, PROC_FD
 };
 
 struct proc_node {
@@ -24,6 +25,7 @@ struct proc_node {
 	struct proc_node *parent;
 	struct posix_process *process;
 	enum proc_kind kind;
+	int descriptor;
 	unsigned int references;
 };
 
@@ -34,14 +36,15 @@ UK_FS_TMPL_LIVE_TYPES(procfs, struct proc_node *);
 UK_FS_TMPL_LIVE_OPS(procfs, struct proc_node *);
 
 static struct proc_node *node_new(enum proc_kind kind, struct proc_node *parent,
-				  struct posix_process *process)
+				  struct posix_process *process, int descriptor)
 {
 	struct proc_node *node;
 
 	uk_mutex_lock(&node_lock);
 	uk_list_for_each_entry(node, &nodes, link) {
 		if (node->kind == kind && node->parent == parent &&
-		    (kind != PROC_PID || node->process == process)) {
+		    (kind != PROC_PID || node->process == process) &&
+		    (kind != PROC_FD || node->descriptor == descriptor)) {
 			node->references++;
 			goto out;
 		}
@@ -53,7 +56,8 @@ static struct proc_node *node_new(enum proc_kind kind, struct proc_node *parent,
 	node->parent = parent;
 	if (parent)
 		parent->references++;
-	node->process = kind == PROC_EXE ? parent->process : process;
+	node->descriptor = descriptor;
+	node->process = kind > PROC_PID ? parent->process : process;
 	if (kind == PROC_PID)
 		process = NULL;
 	node->references = 1;
@@ -112,7 +116,8 @@ static struct uk_file_state *node_state(struct proc_node *node)
 static int node_kind(const struct proc_node *node,
 		     enum uk_fs_tmpl_node_kind kind)
 {
-	bool directory = node->kind == PROC_ROOT || node->kind == PROC_PID;
+	bool directory = node->kind == PROC_ROOT || node->kind == PROC_PID ||
+			 node->kind == PROC_FDDIR;
 
 	return kind == UK_FS_TMPL_DIR ? directory : !directory;
 }
@@ -122,7 +127,7 @@ static struct proc_node *volume_open(union uk_fs_vopen_vol volume __unused,
 				     union uk_fs_vopen_data data __unused,
 				     size_t format __unused)
 {
-	return node_new(PROC_ROOT, NULL, NULL);
+	return node_new(PROC_ROOT, NULL, NULL, -1);
 }
 
 static ssize_t node_io(struct proc_node *node, const struct iovec *iov __unused,
@@ -142,7 +147,19 @@ static ssize_t node_mem(struct proc_node *node __unused,
 
 static __u64 node_inode(enum proc_kind kind, struct posix_process *process)
 {
-	return kind <= PROC_SELF ? kind + 1 : ((__uptr)process >> 4) * 4 + kind;
+	return kind <= PROC_SELF ? kind + 1 : ((__uptr)process >> 4) * 8 + kind;
+}
+
+static struct uk_ofile *node_descriptor(struct proc_node *node)
+{
+	struct uk_fdtab *table = uk_posix_process_fdtable(node->process);
+	struct uk_ofile *file;
+
+	if (!table)
+		return NULL;
+	file = uk_fdtab_get_from(table, node->descriptor);
+	uk_fdtab_put(table);
+	return file;
 }
 
 static int node_stat(struct proc_node *node, unsigned int mask __unused,
@@ -151,9 +168,26 @@ static int node_stat(struct proc_node *node, unsigned int mask __unused,
 	memset(metadata, 0, sizeof(*metadata));
 	metadata->stx_mask = UK_STATX_BASIC_STATS;
 	metadata->stx_mode = node_kind(node, UK_FS_TMPL_DIR) ?
-		S_IFDIR | 0555 : S_IFLNK | 0777;
+		S_IFDIR | (node->kind == PROC_FDDIR ? 0500 : 0555) :
+		S_IFLNK | 0777;
 	metadata->stx_nlink = node_kind(node, UK_FS_TMPL_DIR) ? 2 : 1;
 	metadata->stx_ino = node_inode(node->kind, node->process);
+	if (node->kind == PROC_FD) {
+		struct uk_ofile *file = node_descriptor(node);
+
+		if (!file)
+			return -ENOENT;
+		metadata->stx_ino = node_inode(PROC_FD, node->process) *
+			CONFIG_LIBPOSIX_FDTAB_MAXFDS + node->descriptor;
+		metadata->stx_mode = S_IFLNK;
+		if (!(file->mode & O_PATH)) {
+			if ((file->mode & O_ACCMODE) != O_WRONLY)
+				metadata->stx_mode |= 0500;
+			if ((file->mode & O_ACCMODE) != O_RDONLY)
+				metadata->stx_mode |= 0300;
+		}
+		uk_ofile_release(file);
+	}
 	metadata->stx_blksize = 4096;
 	return 0;
 }
@@ -188,6 +222,19 @@ static int volume_sync(struct proc_node *node __unused)
 	return 0;
 }
 
+static int node_number(const char *name, size_t length)
+{
+	int number = 0;
+
+	for (size_t index = 0; index < length; index++) {
+		if (name[index] < '0' || name[index] > '9' ||
+		    number > (INT_MAX - (name[index] - '0')) / 10)
+			return -ENOENT;
+		number = number * 10 + name[index] - '0';
+	}
+	return number;
+}
+
 static int node_lookup(struct proc_node *node, const char *name, size_t length,
 		       struct proc_node **output, union uk_fs_lookup_out *details __unused,
 		       size_t *consumed)
@@ -197,7 +244,7 @@ static int node_lookup(struct proc_node *node, const char *name, size_t length,
 	pid_t pid = 0;
 	size_t part = 0;
 
-	if (node->kind == PROC_PID &&
+	if ((node->kind == PROC_PID || node->kind == PROC_FDDIR) &&
 	    !uk_posix_process_attached(node->process))
 		return -ESRCH;
 	while (part < length && name[part] != '/')
@@ -212,23 +259,41 @@ static int node_lookup(struct proc_node *node, const char *name, size_t length,
 		node_acquire(found);
 	} else if (node->kind == PROC_ROOT && part == 4 &&
 		   !memcmp(name, "self", 4)) {
-		found = node_new(PROC_SELF, node, NULL);
+		found = node_new(PROC_SELF, node, NULL, -1);
 	} else if (node->kind == PROC_PID && part == 3 &&
 		   !memcmp(name, "exe", 3)) {
-		found = node_new(PROC_EXE, node, NULL);
+		found = node_new(PROC_EXE, node, NULL, -1);
+	} else if (node->kind == PROC_PID && part == 2 &&
+		   !memcmp(name, "fd", 2)) {
+		found = node_new(PROC_FDDIR, node, NULL, -1);
+	} else if (node->kind == PROC_FDDIR) {
+		struct uk_fdtab *table;
+		struct uk_ofile *file;
+
+		if (part > 1 && name[0] == '0')
+			return -ENOENT;
+		pid = node_number(name, part);
+		if (pid < 0)
+			return pid;
+		table = uk_posix_process_fdtable(node->process);
+		if (!table)
+			return -ENOENT;
+		file = uk_fdtab_get_from(table, pid);
+		uk_fdtab_put(table);
+		if (!file)
+			return -ENOENT;
+		uk_ofile_release(file);
+		found = node_new(PROC_FD, node, NULL, pid);
 	} else if (node->kind == PROC_ROOT) {
 		if (name[0] == '0')
 			return -ENOENT;
-		for (size_t index = 0; index < part; index++) {
-			if (name[index] < '0' || name[index] > '9' ||
-			    pid > (INT_MAX - (name[index] - '0')) / 10)
-				return -ENOENT;
-			pid = pid * 10 + name[index] - '0';
-		}
+		pid = node_number(name, part);
+		if (pid < 0)
+			return pid;
 		process = uk_posix_process_get(pid);
 		if (!process)
 			return -ENOENT;
-		found = node_new(PROC_PID, node, process);
+		found = node_new(PROC_PID, node, process, -1);
 	} else {
 		return -ENOENT;
 	}
@@ -256,7 +321,7 @@ static ssize_t node_list(struct proc_node *node, size_t *cursor, void *buffer,
 	__u64 inode;
 	pid_t pid;
 
-	if (node->kind == PROC_PID &&
+	if ((node->kind == PROC_PID || node->kind == PROC_FDDIR) &&
 	    !uk_posix_process_attached(node->process))
 		return 0;
 	for (;;) {
@@ -264,13 +329,37 @@ static ssize_t node_list(struct proc_node *node, size_t *cursor, void *buffer,
 		type = DT_DIR;
 		inode = node_inode(node->kind, node->process);
 		if (*cursor < 2) {
+			struct proc_node *directory = *cursor && node->parent ?
+				node->parent : node;
+
 			name = *cursor ? ".." : ".";
-		} else if (node->kind == PROC_PID) {
-			if (*cursor != 2)
+			inode = node_inode(directory->kind, directory->process);
+		} else if (node->kind == PROC_FDDIR) {
+			struct uk_fdtab *table;
+			int descriptor;
+
+			if (*cursor - 2 > INT_MAX)
 				break;
-			name = "exe";
+			table = uk_posix_process_fdtable(node->process);
+			if (!table)
+				break;
+			descriptor = uk_fdtab_next(table, *cursor - 2);
+			uk_fdtab_put(table);
+			if (descriptor < 0)
+				break;
+			snprintf(number, sizeof(number), "%d", descriptor);
+			name = number;
 			type = DT_LNK;
-			inode = node_inode(PROC_EXE, node->process);
+			next = (size_t)descriptor + 3;
+			inode = node_inode(PROC_FD, node->process) *
+				CONFIG_LIBPOSIX_FDTAB_MAXFDS + descriptor;
+		} else if (node->kind == PROC_PID) {
+			if (*cursor >= 4)
+				break;
+			name = *cursor == 2 ? "exe" : "fd";
+			type = *cursor == 2 ? DT_LNK : DT_DIR;
+			inode = node_inode(*cursor == 2 ? PROC_EXE : PROC_FDDIR,
+					   node->process);
 		} else if (*cursor == 2) {
 			name = "self";
 			type = DT_LNK;
@@ -343,6 +432,15 @@ static struct uk_fs_path node_readlink(struct proc_node *node)
 		length = snprintf(number, sizeof(number), "%d", uk_sys_getpid());
 		return uk_fs_path_copy(number, length, uk_alloc_get_default());
 	}
+	if (node->kind == PROC_FD) {
+		struct uk_ofile *file = node_descriptor(node);
+
+		if (!file)
+			return (struct uk_fs_path){.s = ERR2PTR(-ENOENT)};
+		name = uk_posix_vfs_ofile_name(file);
+		uk_ofile_release(file);
+		return name;
+	}
 	path = uk_posix_process_executable(node->process);
 	if (PTRISERR(path))
 		return (struct uk_fs_path){.s = ERR2PTR(PTR2ERR(path))};
@@ -377,6 +475,16 @@ static const struct uk_file *node_follow(const struct uk_file *file)
 
 	if (node->kind == PROC_SELF)
 		return NULL;
+	if (node->kind == PROC_FD) {
+		struct uk_ofile *descriptor = node_descriptor(node);
+
+		if (!descriptor)
+			return ERR2PTR(-ENOENT);
+		target = descriptor->file;
+		uk_file_acquire(target);
+		uk_ofile_release(descriptor);
+		return target;
+	}
 	path = uk_posix_process_executable(node->process);
 	if (PTRISERR(path))
 		return ERR2PTR(PTR2ERR(path));

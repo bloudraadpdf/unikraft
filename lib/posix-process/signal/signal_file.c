@@ -283,7 +283,8 @@ static int signalfd_create(const uk_sigset_t *mask, int flags)
 	if (flags & SFD_CLOEXEC)
 		mode |= O_CLOEXEC;
 
-	fd = uk_fdtab_open(sigf, mode);
+	fd = uk_fdtab_open_named(sigf, mode, "anon_inode:[signalfd]",
+				 sizeof("anon_inode:[signalfd]") - 1);
 	uk_file_release(sigf);
 
 	return fd;

@@ -17,6 +17,14 @@
 
 const void *uk_fdtab_lock_owner(void);
 
+struct uk_fdtab;
+struct uk_thread;
+/* Keep thread allocated through this call; release the result with uk_fdtab_put. */
+struct uk_fdtab *uk_fdtab_get_thread(struct uk_thread *thread);
+void uk_fdtab_put(struct uk_fdtab *table);
+struct uk_ofile *uk_fdtab_get_from(struct uk_fdtab *table, int fd);
+int uk_fdtab_next(struct uk_fdtab *table, int start);
+
 /**
  * Opens the file `f` with `mode` and associates it with a file descriptor.
  *

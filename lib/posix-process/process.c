@@ -15,6 +15,9 @@
 #include <uk/config.h>
 #include <uk/syscall.h>
 #include <uk/sched.h>
+#if CONFIG_LIBPOSIX_FDTAB
+#include <uk/posix-fdtab.h>
+#endif
 
 struct uk_thread *pprocess_thread_main;
 
@@ -827,6 +830,22 @@ void uk_posix_process_put(struct posix_process *process)
 {
 	pprocess_put(process);
 }
+
+#if CONFIG_LIBPOSIX_FDTAB
+struct uk_fdtab *uk_posix_process_fdtable(struct posix_process *process)
+{
+	struct posix_thread *leader;
+	struct uk_fdtab *table = NULL;
+
+	uk_mutex_lock(&pprocess_mutex);
+	leader = tid2pthread(process->pid);
+	if (leader && leader->process == process &&
+	    leader->state < POSIX_THREAD_EXITED)
+		table = uk_fdtab_get_thread(leader->thread);
+	uk_mutex_unlock(&pprocess_mutex);
+	return table;
+}
+#endif
 
 bool uk_posix_process_attached(struct posix_process *process)
 {

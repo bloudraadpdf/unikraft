@@ -5,6 +5,8 @@
 #include <uk/fs.h>
 
 struct uk_vfs_path;
+struct uk_ofile;
+struct uk_fs_path uk_posix_vfs_ofile_name(struct uk_ofile *file);
 
 int uk_posix_vfs_exec_open(const char *name, struct uk_vfs_path **identity);
 void uk_posix_vfs_path_acquire(struct uk_vfs_path *path);

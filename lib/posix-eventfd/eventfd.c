@@ -21,7 +21,7 @@
 static const char EVENTFD_VOLID[] = "eventfd_vol";
 static const char EVENTFD_SEM_VOLID[] = "eventfd_semaphore_vol";
 
-#define EVENTFD_FNAME "eventfd"
+#define EVENTFD_FNAME "anon_inode:[eventfd]"
 #define EVENTFD_FNAME_LEN (sizeof(EVENTFD_FNAME) - 1)
 
 #define _IS_EVFVOL(v) ((v) == EVENTFD_VOLID || (v) == EVENTFD_SEM_VOLID)

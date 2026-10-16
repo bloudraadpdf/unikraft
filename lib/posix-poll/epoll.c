@@ -36,7 +36,7 @@
 
 static const char EPOLL_VOLID[] = "epoll_vol";
 
-#define EPOLL_FNAME "epollfd"
+#define EPOLL_FNAME "anon_inode:[eventpoll]"
 #define EPOLL_FNAME_LEN (sizeof(EPOLL_FNAME) - 1)
 
 #define EPOLL_EVENTS \

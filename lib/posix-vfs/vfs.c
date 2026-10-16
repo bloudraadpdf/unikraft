@@ -5,6 +5,7 @@
  */
 #define _GNU_SOURCE
 
+#include <stdio.h>
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/time.h>
@@ -824,6 +825,28 @@ static void vfs_ofile_destroy(struct uk_ofile *of)
 {
 	uk_posix_vfs_path_release(of->context);
 	uk_free(uk_alloc_get_default(), of);
+}
+
+struct uk_fs_path uk_posix_vfs_ofile_name(struct uk_ofile *file)
+{
+	struct uk_statx metadata = {0};
+	const char *name;
+	char target[64];
+	int length;
+
+	if (uk_fs_isfs(file->file) && file->destroy == vfs_ofile_destroy &&
+	    file->context)
+		return uk_posix_vfs_path_name(file->context);
+	if (!uk_file_getstat(file->file, UK_STATX_TYPE | UK_STATX_INO,
+			     &metadata) &&
+	    (S_ISFIFO(metadata.stx_mode) || S_ISSOCK(metadata.stx_mode))) {
+		length = snprintf(target, sizeof(target), "%s:[%llu]",
+				  S_ISFIFO(metadata.stx_mode) ? "pipe" : "socket",
+				  (unsigned long long)metadata.stx_ino);
+		return uk_fs_path_copy(target, length, uk_alloc_get_default());
+	}
+	name = uk_ofile_name(file, "anon_inode");
+	return uk_fs_path_copy(name, strlen(name), uk_alloc_get_default());
 }
 
 static struct uk_vfs_path *vfs_path_root(void)

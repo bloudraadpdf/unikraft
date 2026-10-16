@@ -120,3 +120,5 @@ uk_posix_vfs_path_acquire
 uk_posix_vfs_path_release
 uk_posix_vfs_path_name
 uk_posix_vfs_path_file
+
+uk_posix_vfs_ofile_name
