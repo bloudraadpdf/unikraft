@@ -177,8 +177,12 @@ static __noreturn void init_mainlike(void *argc_arg, void *argv_arg)
 {
 	const int argc = (int)(intptr_t)argc_arg;
 	char **const argv = (char **)argv_arg;
+	sigset_t mask;
 	int r;
 
+	sigemptyset(&mask);
+	if (sigprocmask(SIG_SETMASK, &mask, NULL))
+		UK_CRASH("Cannot clear application signal mask: %d", errno);
 	r = do_main(argc, argv);
 	/* INIT main should never return; it should call exit() when done */
 	uk_pr_debug("INIT main returned %d\n", r);
