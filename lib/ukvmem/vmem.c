@@ -742,14 +742,17 @@ static int vmem_map(struct uk_vas *vas, __vaddr_t *vaddr, __sz len,
 		return -EINVAL;
 
 	va = *vaddr;
-	if (va == UK_PAGING_VADDR_ANY) {
+	if (va == UK_PAGING_VADDR_ANY || (flags & UK_VMA_MAP_SEARCH)) {
 		/* Select the first virtual address range starting at the
 		 * mapping base that can accommodate the requested VMA.
 		 */
-		vmem_mutation_pause(vas);
-		base = (ops->get_base) ? ops->get_base(vas, args, flags) :
-					 vas->vma_base;
-		vmem_mutation_resume(vas);
+		base = va;
+		if (va == UK_PAGING_VADDR_ANY) {
+			vmem_mutation_pause(vas);
+			base = (ops->get_base) ? ops->get_base(vas, args, flags) :
+						 vas->vma_base;
+			vmem_mutation_resume(vas);
+		}
 
 		va = vmem_first_fit(vas, base, UK_PAGING_PAGE_Lx_SIZE(algn_lvl),
 				    len);
@@ -846,6 +849,9 @@ static int vmem_map(struct uk_vas *vas, __vaddr_t *vaddr, __sz len,
 	vma->page_lvl	= to_lvl;
 	if (name)
 		vma->name = name;
+
+	if (flags & UK_VMA_MAP_PRIVATE)
+		vma->flags |= UK_VMA_FLAG_PRIVATE;
 
 	if (flags & UK_VMA_MAP_UNINITIALIZED)
 		vma->flags |= UK_VMA_FLAG_UNINITIALIZED;

@@ -108,6 +108,7 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 	loader_args.envp = (const char **)envp;
 	loader_args.pathname = (char *)pathname;
 	loader_args.auxv = NULL;
+	loader_args.image_data_size = 0;
 
 	/* Assume that if argv is set the caller follows the convention */
 	loader_args.progname = (argv && argv[0]) ? argv[0] : "<null>";
@@ -134,6 +135,7 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 		goto err_free_stack_new;
 	}
 
+	vm_new->stack_size = STACK_SIZE;
 	loader_args.stack_size = STACK_SIZE;
 	loader_args.ctx.sp = ukarch_gen_sp((__uptr)stack_new,
 					   loader_args.stack_size);
@@ -172,6 +174,7 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 		uk_pr_err("%s: Unable to load (%d)\n", pathname, rc);
 		goto err_free_stack_new;
 	}
+	vm_new->image_data_size = loader_args.image_data_size;
 	rc = execve_auxv_init(vm_new, loader_args.auxv,
 			      (const __uptr *)((char *)stack_new + STACK_SIZE));
 	if (rc)

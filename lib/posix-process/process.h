@@ -63,10 +63,11 @@ struct posix_vm_context {
 #if CONFIG_LIBPOSIX_PROCESS_EXECVE
 	void *auxv;
 	__sz auxv_size;
+	__sz stack_size;
+	__sz image_data_size;
 #endif
 #if CONFIG_LIBPOSIX_PROCESS_BRK
 	struct {
-		struct uk_mutex mtx;
 		void *base;
 		__sz pos;
 	} brk;
@@ -82,9 +83,7 @@ struct posix_process {
 	struct uk_list_head threads;
 	struct uk_alloc *_a;
 	struct posix_vm_context *vm_context;
-#if CONFIG_LIBPOSIX_FDTAB
-	struct rlimit nofile_limit;
-#endif
+	struct rlimit limits[RLIM_NLIMITS];
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 	struct uk_signal_pdesc *signal;
 #endif /* CONFIG_LIBPOSIX_PROCESS_SIGNAL */
@@ -133,13 +132,31 @@ extern struct posix_process *pid_process[TIDMAP_SIZE];
 struct posix_vm_context *pprocess_vm_alloc(struct uk_alloc *allocator);
 int pprocess_vm_init(struct posix_process *process, struct posix_process *parent);
 void pprocess_vm_put(struct posix_vm_context *state, pid_t pid);
+#if CONFIG_LIBUKVMEM
+struct uk_vma_ops;
+void pprocess_vm_unmap_owned(struct posix_vm_context *state,
+			     const struct uk_vma_ops *ops);
+#endif
 void pprocess_vm_replace(struct posix_process *process,
 			struct posix_vm_context *state);
 #if CONFIG_LIBPOSIX_PROCESS_BRK
 int pprocess_brk_init(struct posix_vm_context *state);
+#if CONFIG_LIBUKVMEM
+void pprocess_brk_commit(struct posix_vm_context *state);
+#else
 void pprocess_brk_free(struct posix_vm_context *state);
 #endif
+#endif
 extern struct uk_mutex pprocess_mutex;
+void pprocess_resource_init(struct posix_process *process,
+			    struct posix_process *parent);
+#if CONFIG_LIBUKVMEM && CONFIG_LIBPOSIX_PROCESS_BRK
+int pprocess_memory_brk(struct posix_vm_context *state, __sz position);
+#endif
+#if CONFIG_LIBPOSIX_PROCESS_BRK
+#define PPROCESS_BRK_PAGES UK_BIT(CONFIG_LIBPOSIX_PROCESS_BRK_PAGE_ORDER)
+#define PPROCESS_BRK_LEN (UK_PAGING_PAGE_SIZE * PPROCESS_BRK_PAGES)
+#endif
 void pprocess_finish_exit(struct posix_process *process,
                          struct posix_thread *thread);
 int pprocess_stop_others(struct posix_process *process);

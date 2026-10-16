@@ -90,6 +90,7 @@ static int elf_load_parse(struct elf_prog *elf_prog, Elf *elf)
 {
 	GElf_Ehdr ehdr;
 	GElf_Phdr phdr;
+	uintptr_t data_start = 0, data_end = 0;
 	size_t phi;
 	int ret;
 
@@ -181,6 +182,10 @@ static int elf_load_parse(struct elf_prog *elf_prog, Elf *elf)
 
 		if (elf_prog->align < phdr.p_align)
 			elf_prog->align = phdr.p_align;
+		if (unlikely(phdr.p_vaddr > __PTR_MAX - phdr.p_filesz))
+			return -ENOEXEC;
+		data_start = MAX(data_start, phdr.p_vaddr);
+		data_end = MAX(data_end, phdr.p_vaddr + phdr.p_filesz);
 
 		uk_pr_debug("%s: phdr[%"PRIu64"]: %c%c%c, offset: %p, vaddr: %p, paddr: %p, filesz: %"PRIu64" B, memsz %"PRIu64" B, align: %"PRIu64" B\n",
 			    elf_prog->name, phi,
@@ -225,6 +230,7 @@ static int elf_load_parse(struct elf_prog *elf_prog, Elf *elf)
 	UK_ASSERT(elf_prog->phdr.off);
 
 	elf_prog->phdr.num = ehdr.e_phnum;
+	elf_prog->image_data_size = data_end - data_start;
 	elf_prog->phdr.entsize = ehdr.e_phentsize;
 	elf_prog->valen = UK_PAGING_PAGE_ALIGN_UP(elf_prog->upperl);
 	if (elf_prog->fixed_address) {

@@ -12,13 +12,9 @@
 #include <uk/syscall.h>
 #if CONFIG_LIBUKVMEM
 #include <uk/vmem.h>
+#include <uk/vmem/vma_ops.h>
 #endif /* CONFIG_LIBUKVMEM */
 #include "process.h"
-
-#define HEAP_PAGES							\
-	(1UL << CONFIG_LIBPOSIX_PROCESS_BRK_PAGE_ORDER)
-#define HEAP_LEN							\
-	(UK_PAGING_PAGE_SIZE * HEAP_PAGES)
 
 #if CONFIG_LIBUKVMEM
 static inline int pprocess_brk_init_zone(struct posix_vm_context *state)
@@ -26,8 +22,9 @@ static inline int pprocess_brk_init_zone(struct posix_vm_context *state)
 	__vaddr_t va = UK_PAGING_VADDR_ANY;
 	int rc;
 
-	rc = uk_vma_map_anon(uk_vas_get_active(), &va, HEAP_LEN,
-			     UK_PAGING_PAGE_ATTR_PROT_RW, 0, "brk VMA");
+	rc = uk_vma_map(uk_vas_get_active(), &va, PPROCESS_BRK_LEN,
+			UK_PAGING_PAGE_ATTR_PROT_NONE, 0, "brk reservation",
+			&uk_vma_rsvd_ops, NULL, state);
 	if (unlikely(rc))
 		return rc;
 
@@ -39,7 +36,7 @@ static inline int pprocess_brk_init_zone(struct posix_vm_context *state)
 static inline int pprocess_brk_init_zone(struct posix_vm_context *state)
 {
 	/* Take a big enough region from the global allocator. */
-	state->brk.base = uk_palloc(state->allocator, HEAP_PAGES);
+	state->brk.base = uk_palloc(state->allocator, PPROCESS_BRK_PAGES);
 	if (unlikely(!state->brk.base))
 		return -ENOMEM;
 
@@ -54,174 +51,65 @@ int pprocess_brk_init(struct posix_vm_context *state)
 	rc = pprocess_brk_init_zone(state);
 	if (rc)
 		return rc;
-	uk_mutex_init_config(&state->brk.mtx, UK_MUTEX_CONFIG_RECURSE);
 	return 0;
 }
-
-void pprocess_brk_free(struct posix_vm_context *state)
-{
-	int rc;
 
 #if CONFIG_LIBUKVMEM
-	rc = uk_vma_unmap(uk_vas_get_active(), (__vaddr_t)state->brk.base,
-			  HEAP_LEN, 0);
+void pprocess_brk_commit(struct posix_vm_context *state)
+{
+	pprocess_vm_unmap_owned(state, &uk_vma_rsvd_ops);
+}
 #else
-	uk_pfree(state->allocator, state->brk.base, HEAP_PAGES);
-	rc = 0;
+void pprocess_brk_free(struct posix_vm_context *state)
+{
+	uk_pfree(state->allocator, state->brk.base, PPROCESS_BRK_PAGES);
+}
 #endif
-	if (rc)
-		UK_CRASH("Failed to free brk space (%lu KiB).\n",
-			 (__u64)HEAP_LEN / 1024);
-}
-
-#if CONFIG_LIBPOSIX_PROCESS_BRK_INC_MEMZERO
-#if CONFIG_LIBUKVMEM && CONFIG_LIBPOSIX_PROCESS_BRK_DEC_DONTNEED
-/**
- * According to POSIX:
- * The newly-allocated space is set to 0. However, if the application first
- * decrements and then increments the break value, the contents of the
- * reallocated space are unspecified.
- *
- * Therefore, we technically afford to free up pages that were decremented.
- * However, Linux does not do this and upon reincrements the pages maintain
- * old data. So this feature is optional.
- */
-
-static inline int memzero_brk_inrange(__uptr cur_brk, __uptr addr)
-{
-	__vaddr_t free_start, free_end;
-	__sz zlen;
-	int rc;
-
-	/*
-	 * Increment: Zero out the difference within the same page.
-	 * We don't even need to zero the bump on page boundary crossings as
-	 * the backing VMA does not have the UK_VMA_MAP_UNINITIALIZED flag which
-	 * means that every new page we fault on will be zeroed out on demand
-	 * instead of us having to explicitly memset the difference every
-	 * time. This wouldn't be achievable if we didn't free the decrements
-	 * on page boundaries.
-	 *
-	 * See glibc's MORECORE_CLEARS. We go with MORECORE_CLEARS == 2 to
-	 * be on the safe side.
-	 */
-	if (addr > cur_brk) {
-		/*
-		 * Zero out the part of the bump that is still wthin the same
-		 * page.
-		 */
-		if (addr > UK_PAGING_PAGE_ALIGN_UP(cur_brk)) {
-			/*
-			 * If addr is beyond the page cur_brk is in then zero
-			 * out starting from cur_brk to the start of the next
-			 * page.
-			 */
-			zlen = UK_PAGING_PAGE_ALIGN_UP(cur_brk) - cur_brk;
-		} else {
-			/* If addr is within the page cur_brk is in then zero
-			 * out starting from cur_brk to addr.
-			 */
-			zlen = addr - cur_brk;
-		}
-
-		memset((void *)cur_brk, 0, zlen);
-
-		return 0;
-	}
-
-	/*
-	 * Decrement: Free up whole pages between previous cur_brk and addr.
-	 */
-
-	/* Align boundaries to identify full pages */
-	free_start = UK_PAGING_PAGE_ALIGN_UP(addr);
-	free_end = UK_PAGING_PAGE_ALIGN_UP(cur_brk);
-
-	/* Check if we have at least one full page to free */
-	if (!(free_start < free_end))
-		return 0;
-
-	uk_pr_debug("Freeing up brk range 0x%lx-0x%lx (%lu pages)\n",
-		    free_start, free_end,
-		    (free_end - free_start) >> UK_PAGING_PAGE_SHIFT);
-
-	rc = uk_vma_advise(uk_vas_get_active(), free_start,
-			   free_end - free_start, UK_VMA_ADV_DONTNEED, 0);
-	if (unlikely(rc)) {
-		uk_pr_err("Failed to free up pages between 0x%lx-0x%lx\n",
-			  free_start, free_end);
-		return rc;
-	}
-
-	return 0;
-}
-#else /* !(CONFIG_LIBUKVMEM && CONFIG_LIBPOSIX_PROCESS_BRK_DEC_DONTNEED) */
-static inline int memzero_brk_inrange(__uptr cur_brk, __uptr addr)
-{
-	/*
-	 * Increment: We must zero out the bumped region as some applications
-	 * might expect.
-	 *
-	 * See glibc's MORECORE_CLEARS. We go with MORECORE_CLEARS == 2 to be
-	 * on the safe side.
-	 */
-	if (addr > cur_brk) {
-		uk_pr_debug("Zeroing 0x%lx-0x%lx...\n", cur_brk, addr);
-		memset((void *)cur_brk, 0x0, addr - cur_brk);
-	}
-
-	/*
-	 * Decrement: Do nothing as we are in one single allocated region
-	 * whose individual pages we cannot arbitrarily free.
-	 */
-
-	return 0;
-}
-#endif /* !(CONFIG_LIBUKVMEM && CONFIG_LIBPOSIX_PROCESS_BRK_DEC_DONTNEED) */
-#endif /* CONFIG_LIBPOSIX_PROCESS_BRK_INC_MEMZERO */
 
 UK_LLSYSCALL_R_DEFINE(void *, brk, void *, addr)
 {
 	struct posix_process *pprocess;
 	__uptr base, cur_brk, addr_arg;
-	int rc __maybe_unused;
 
 	pprocess = uk_pprocess_current();
 	UK_ASSERT(pprocess);
 
-	uk_mutex_lock(&pprocess->vm_context->brk.mtx);
+	uk_mutex_lock(&pprocess_mutex);
 
 	base = (__uptr)pprocess->vm_context->brk.base;
 	cur_brk = base + pprocess->vm_context->brk.pos;
 	addr_arg = (__uptr)addr;
 
 	if (addr_arg == cur_brk) {
-		uk_mutex_unlock(&pprocess->vm_context->brk.mtx);
+		uk_mutex_unlock(&pprocess_mutex);
 		return addr;
 	}
 
-	if (!IN_RANGE(addr_arg, base, HEAP_LEN)) {
-		uk_pr_debug("0x%lx outside PID %d's brk range 0x%lx-0x%lx, keep brk @ 0x%lx\n",
-			    addr_arg, pprocess->pid,
-			    base, base + HEAP_LEN, cur_brk);
-		uk_mutex_unlock(&pprocess->vm_context->brk.mtx);
+#if CONFIG_LIBUKVMEM
+	if (addr_arg < base) {
+#else
+	if (!IN_RANGE(addr_arg, base, PPROCESS_BRK_LEN)) {
+#endif
+		uk_mutex_unlock(&pprocess_mutex);
 		return (void *)cur_brk;
 	}
 
-#if CONFIG_LIBPOSIX_PROCESS_BRK_INC_MEMZERO
-	rc = memzero_brk_inrange(cur_brk, addr_arg);
-	if (unlikely(rc)) {
-		uk_mutex_unlock(&pprocess->vm_context->brk.mtx);
+#if CONFIG_LIBUKVMEM
+	if (pprocess_memory_brk(pprocess->vm_context, addr_arg - base)) {
+		uk_mutex_unlock(&pprocess_mutex);
 		return (void *)cur_brk;
 	}
-#endif /* CONFIG_LIBPOSIX_PROCESS_BRK_INC_MEMZERO */
+#elif CONFIG_LIBPOSIX_PROCESS_BRK_INC_MEMZERO
+	if (addr_arg > cur_brk)
+		memset((void *)cur_brk, 0, addr_arg - cur_brk);
+#endif
 
-	uk_pr_debug("PID %d brk @ 0x%lx (brk heap region: 0x%lx-0x%lx)\n",
-		    pprocess->pid, addr_arg, base, base + HEAP_LEN);
+	uk_pr_debug("PID %d brk 0x%lx -> 0x%lx\n",
+		    pprocess->pid, cur_brk, addr_arg);
 
 	pprocess->vm_context->brk.pos = addr_arg - base;
 
-	uk_mutex_unlock(&pprocess->vm_context->brk.mtx);
+	uk_mutex_unlock(&pprocess_mutex);
 
 	return addr;
 }
@@ -255,14 +143,14 @@ void *sbrk(intptr_t inc)
 	pprocess = uk_pprocess_current();
 	UK_ASSERT(pprocess);
 
-	uk_mutex_lock(&pprocess->vm_context->brk.mtx);
+	uk_mutex_lock(&pprocess_mutex);
 
 	/* We are increasing or reducing our range */
 	prev_brk = (__uptr)pprocess->vm_context->brk.base + pprocess->vm_context->brk.pos;
 
 	/* Check for 0 and overflow/underflow */
 	if (!inc) {
-		uk_mutex_unlock(&pprocess->vm_context->brk.mtx);
+		uk_mutex_unlock(&pprocess_mutex);
 		return (void *)prev_brk;
 	} else if (inc > 0) {
 		if (unlikely(prev_brk + (__uptr)inc < prev_brk))
@@ -277,11 +165,11 @@ void *sbrk(intptr_t inc)
 	if (unlikely((__uptr)new_brk < req_brk))
 		goto err;
 
-	uk_mutex_unlock(&pprocess->vm_context->brk.mtx);
+	uk_mutex_unlock(&pprocess_mutex);
 	return (void *)prev_brk;
 
 err:
-	uk_mutex_unlock(&pprocess->vm_context->brk.mtx);
+	uk_mutex_unlock(&pprocess_mutex);
 	errno = ENOMEM;
 	return (void *)-1;
 }

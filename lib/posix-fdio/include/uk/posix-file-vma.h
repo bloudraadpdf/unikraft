@@ -28,31 +28,4 @@ struct uk_fdio_vma_args {
 int uk_fdio_unmap_lifetime(struct uk_vas *vas,
 			   struct uk_fdio_vma_lifetime *lifetime);
 
-/**
- * Creates a new file mapping. See uk_vma_map() for a description of the
- * parameters not listed here.
- *
- * @param of
- *   Open file description of the file to map into memory. The file must have
- *   been opened with sufficient permissions to allow for all operations
- *   permitted by the VMA's attributes.
- * @param offset
- *   Offset within the file to map in the VMA. Must be aligned to the page size.
- */
-static inline
-int uk_fdio_map_file(struct uk_vas *vas, __vaddr_t *vaddr,
-		     __sz len, unsigned long attr, unsigned long flags,
-		     struct uk_ofile *of, __off offset,
-		     struct uk_fdio_vma_lifetime *lifetime)
-{
-	struct uk_fdio_vma_args args = {
-		.of = of,
-		.offset = offset,
-		.lifetime = lifetime,
-	};
-
-	return uk_vma_map(vas, vaddr, len, attr, flags, __NULL,
-			  &uk_fdio_vma_ops, &args, __NULL);
-}
-
 #endif /* __UK_POSIX_FILE_VMA_H__ */

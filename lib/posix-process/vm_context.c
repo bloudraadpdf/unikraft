@@ -12,20 +12,8 @@
 #endif
 
 #if CONFIG_LIBUKVMEM
-const void *uk_posix_process_vm_owner(void)
-{
-	struct posix_thread *thread = uk_pthread_current();
-
-	if (!thread)
-		return NULL;
-#if CONFIG_LIBPOSIX_PROCESS_EXECVE
-	if (thread->exec_vm)
-		return thread->exec_vm;
-#endif
-	return thread->process->vm_context;
-}
-
-static void pprocess_vm_unmap(struct posix_vm_context *state)
+void pprocess_vm_unmap_owned(struct posix_vm_context *state,
+			     const struct uk_vma_ops *ops)
 {
 	struct uk_vas *vas = uk_vas_get_active();
 	const struct uk_vma *vma;
@@ -36,7 +24,7 @@ static void pprocess_vm_unmap(struct posix_vm_context *state)
 	uk_mutex_lock(&vas->mutation_lock);
 	for (;;) {
 		for (vma = uk_vma_first(vas); vma; vma = uk_vma_next(vma))
-			if (vma->owner == state)
+			if (vma->owner == state && (!ops || vma->ops == ops))
 				break;
 		if (!vma)
 			break;
@@ -70,7 +58,12 @@ int pprocess_vm_init(struct posix_process *process, struct posix_process *parent
 {
 	if (!parent) {
 		process->vm_context = pprocess_vm_alloc(process->_a);
-		return process->vm_context ? 0 : -ENOMEM;
+		if (!process->vm_context)
+			return -ENOMEM;
+#if CONFIG_LIBPOSIX_PROCESS_BRK && CONFIG_LIBUKVMEM
+		pprocess_brk_commit(process->vm_context);
+#endif
+		return 0;
 	}
 	uk_mutex_lock(&pprocess_mutex);
 	process->vm_context = parent->vm_context;
@@ -91,9 +84,9 @@ void pprocess_vm_put(struct posix_vm_context *state, pid_t pid __maybe_unused)
 		pprocess_shm_release(state, pid);
 #endif
 #if CONFIG_LIBUKVMEM
-		pprocess_vm_unmap(state);
+		pprocess_vm_unmap_owned(state, NULL);
 #endif
-#if CONFIG_LIBPOSIX_PROCESS_BRK
+#if CONFIG_LIBPOSIX_PROCESS_BRK && !CONFIG_LIBUKVMEM
 		pprocess_brk_free(state);
 #endif
 #if CONFIG_LIBPOSIX_PROCESS_EXECVE
@@ -110,6 +103,9 @@ void pprocess_vm_replace(struct posix_process *process,
 	UK_ASSERT(state);
 	uk_arch_mb();
 	uk_mutex_lock(&pprocess_mutex);
+#if CONFIG_LIBPOSIX_PROCESS_BRK && CONFIG_LIBUKVMEM
+	pprocess_brk_commit(state);
+#endif
 	pprocess_vm_put(process->vm_context, process->pid);
 	process->vm_context = state;
 	uk_mutex_unlock(&pprocess_mutex);

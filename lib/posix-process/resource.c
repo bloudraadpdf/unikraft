@@ -1,25 +1,44 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include <errno.h>
+#include <string.h>
 #include <uk/arch/limits.h>
 #include <uk/nofault.h>
 #include <uk/process.h>
 #include <uk/syscall.h>
 #include "process.h"
 
+static struct rlimit initial_limits[RLIM_NLIMITS] = {
+	[RLIMIT_AS] = { RLIM_INFINITY, RLIM_INFINITY },
+	[RLIMIT_DATA] = { RLIM_INFINITY, RLIM_INFINITY },
+	[RLIMIT_STACK] = { __STACK_SIZE, __STACK_SIZE },
 #if CONFIG_LIBPOSIX_FDTAB
-static struct rlimit initial_nofile = {
-	CONFIG_LIBPOSIX_FDTAB_MAXFDS, CONFIG_LIBPOSIX_FDTAB_MAXFDS
+	[RLIMIT_NOFILE] = {
+		CONFIG_LIBPOSIX_FDTAB_MAXFDS, CONFIG_LIBPOSIX_FDTAB_MAXFDS
+	},
+#endif
 };
 
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+void pprocess_resource_init(struct posix_process *process,
+			    struct posix_process *parent)
+{
+	uk_mutex_lock(&pprocess_mutex);
+	memcpy(process->limits, parent ? parent->limits : initial_limits,
+	       sizeof(process->limits));
+	uk_mutex_unlock(&pprocess_mutex);
+}
+#endif
+
+#if CONFIG_LIBPOSIX_FDTAB
 unsigned int uk_posix_nofile_limit(void)
 {
-	unsigned int limit = initial_nofile.rlim_cur;
+	unsigned int limit = initial_limits[RLIMIT_NOFILE].rlim_cur;
 #if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
 	struct posix_thread *thread = uk_pthread_current();
 
 	if (thread) {
 		uk_mutex_lock(&pprocess_mutex);
-		limit = thread->process->nofile_limit.rlim_cur;
+		limit = thread->process->limits[RLIMIT_NOFILE].rlim_cur;
 		uk_mutex_unlock(&pprocess_mutex);
 	}
 #endif
@@ -27,11 +46,21 @@ unsigned int uk_posix_nofile_limit(void)
 }
 #endif
 
+static bool resource_writable(unsigned int resource)
+{
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING && CONFIG_LIBUKVMEM && \
+	CONFIG_LIBPOSIX_MMAP
+	return resource != RLIMIT_STACK;
+#else
+	return resource == RLIMIT_NOFILE;
+#endif
+}
+
 int uk_sys_prlimit64(int pid, unsigned int resource,
 		     const struct rlimit *new_limit, struct rlimit *old_limit)
 {
 	struct rlimit previous, requested;
-	struct rlimit *stored = NULL;
+	struct rlimit *stored;
 	int result = 0;
 #if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
 	struct posix_thread *thread;
@@ -41,19 +70,16 @@ int uk_sys_prlimit64(int pid, unsigned int resource,
 	switch (resource) {
 	case RLIMIT_AS:
 	case RLIMIT_DATA:
-		previous = (struct rlimit) { RLIM_INFINITY, RLIM_INFINITY };
-		break;
 	case RLIMIT_STACK:
-		previous = (struct rlimit) { __STACK_SIZE, __STACK_SIZE };
 		break;
 #if CONFIG_LIBPOSIX_FDTAB
 	case RLIMIT_NOFILE:
-		stored = &initial_nofile;
 		break;
 #endif
 	default:
 		return -EINVAL;
 	}
+	stored = &initial_limits[resource];
 	if (new_limit) {
 		if (!uk_nofault_try_read(requested, new_limit))
 			return -EFAULT;
@@ -68,23 +94,21 @@ int uk_sys_prlimit64(int pid, unsigned int resource,
 		result = -ESRCH;
 		goto out;
 	}
-#if CONFIG_LIBPOSIX_FDTAB
-	if (resource == RLIMIT_NOFILE && process)
-		stored = &process->nofile_limit;
-#endif
+	if (process)
+		stored = &process->limits[resource];
 #else
 	if (pid && pid != uk_sys_getpid())
 		return -ESRCH;
 #endif
-	if (stored)
-		previous = *stored;
+	previous = *stored;
 	if (new_limit) {
-		if (!stored) {
+		if (!resource_writable(resource)) {
 			result = -EOPNOTSUPP;
 			goto out;
 		}
 #if CONFIG_LIBPOSIX_FDTAB
-		if (requested.rlim_max > CONFIG_LIBPOSIX_FDTAB_MAXFDS) {
+		if (resource == RLIMIT_NOFILE &&
+		    requested.rlim_max > CONFIG_LIBPOSIX_FDTAB_MAXFDS) {
 			result = -EPERM;
 			goto out;
 		}

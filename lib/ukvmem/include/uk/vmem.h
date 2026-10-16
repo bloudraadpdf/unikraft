@@ -125,6 +125,7 @@ struct uk_vma {
 
 	/** VMA flags - high word bits are from mapping flags */
 #define UK_VMA_FLAG_UNINITIALIZED	0x1 /* Do not initialize memory */
+#define UK_VMA_FLAG_PRIVATE		0x2 /* Private mapping */
 	unsigned long flags;
 
 	/** Desired page level (-1 = no preference) */
@@ -505,6 +506,8 @@ static inline const struct uk_vma *uk_vma_next(const struct uk_vma *vma)
 #define UK_VMA_MAP_POPULATE		0x01 /* Prefault memory */
 #define UK_VMA_MAP_UNINITIALIZED	0x02 /* Do not zero anonymous memory */
 #define UK_VMA_MAP_REPLACE		0x04 /* Replace existing VMAs */
+#define UK_VMA_MAP_PRIVATE		0x08 /* Private mapping */
+#define UK_VMA_MAP_SEARCH		0x10 /* Find space at or above vaddr */
 
 #define UK_VMA_MAP_SIZE_SHIFT		5
 #define UK_VMA_MAP_SIZE_BITS		6
@@ -539,6 +542,7 @@ static inline const struct uk_vma *uk_vma_next(const struct uk_vma *vma)
  *   aligned to the specified page size. Can be UK_PAGING_VADDR_ANY to
  *   automatically select a virtual address. The variable will receive the
  *   address on success.
+ *   UK_VMA_MAP_SEARCH uses this address as the lower search bound.
  * @param len
  *   The length of the virtual memory area in bytes. len must always be aligned
  *   to the desired page size. If UK_VMA_MAP_REPLACE is specified and vaddr+len

@@ -72,7 +72,6 @@ static int do_mmap(void **addr, size_t len, int prot, int flags, int fd,
 	struct uk_fdio_vma_args fdio_vma_args = {0};
 #endif /* CONFIG_LIBPOSIX_FDIO */
 #endif /* CONFIG_LIBPOSIX_FDTAB */
-	const void *owner = NULL;
 	void *vargs;
 	const struct uk_vma_ops *vops;
 	unsigned int order, lvl = UK_PAGING_PAGE_LEVEL;
@@ -108,14 +107,8 @@ static int do_mmap(void **addr, size_t len, int prot, int flags, int fd,
 	}
 
 	if (flags & MAP_ANONYMOUS) {
-		if ((flags & MAP_SHARED) ||
-		    (flags & MAP_SHARED_VALIDATE) == MAP_SHARED_VALIDATE) {
-			/* MAP_SHARED(_VALIDATE): Note, we ignore it for
-			 * anonymous memory since we only have a single
-			 * process. There is no one to share the mapping with.
-			 * It is thus fine to create a private mapping.
-			 */
-		} else if (unlikely(!(flags & MAP_PRIVATE)))
+		if ((flags & MAP_TYPE) != MAP_SHARED &&
+		    (flags & MAP_TYPE) != MAP_PRIVATE)
 			return -EINVAL;
 
 		/* We do not support unrestricted VMAs */
@@ -148,10 +141,10 @@ static int do_mmap(void **addr, size_t len, int prot, int flags, int fd,
 #if CONFIG_LIBPOSIX_FDTAB
 		union uk_shim_file sf;
 
-		if ((flags & MAP_SHARED) ||
-		    (flags & MAP_SHARED_VALIDATE) == MAP_SHARED_VALIDATE)
+		if ((flags & MAP_TYPE) == MAP_SHARED ||
+		    (flags & MAP_TYPE) == MAP_SHARED_VALIDATE)
 			vflags |= UK_VMA_FILE_SHARED;
-		else if (unlikely(!(flags & MAP_PRIVATE)))
+		else if (unlikely((flags & MAP_TYPE) != MAP_PRIVATE))
 			return -EINVAL;
 
 		if (unlikely(flags & MAP_GROWSDOWN))
@@ -210,19 +203,20 @@ static int do_mmap(void **addr, size_t len, int prot, int flags, int fd,
 	/* MAP_NONBLOCKED: Ignored for now */
 	/* MAP_NORESERVE : Ignored for now */
 
+	if ((flags & MAP_TYPE) == MAP_PRIVATE)
+		vflags |= UK_VMA_MAP_PRIVATE;
+	for (;;) {
 #if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
-	owner = uk_posix_process_vm_owner();
+		rc = uk_posix_process_vm_map(vas, &vaddr, len, vattr, vflags,
+					     vops, vargs);
+#else
+		rc = uk_vma_map(vas, &vaddr, len, vattr, vflags, NULL,
+				vops, vargs, NULL);
 #endif
-	rc = uk_vma_map(vas, &vaddr, len, vattr, vflags, NULL, vops, vargs,
-			owner);
-	if (unlikely(rc && !(flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) &&
-		     vaddr != UK_PAGING_VADDR_ANY)) {
-		/* If addr was meant as a hint and we fail to map, we retry
-		 * without specifying an address.
-		 */
+		if (!rc || (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) ||
+		    vaddr == UK_PAGING_VADDR_ANY)
+			break;
 		vaddr = UK_PAGING_VADDR_ANY;
-		rc = uk_vma_map(vas, &vaddr, len, vattr, vflags, NULL, vops,
-				vargs, owner);
 	}
 
 #if CONFIG_LIBPOSIX_FDTAB && CONFIG_LIBPOSIX_FDIO
@@ -258,7 +252,11 @@ UK_SYSCALL_R_DEFINE(int, munmap, void *, addr, size_t, len)
 	if (unlikely(len == 0))
 		return -EINVAL;
 
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+	rc = uk_posix_process_vm_unmap(vas, vaddr, UK_PAGING_PAGE_ALIGN_UP(len));
+#else
 	rc = uk_vma_unmap(vas, vaddr, UK_PAGING_PAGE_ALIGN_UP(len), 0);
+#endif
 	if (unlikely(rc)) {
 		if (rc == -ENOENT)
 			return 0;
@@ -280,8 +278,13 @@ UK_SYSCALL_R_DEFINE(int, mprotect, void *, addr, size_t, len, int, prot)
 	if (unlikely(prot & ~VALID_PROT_MASK))
 		return -EINVAL;
 
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+	rc = uk_posix_process_vm_protect(vas, vaddr,
+					 UK_PAGING_PAGE_ALIGN_UP(len), vattr);
+#else
 	rc = uk_vma_set_attr(vas, vaddr, UK_PAGING_PAGE_ALIGN_UP(len), vattr,
 			     UK_VMA_FLAG_STRICT_VMA_CHECK);
+#endif
 	if (unlikely(rc)) {
 		if (rc == -ENOENT)
 			return -ENOMEM;
@@ -311,8 +314,13 @@ UK_SYSCALL_R_DEFINE(int, madvise, void *, addr, size_t, len, int, advice)
 		break;
 	}
 
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+	rc = uk_posix_process_vm_advise(vas, vaddr,
+					UK_PAGING_PAGE_ALIGN_UP(len), vadvice);
+#else
 	rc = uk_vma_advise(vas, vaddr, UK_PAGING_PAGE_ALIGN_UP(len), vadvice,
 			   UK_VMA_FLAG_STRICT_VMA_CHECK);
+#endif
 	if (unlikely(rc)) {
 		if (rc == -ENOENT)
 			return -ENOMEM;
@@ -334,7 +342,12 @@ UK_SYSCALL_R_DEFINE(int, msync, void*, addr, size_t, length, int, flags)
 	length = UK_PAGING_PAGE_ALIGN_UP(length);
 	if ((__vaddr_t)addr > __VADDR_MAX - length)
 		return -ENOMEM;
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+	int rc = uk_posix_process_vm_sync(uk_vas_get_active(), (__vaddr_t)addr,
+					 length);
+#else
 	int rc = uk_vma_sync(uk_vas_get_active(), (__vaddr_t)addr, length);
+#endif
 	return rc == -ENOENT ? -ENOMEM : rc;
 }
 

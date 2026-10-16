@@ -185,6 +185,7 @@ UK_LLSYSCALL_R_DEFINE(long, shmat, int, id, const void *, address, int, flags)
 	struct uk_ofile *mapping;
 	__vaddr_t base = address ? (__vaddr_t)address : UK_PAGING_VADDR_ANY;
 	unsigned long attr = UK_PAGING_PAGE_ATTR_PROT_READ;
+	struct uk_fdio_vma_args mapping_args;
 	unsigned long map_flags = UK_VMA_FILE_SHARED;
 	unsigned int mode = 4;
 	size_t length;
@@ -242,8 +243,12 @@ UK_LLSYSCALL_R_DEFINE(long, shmat, int, id, const void *, address, int, flags)
 	object->references++;
 	uk_list_add_tail(&attachment->link, &attachments);
 	length = ALIGN_UP(segment->status.size, UK_PAGING_PAGE_SIZE);
-	rc = uk_fdio_map_file(uk_vas_get_active(), &base, length, attr,
-			      map_flags, mapping, 0, &attachment->lifetime);
+	mapping_args = (struct uk_fdio_vma_args) {
+		.of = mapping,
+		.lifetime = &attachment->lifetime,
+	};
+	rc = uk_posix_process_vm_map(uk_vas_get_active(), &base, length, attr,
+				     map_flags, &uk_fdio_vma_ops, &mapping_args);
 	uk_ofile_release(mapping);
 	if (!rc) {
 		attachment->base = base;

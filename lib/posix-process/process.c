@@ -290,13 +290,7 @@ struct posix_process *pprocess_create(struct uk_alloc *a,
 	UK_INIT_LIST_HEAD(&pprocess->children);
 
 	pprocess->state = POSIX_PROCESS_RUNNING;
-#if CONFIG_LIBPOSIX_FDTAB
-	uk_mutex_lock(&pprocess_mutex);
-	pprocess->nofile_limit = parent_pprocess ? parent_pprocess->nofile_limit :
-		(struct rlimit) { CONFIG_LIBPOSIX_FDTAB_MAXFDS,
-				  CONFIG_LIBPOSIX_FDTAB_MAXFDS };
-	uk_mutex_unlock(&pprocess_mutex);
-#endif
+	pprocess_resource_init(pprocess, parent_pprocess);
 
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 	ret = pprocess_signal_pdesc_alloc(pprocess);
@@ -496,6 +490,7 @@ pid_t uk_posix_process_run(uk_posix_process_mainlike_func fn,
 		ret = -ENOMEM;
 		goto err_free_thread;
 	}
+	vm_new->stack_size = STACK_SIZE;
 
 	/* Raise the execve event */
 	execve_data = (struct posix_process_execve_event_data) {

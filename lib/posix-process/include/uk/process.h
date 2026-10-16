@@ -86,7 +86,17 @@ pid_t uk_sys_getpid(void);
 int uk_posix_process_create_pthread(struct uk_thread *thread);
 bool uk_posix_process_exit_requested(void);
 #if CONFIG_LIBUKVMEM
-const void *uk_posix_process_vm_owner(void);
+struct uk_vas;
+struct uk_vma_ops;
+int uk_posix_process_vm_map(struct uk_vas *vas, __vaddr_t *address,
+			    __sz length, unsigned long attr, unsigned long flags,
+			    const struct uk_vma_ops *ops, void *args);
+int uk_posix_process_vm_unmap(struct uk_vas *vas, __vaddr_t address, __sz length);
+int uk_posix_process_vm_protect(struct uk_vas *vas, __vaddr_t address,
+				__sz length, unsigned long attr);
+int uk_posix_process_vm_advise(struct uk_vas *vas, __vaddr_t address,
+			       __sz length, unsigned long advice);
+int uk_posix_process_vm_sync(struct uk_vas *vas, __vaddr_t address, __sz length);
 #endif
 
 #endif /* CONFIG_LIBPOSIX_PROCESS_MULTITHREADING */

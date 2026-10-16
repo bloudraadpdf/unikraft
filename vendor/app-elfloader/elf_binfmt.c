@@ -73,6 +73,7 @@ static int uk_binfmt_load_elf(struct uk_binfmt_loader_args *args)
 				  args->argc - 1, &args->argv[1],
 				  args->envc, args->envp, rand);
 
+	args->image_data_size = prog->image_data_size;
 	elf_release(prog);
 	return UK_BINFMT_HANDLED;
 err_unload:

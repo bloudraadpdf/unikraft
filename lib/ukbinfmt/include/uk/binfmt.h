@@ -37,6 +37,7 @@ struct uk_binfmt_loader_args {
 	struct ukarch_ctx ctx;
 	const __uptr *auxv;
 	__sz stack_size;
+	__sz image_data_size;
 };
 
 /* Loader load function.
