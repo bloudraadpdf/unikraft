@@ -49,6 +49,7 @@
 #include <uk/futex.h>
 #include <uk/syscall.h>
 #if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+#include <uk/nofault.h>
 #include <uk/process.h>
 #endif
 #include <uk/atomic.h>
@@ -537,25 +538,43 @@ UK_LLSYSCALL_R_DEFINE(pid_t, set_tid_address, pid_t *, tid_ref)
 	return self_tid;
 }
 
+static void futex_clear_child_tid(struct uk_thread *thread)
+{
+	pid_t *clear_ref = uk_thread_uktls_var(thread, child_tid_clear_ref);
+	pid_t zero = 0;
+
+	uk_thread_uktls_var(thread, child_tid_clear_ref) = NULL;
+	if (clear_ref) {
+		(void)uk_nofault_try_write(zero, clear_ref);
+		futex_wake((uint32_t *)clear_ref, 1);
+	}
+}
+
+#if CONFIG_LIBPOSIX_PROCESS_EXECVE
+static int futex_exec_handler(void *arg)
+{
+	struct posix_process_execve_event_data *event = arg;
+
+	futex_clear_child_tid(event->thread);
+	return UK_EVENT_HANDLED_CONT;
+}
+
+POSIX_PROCESS_EXECVE_HANDLER_PRIO(futex_exec_handler, UK_PRIO_EARLIEST);
+#endif
+
 static int pthread_exit_handler(void *arg)
 {
 	struct posix_process_ptexit_event_data *event_data;
 	struct uk_list_head *itr, *tmp;
 	struct uk_thread *child;
 	struct uk_futex *f;
-	pid_t *clear_ref;
 
 	UK_ASSERT(arg);
 
 	event_data = (struct posix_process_ptexit_event_data *)arg;
 	child = event_data->thread;
 
-	/* Clear child TID at the stored reference */
-	clear_ref = uk_thread_uktls_var(child, child_tid_clear_ref);
-	if (clear_ref) {
-		uk_store_n(clear_ref, 0);
-		futex_wake((uint32_t *)clear_ref, 1);
-	}
+	futex_clear_child_tid(child);
 
 	/* Clear this thread's entries from the list */
 	uk_spin_lock(&futex_list_lock);
