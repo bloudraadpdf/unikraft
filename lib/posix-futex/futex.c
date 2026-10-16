@@ -104,56 +104,6 @@ bool uk_futex_has_waiters(__u32 *address)
 }
 
 
-#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING && CONFIG_LIBPOSIX_PROCESS_SIGNAL
-static __uk_tls bool pi_binary_call;
-static __uk_tls __uptr pi_binary_address;
-
-static void pi_restart_prepare(struct uk_syscall_enter_ctx *context)
-{
-	struct ukarch_execenv *environment = context->execenv;
-	int command;
-
-	if (!(context->flags & UK_SYSCALL_ENTER_CTX_BINARY_SYSCALL))
-		return;
-	pi_binary_call = false;
-	if (_UK_EXECENV_REGS_GET(environment, __syscall_rsyscall) != SYS_futex)
-		return;
-	command = _UK_EXECENV_REGS_GET(environment, __syscall_rarg1) &
-		FUTEX_CMD_MASK;
-	if (command == FUTEX_LOCK_PI || command == FUTEX_LOCK_PI2) {
-		pi_binary_address =
-			_UK_EXECENV_REGS_GET(environment, __syscall_rarg0);
-		pi_binary_call = true;
-	}
-}
-
-static void pi_restart_complete(struct uk_syscall_exit_ctx *context)
-{
-	struct ukarch_execenv *environment = context->execenv;
-	__uptr pc;
-
-	if (!(context->flags & UK_SYSCALL_EXIT_CTX_BINARY_SYSCALL) ||
-	    !pi_binary_call)
-		return;
-	pi_binary_call = false;
-	if ((long)_UK_EXECENV_REGS_GET(environment, __syscall_rret0) != -EINTR)
-		return;
-	_UK_EXECENV_REGS_SET(environment, __syscall_rarg0, pi_binary_address);
-	_UK_EXECENV_REGS_SET(environment, __syscall_rsyscall, SYS_futex);
-	pc = uk_lcpu_regs_get(environment->regs, PC);
-#if CONFIG_ARCH_X86_64
-	_UK_EXECENV_REGS_SET(environment, __syscall_rret0, SYS_futex);
-	pc -= 2;
-#else
-	pc -= 4;
-#endif
-	uk_lcpu_regs_set(environment->regs, PC, pc);
-}
-
-uk_syscall_entertab_prio(pi_restart_prepare, UK_PRIO_LATEST);
-uk_syscall_exittab_prio(pi_restart_complete,
-	UK_PRIO_BEFORE(UK_PRIO_BEFORE(UK_PRIO_LATEST)));
-#endif
 
 /**
  * Prepare to wait on a futex.
@@ -264,7 +214,8 @@ static int futex_wait(__u32 *uaddr, __u32 val, const __nsec *timeout)
 		if (ret == -EINTR)
 			ret = uk_posix_signal_wait_check(&wait);
 	}
-	uk_posix_signal_wait_end(&wait, ret);
+	uk_posix_signal_wait_end(&wait, ret, timeout ?
+		UK_POSIX_SIGNAL_RESTART_NONE : UK_POSIX_SIGNAL_RESTART_HANDLER);
 	return ret;
 #else
 	return futex_wait_prepare(uaddr, val, timeout, NULL);
@@ -507,7 +458,8 @@ UK_LLSYSCALL_R_DEFINE(int, futex, uint32_t *, uaddr, int, futex_op,
 				&wait.interrupted);
 		if (ret == -EINTR)
 			ret = uk_posix_signal_wait_check(&wait);
-		uk_posix_signal_wait_end(&wait, ret);
+		uk_posix_signal_wait_end(&wait, ret,
+					 UK_POSIX_SIGNAL_RESTART_ALWAYS);
 		return ret;
 	}
 #else

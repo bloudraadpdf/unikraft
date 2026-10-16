@@ -208,7 +208,8 @@ int uk_posix_signal_wait_check(struct uk_posix_signal_wait *wait)
 	return rc;
 }
 
-void uk_posix_signal_wait_end(struct uk_posix_signal_wait *wait, int result)
+void uk_posix_signal_wait_end(struct uk_posix_signal_wait *wait, int result,
+			      enum uk_posix_signal_restart restart)
 {
 	struct uk_signal_tdesc *td;
 
@@ -218,6 +219,8 @@ void uk_posix_signal_wait_end(struct uk_posix_signal_wait *wait, int result)
 	uk_mutex_lock(&pprocess_mutex);
 	UK_ASSERT(td->poll_wait == wait);
 	td->poll_wait = NULL;
+	td->syscall_restart = result == -EINTR && td->wait_pending ?
+		restart : UK_POSIX_SIGNAL_RESTART_NONE;
 	if (wait->masked) {
 		if (result == -EINTR) {
 			td->saved_mask = wait->saved_mask;
@@ -570,6 +573,8 @@ int pprocess_signal_tdesc_init(struct posix_thread *thread)
 	td->restore_mask = false;
 	td->saved_mask = 0;
 	td->poll_wait = NULL;
+	td->syscall_context = NULL;
+	td->syscall_restart = UK_POSIX_SIGNAL_RESTART_NONE;
 	uk_sigemptyset(&td->mask);
 	uk_sigemptyset(&td->sigqueue.pending);
 

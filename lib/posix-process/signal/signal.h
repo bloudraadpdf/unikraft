@@ -17,6 +17,7 @@
 #include <uk/atomic.h>
 #include <uk/list.h>
 #include <uk/process.h>
+#include <uk/posix-signal-wait.h>
 #include <uk/refcount.h>
 #include <uk/wait.h>
 
@@ -198,6 +199,11 @@ struct uk_signal_tdesc {
 	struct uk_signal_queue sigqueue;
 	struct uk_waitq waitq;
 	struct uk_posix_signal_wait *poll_wait;
+	struct ukarch_execenv *syscall_context;
+	__uptr syscall_pc;
+	long syscall_number;
+	long syscall_arg0;
+	enum uk_posix_signal_restart syscall_restart;
 	siginfo_t wait_info;
 	uk_sigset_t saved_mask;
 	bool notification;

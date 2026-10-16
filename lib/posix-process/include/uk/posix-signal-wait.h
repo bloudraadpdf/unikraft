@@ -9,6 +9,12 @@
 
 struct posix_thread;
 
+enum uk_posix_signal_restart {
+	UK_POSIX_SIGNAL_RESTART_NONE,
+	UK_POSIX_SIGNAL_RESTART_HANDLER,
+	UK_POSIX_SIGNAL_RESTART_ALWAYS
+};
+
 struct uk_posix_signal_wait {
 	struct posix_thread *thread;
 	struct uk_waitq *queue; /* NULL selects direct thread wake-up. */
@@ -21,6 +27,7 @@ int uk_posix_signal_wait_init(struct uk_posix_signal_wait *wait,
 			      struct uk_waitq *queue,
 			      const sigset_t *mask, size_t size);
 int uk_posix_signal_wait_check(struct uk_posix_signal_wait *wait);
-void uk_posix_signal_wait_end(struct uk_posix_signal_wait *wait, int result);
+void uk_posix_signal_wait_end(struct uk_posix_signal_wait *wait, int result,
+			      enum uk_posix_signal_restart restart);
 
 #endif

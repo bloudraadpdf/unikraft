@@ -143,7 +143,7 @@ static int msg_send(int id, struct sysv_message *message, int flags)
 		if (rc)
 			break;
 	}
-	uk_posix_signal_wait_end(&sw, rc);
+	uk_posix_signal_wait_end(&sw, rc, UK_POSIX_SIGNAL_RESTART_NONE);
 	sysv_put(object);
 out:
 	uk_mutex_unlock(&pprocess_mutex);
@@ -275,7 +275,7 @@ UK_LLSYSCALL_R_DEFINE(long, msgrcv, int, id, void *, buffer, size_t, size,
 		if (rc)
 			break;
 	}
-	uk_posix_signal_wait_end(&sw, rc);
+	uk_posix_signal_wait_end(&sw, rc, UK_POSIX_SIGNAL_RESTART_NONE);
 	sysv_put(object);
 out:
 	uk_mutex_unlock(&pprocess_mutex);

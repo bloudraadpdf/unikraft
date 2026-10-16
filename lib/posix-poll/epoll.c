@@ -752,7 +752,7 @@ int uk_sys_epoll_pwait2(const struct uk_file *epf, struct epoll_event *events,
 		}
 	}
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
-	uk_posix_signal_wait_end(&wait, ret);
+	uk_posix_signal_wait_end(&wait, ret, UK_POSIX_SIGNAL_RESTART_NONE);
 #endif
 	return ret;
 }

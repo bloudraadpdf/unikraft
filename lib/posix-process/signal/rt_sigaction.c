@@ -47,9 +47,6 @@ UK_LLSYSCALL_R_DEFINE(int, rt_sigaction, int, signum,
 	if (act->ks_flags & SA_NOCLDSTOP)
 		uk_pr_warn("ks_flags: SA_NOCLDSTOP not supported, ignoring\n");
 
-	if (act->ks_flags & SA_RESTART)
-		uk_pr_warn("ks_flags: SA_RESTART not supported, ignoring\n");
-
 	memcpy(KERN_SIGACTION(proc, signum), act,
 	       sizeof(struct kern_sigaction));
 

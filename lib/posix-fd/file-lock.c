@@ -270,7 +270,8 @@ out:
     uk_mutex_unlock(&lock_mutex);
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
     if (block)
-        uk_posix_signal_wait_end(&signal, result);
+	uk_posix_signal_wait_end(&signal, result,
+				 UK_POSIX_SIGNAL_RESTART_HANDLER);
 #endif
     return result;
 }

@@ -12,6 +12,7 @@
 #include <uk/prio.h>
 #include <uk/process.h>
 #include <uk/syscall.h>
+#include <uk/bits/syscall_linuxabi.h>
 #if CONFIG_LIBUKVMEM
 #include <uk/vmem.h>
 #endif
@@ -55,6 +56,57 @@ static void uk_sigact_stop(int __unused sig)
 static void uk_sigact_cont(int __unused sig)
 {
 	uk_pr_warn("SIG_CONT not supported\n");
+}
+
+static void syscall_enter(struct uk_syscall_enter_ctx *context)
+{
+	struct posix_thread *thread = uk_pthread_current();
+	struct uk_signal_tdesc *state;
+
+	if (!thread || !context->execenv ||
+	    !(context->flags & UK_SYSCALL_ENTER_CTX_BINARY_SYSCALL))
+		return;
+	state = thread->signal;
+	state->syscall_context = context->execenv;
+	state->syscall_pc = uk_lcpu_regs_get(context->execenv->regs, PC);
+	state->syscall_number =
+		_UK_EXECENV_REGS_GET(context->execenv, __syscall_rsyscall);
+	state->syscall_arg0 =
+		_UK_EXECENV_REGS_GET(context->execenv, __syscall_rarg0);
+	state->syscall_restart = UK_POSIX_SIGNAL_RESTART_NONE;
+}
+
+uk_syscall_entertab_prio(syscall_enter, UK_PRIO_AFTER(UK_PRIO_EARLIEST));
+
+static void restart_syscall(struct uk_signal_tdesc *state,
+			    struct ukarch_execenv *context,
+			    const struct kern_sigaction *action)
+{
+#if CONFIG_ARCH_X86_64
+	const unsigned int instruction_size = 2;
+#elif CONFIG_ARCH_ARM_64
+	const unsigned int instruction_size = 4;
+#else
+#error Unsupported syscall instruction size
+#endif
+
+	if (state->syscall_context != context)
+		return;
+	enum uk_posix_signal_restart restart = state->syscall_restart;
+
+	state->syscall_restart = UK_POSIX_SIGNAL_RESTART_NONE;
+	if (restart == UK_POSIX_SIGNAL_RESTART_NONE ||
+	    (restart == UK_POSIX_SIGNAL_RESTART_HANDLER && action &&
+	     !(action->ks_flags & SA_RESTART)) ||
+	    (long)_UK_EXECENV_REGS_GET(context, __syscall_rret0) != -EINTR ||
+	    state->syscall_pc < instruction_size)
+		return;
+	_UK_EXECENV_REGS_SET(context, __syscall_rret0, state->syscall_number);
+	_UK_EXECENV_REGS_SET(context, __syscall_rarg0, state->syscall_arg0);
+	_UK_EXECENV_REGS_SET(context, __syscall_rsyscall,
+			     state->syscall_number);
+	uk_lcpu_regs_set(context->regs, PC,
+			 state->syscall_pc - instruction_size);
 }
 
 bool pprocess_signal_is_deliverable(struct posix_thread *pthread, int signum)
@@ -130,6 +182,7 @@ static bool do_deliver(struct posix_thread *pthread, struct uk_signal *sig,
 		goto out_restore_mask;
 	}
 
+	restart_syscall(pthread->signal, execenv, &action);
 	pprocess_rseq_interrupt(execenv);
 	pprocess_signal_arch_prepare(sig, &action, execenv, &saved_mask);
 	prepared = true;
@@ -231,6 +284,15 @@ void pprocess_signal_deliver(struct ukarch_execenv *execenv)
 static void uk_signal_deliver(struct uk_syscall_exit_ctx *exit_ctx)
 {
 	pprocess_signal_deliver(exit_ctx->execenv);
+	if (exit_ctx->flags & UK_SYSCALL_EXIT_CTX_BINARY_SYSCALL) {
+		struct posix_thread *thread = uk_pthread_current();
+
+		if (thread) {
+			restart_syscall(thread->signal,
+					exit_ctx->execenv, NULL);
+			thread->signal->syscall_context = NULL;
+		}
+	}
 }
 
 uk_syscall_exittab_prio(uk_signal_deliver, UK_PRIO_BEFORE(UK_PRIO_LATEST));

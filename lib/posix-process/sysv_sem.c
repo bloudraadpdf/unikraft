@@ -365,7 +365,7 @@ static int sem_operate(int id, const struct sysv_sembuf *operations,
 			break;
 		}
 	}
-	uk_posix_signal_wait_end(&sw, rc);
+	uk_posix_signal_wait_end(&sw, rc, UK_POSIX_SIGNAL_RESTART_NONE);
 	sysv_put(object);
 unlock:
 	uk_mutex_unlock(mutex);

@@ -117,7 +117,7 @@ static int nanosleep_wait(__nsec deadline)
 		uk_sched_yield();
 	}
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
-	uk_posix_signal_wait_end(&signal, ret);
+	uk_posix_signal_wait_end(&signal, ret, UK_POSIX_SIGNAL_RESTART_NONE);
 #endif
 	return ret;
 }

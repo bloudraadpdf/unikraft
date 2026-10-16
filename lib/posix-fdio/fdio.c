@@ -93,7 +93,7 @@ static int fdio_wait(const struct uk_file *file, uk_pollevent events)
 	if (rc)
 		return rc;
 	rc = uk_fdio_poll(file, events, 0, &wait);
-	uk_posix_signal_wait_end(&wait, rc);
+	uk_posix_signal_wait_end(&wait, rc, UK_POSIX_SIGNAL_RESTART_HANDLER);
 	return rc < 0 ? rc : 0;
 #else
 	uk_file_poll(file, events);
