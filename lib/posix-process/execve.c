@@ -107,8 +107,6 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 	loader_args.argv = (const char **)argv;
 	loader_args.envp = (const char **)envp;
 	loader_args.pathname = (char *)pathname;
-	loader_args.loader = NULL;
-	loader_args.user = NULL;
 	loader_args.auxv = NULL;
 
 	/* Assume that if argv is set the caller follows the convention */

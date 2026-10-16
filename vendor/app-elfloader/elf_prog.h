@@ -126,6 +126,9 @@ struct elf_prog *elf_load_vfs(struct uk_alloc *a, const char *path,
  */
 void elf_unload(struct elf_prog *elf_prog);
 
+/* Free loader metadata while retaining the loaded image and context. */
+void elf_release(struct elf_prog *elf_prog);
+
 /* The returned auxiliary vector lives in the supplied application stack. */
 const __uptr *elf_ctx_init(struct ukarch_ctx *ctx, struct elf_prog *prog,
 			   const char *argv0, int argc, const char *argv[],

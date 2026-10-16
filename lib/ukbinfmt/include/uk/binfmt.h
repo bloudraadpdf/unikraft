@@ -37,8 +37,6 @@ struct uk_binfmt_loader_args {
 	struct ukarch_ctx ctx;
 	const __uptr *auxv;
 	__sz stack_size;
-	struct uk_binfmt_loader *loader;
-	void *user; /* private loader data */
 };
 
 /* Loader load function.
@@ -56,13 +54,6 @@ struct uk_binfmt_loader_args {
  */
 typedef	int (*uk_binfmt_load_fn)(struct uk_binfmt_loader_args *args);
 
-/* Loader unload function.
- *
- * @param args Loader args.
- * @return zero on success or negative value on error.
- */
-typedef	int (*uk_binfmt_unload_fn)(struct uk_binfmt_loader_args *args);
-
 struct uk_binfmt_loader {
 	/** loader name */
 	const char *name;
@@ -71,7 +62,6 @@ struct uk_binfmt_loader {
 	/** loader ops */
 	struct {
 		uk_binfmt_load_fn load;
-		uk_binfmt_load_fn unload;
 	} ops;
 	struct uk_list_head list_head;
 };
@@ -91,14 +81,6 @@ int uk_binfmt_register(struct uk_binfmt_loader *loader);
  * @return zero on success, negative value on error
  */
 int uk_binfmt_load(struct uk_binfmt_loader_args *args);
-
-/**
- * Unload executable
- *
- * @param args[in|out] Loader args. May be updated by the loader
- * @return zero on success, negative value on error
- */
-int uk_binfmt_unload(struct uk_binfmt_loader_args *args);
 
 #ifdef __cplusplus
 }

@@ -21,7 +21,6 @@ int uk_binfmt_register(struct uk_binfmt_loader *loader)
 	UK_ASSERT(loader);
 	UK_ASSERT(loader->name);
 	UK_ASSERT(loader->ops.load);
-	UK_ASSERT(loader->ops.unload);
 	UK_ASSERT(loader->type != UK_BINFMT_LOADER_TYPE_NONE);
 
 	uk_pr_debug("Register loader: %s\n", loader->name);
@@ -40,8 +39,6 @@ int uk_binfmt_load(struct uk_binfmt_loader_args *args)
 	UK_ASSERT(args->alloc);
 	UK_ASSERT(args->ctx.sp);
 	UK_ASSERT(args->stack_size);
-	UK_ASSERT(!args->user);
-	UK_ASSERT(!args->loader);
 
 	/* Try SCRIPT types first. These should update args and
 	 * fall back to EXEC types.
@@ -53,13 +50,8 @@ int uk_binfmt_load(struct uk_binfmt_loader_args *args)
 			uk_pr_err("binfmt loader error (%d)\n", rc);
 			return rc;
 		}
-		if (rc == UK_BINFMT_HANDLED_CONT) {
-			/* For now restrict the use of private data
-			 * to the final loader.
-			 */
-			UK_ASSERT(!args->user);
-			break; /* Assume one interpreter max */
-		}
+		if (rc == UK_BINFMT_HANDLED_CONT)
+			break;
 		if (rc == UK_BINFMT_HANDLED)
 			return 0;
 	}
@@ -76,7 +68,6 @@ int uk_binfmt_load(struct uk_binfmt_loader_args *args)
 		UK_ASSERT(rc != UK_BINFMT_HANDLED_CONT);
 		if (rc == UK_BINFMT_HANDLED) {
 			uk_pr_debug("Load handled by %s\n", ldr->name);
-			args->loader = ldr;
 			return 0;
 		}
 	}
@@ -84,23 +75,4 @@ int uk_binfmt_load(struct uk_binfmt_loader_args *args)
 	uk_pr_err("%s: Loader not found\n", args->pathname);
 
 	return -ENOEXEC;
-}
-
-int uk_binfmt_unload(struct uk_binfmt_loader_args *args)
-{
-	int rc;
-
-	UK_ASSERT(args);
-	UK_ASSERT(args->loader);
-
-	uk_pr_debug("Unload handled by %s\n", args->loader->name);
-	rc = args->loader->ops.unload(args);
-	if (unlikely(rc < 0)) {
-		uk_pr_err("binfmt unload error (%d)\n", rc);
-		return rc;
-	}
-
-	UK_ASSERT(rc != UK_BINFMT_HANDLED_CONT);
-
-	return 0;
 }
