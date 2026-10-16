@@ -82,7 +82,7 @@ int uk_fdio_poll(const struct uk_file *file, uk_pollevent events,
 }
 #endif
 
-static int fdio_wait(const struct uk_file *file, uk_pollevent events)
+int uk_fdio_wait(const struct uk_file *file, uk_pollevent events)
 {
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 	struct uk_posix_signal_wait wait;
@@ -233,7 +233,7 @@ ssize_t uk_sys_preadv(struct uk_ofile *of, const struct iovec *iov, int iovcnt,
 			uk_file_runlock(f);
 		if (!_SHOULD_BLOCK(r, mode))
 			break;
-		r = fdio_wait(f, UKFD_POLLIN|UKFD_POLL_ALWAYS);
+		r = uk_fdio_wait(f, UKFD_POLLIN | UKFD_POLL_ALWAYS);
 		if (r)
 			return fdio_buffer_finish(&buffer, r, 0);
 	}
@@ -292,7 +292,7 @@ ssize_t uk_sys_readv(struct uk_ofile *of, const struct iovec *iov, int iovcnt)
 			break;
 		if (seekable)
 			_of_unlock(of);
-		r = fdio_wait(f, UKFD_POLLIN|UKFD_POLL_ALWAYS);
+		r = uk_fdio_wait(f, UKFD_POLLIN | UKFD_POLL_ALWAYS);
 		if (r)
 			return fdio_buffer_finish(&buffer, r, 0);
 	}
@@ -370,7 +370,7 @@ ssize_t uk_sys_preadv2(struct uk_ofile *of, const struct iovec *iov, int iovcnt,
 			break;
 		if (use_pos)
 			_of_unlock(of);
-		r = fdio_wait(f, UKFD_POLLIN|UKFD_POLL_ALWAYS);
+		r = uk_fdio_wait(f, UKFD_POLLIN | UKFD_POLL_ALWAYS);
 		if (r)
 			return fdio_buffer_finish(&buffer, r, 0);
 	}
@@ -429,7 +429,7 @@ ssize_t uk_sys_pwritev(struct uk_ofile *of, const struct iovec *iov, int iovcnt,
 			uk_file_wunlock(f);
 		if (!_SHOULD_BLOCK(r, mode))
 			break;
-		r = fdio_wait(f, UKFD_POLLOUT|UKFD_POLL_ALWAYS);
+		r = uk_fdio_wait(f, UKFD_POLLOUT | UKFD_POLL_ALWAYS);
 		if (r)
 			return fdio_buffer_finish(&buffer, r, 1);
 	}
@@ -499,7 +499,7 @@ ssize_t uk_sys_writev(struct uk_ofile *of, const struct iovec *iov, int iovcnt)
 			break;
 		if (seekable)
 			_of_unlock(of);
-		r = fdio_wait(f, UKFD_POLLOUT|UKFD_POLL_ALWAYS);
+		r = uk_fdio_wait(f, UKFD_POLLOUT | UKFD_POLL_ALWAYS);
 		if (r)
 			return fdio_buffer_finish(&buffer, r, 1);
 	}
@@ -589,7 +589,7 @@ ssize_t uk_sys_pwritev2(struct uk_ofile *of, const struct iovec *iov,
 			break;
 		if (use_pos)
 			_of_unlock(of);
-		r = fdio_wait(f, UKFD_POLLOUT|UKFD_POLL_ALWAYS);
+		r = uk_fdio_wait(f, UKFD_POLLOUT | UKFD_POLL_ALWAYS);
 		if (r)
 			return fdio_buffer_finish(&buffer, r, 1);
 	}

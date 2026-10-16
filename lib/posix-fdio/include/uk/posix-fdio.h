@@ -32,6 +32,8 @@ int uk_fdio_poll(const struct uk_file *file, uk_pollevent events,
 		 __nsec deadline, struct uk_posix_signal_wait *wait);
 #endif
 
+int uk_fdio_wait(const struct uk_file *file, uk_pollevent events);
+
 /* Internal syscalls */
 /* I/O */
 

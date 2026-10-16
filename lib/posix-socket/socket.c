@@ -45,6 +45,7 @@
 #include <uk/file.h>
 #include <uk/file/nops.h>
 #include <uk/posix-fd.h>
+#include <uk/posix-fdio.h>
 #include <uk/errptr.h>
 #include <uk/print.h>
 #include <uk/trace.h>
@@ -351,7 +352,12 @@ const struct uk_file *uk_socket_accept(const struct uk_file *sock, int blocking,
 		if (!blocking ||
 		    !PTRISERR(new_data) || !_ERR_BLOCK(PTR2ERR(new_data)))
 			break;
-		(void)uk_file_poll(sock, UKFD_POLLIN);
+		int rc = uk_fdio_wait(sock, UKFD_POLLIN | UKFD_POLL_ALWAYS);
+
+		if (rc < 0) {
+			new_data = ERR2PTR(rc);
+			break;
+		}
 	}
 	if (unlikely(PTRISERR(new_data))) {
 		uk_free(n->driver->allocator, al);
@@ -469,7 +475,6 @@ UK_SYSCALL_R_DEFINE(int, bind, int, sock, const struct sockaddr *, addr,
 	uk_file_wlock(of->file);
 	ret = posix_socket_bind(of->file, addr, addr_len);
 	uk_file_wunlock(of->file);
-	uk_ofile_release(of);
 
 out:
 	if (ret) {
@@ -483,6 +488,8 @@ out:
 		trace_posix_socket_bind_ret(ret);
 	}
 
+	if (!PTRISERR(of))
+		uk_ofile_release(of);
 	return ret;
 }
 
@@ -685,14 +692,18 @@ UK_SYSCALL_R_DEFINE(int, connect, int, sock, const struct sockaddr *, addr,
 	if (ret == -EINPROGRESS && _SHOULD_BLOCK(mode)) {
 		socklen_t _opsz = sizeof(ret);
 
-		(void)uk_file_poll(of->file, UKFD_POLLOUT | UKFD_POLL_ALWAYS);
-		/* Get err status from getsockopt */
-		uk_file_rlock(of->file);
-		posix_socket_getsockopt(of->file, SOL_SOCKET, SO_ERROR,
-					&ret, &_opsz);
-		uk_file_runlock(of->file);
+		ret = uk_fdio_wait(of->file, UKFD_POLLOUT | UKFD_POLL_ALWAYS);
+		if (!ret) {
+			int error;
+
+			uk_file_rlock(of->file);
+			ret = posix_socket_getsockopt(of->file, SOL_SOCKET,
+						      SO_ERROR, &error, &_opsz);
+			uk_file_runlock(of->file);
+			if (!ret)
+				ret = -error;
+		}
 	}
-	uk_ofile_release(of);
 
 out:
 	if (ret && ret != -EINPROGRESS) {
@@ -705,6 +716,8 @@ out:
 		uk_socket_event_raise(&al->evd, CONNECT);
 		trace_posix_socket_connect_ret(ret);
 	}
+	if (!PTRISERR(of))
+		uk_ofile_release(of);
 	return ret;
 }
 
@@ -731,7 +744,6 @@ UK_SYSCALL_R_DEFINE(int, listen, int, sock, int, backlog)
 	uk_file_wlock(of->file);
 	ret = posix_socket_listen(of->file, backlog);
 	uk_file_wunlock(of->file);
-	uk_ofile_release(of);
 
 out:
 	if (ret) {
@@ -743,6 +755,8 @@ out:
 		uk_socket_event_raise(&al->evd, LISTEN);
 		trace_posix_socket_listen_ret(ret);
 	}
+	if (!PTRISERR(of))
+		uk_ofile_release(of);
 	return ret;
 }
 
@@ -780,7 +794,12 @@ UK_SYSCALL_R_DEFINE(ssize_t, recvfrom, int, sock, void *, buf, size_t, len,
 		    (flags & MSG_DONTWAIT) ||
 		    !_ERR_BLOCK(ret))
 			break;
-		(void)uk_file_poll(of->file, UKFD_POLLIN | UKFD_POLL_ALWAYS);
+		int rc = uk_fdio_wait(of->file, UKFD_POLLIN | UKFD_POLL_ALWAYS);
+
+		if (rc < 0) {
+			ret = rc;
+			break;
+		}
 	}
 	uk_ofile_release(of);
 
@@ -831,7 +850,12 @@ UK_SYSCALL_R_DEFINE(ssize_t, recvmsg, int, sock, struct msghdr *, msg,
 		    (flags & MSG_DONTWAIT) ||
 		    !_ERR_BLOCK(ret))
 			break;
-		(void)uk_file_poll(of->file, UKFD_POLLIN | UKFD_POLL_ALWAYS);
+		int rc = uk_fdio_wait(of->file, UKFD_POLLIN | UKFD_POLL_ALWAYS);
+
+		if (rc < 0) {
+			ret = rc;
+			break;
+		}
 	}
 	uk_ofile_release(of);
 
@@ -875,7 +899,13 @@ UK_SYSCALL_R_DEFINE(ssize_t, sendmsg, int, sock, const struct msghdr *, msg,
 		    (flags & MSG_DONTWAIT) ||
 		    !_ERR_BLOCK(ret))
 			break;
-		(void)uk_file_poll(of->file, UKFD_POLLOUT);
+		int rc = uk_fdio_wait(of->file,
+				      UKFD_POLLOUT | UKFD_POLL_ALWAYS);
+
+		if (rc < 0) {
+			ret = rc;
+			break;
+		}
 	}
 	uk_ofile_release(of);
 
@@ -922,7 +952,13 @@ UK_SYSCALL_R_DEFINE(ssize_t, sendto, int, sock, const void *, buf, size_t, len,
 		    (flags & MSG_DONTWAIT) ||
 		    !_ERR_BLOCK(ret))
 			break;
-		(void)uk_file_poll(of->file, UKFD_POLLOUT);
+		int rc = uk_fdio_wait(of->file,
+				      UKFD_POLLOUT | UKFD_POLL_ALWAYS);
+
+		if (rc < 0) {
+			ret = rc;
+			break;
+		}
 	}
 	uk_ofile_release(of);
 
