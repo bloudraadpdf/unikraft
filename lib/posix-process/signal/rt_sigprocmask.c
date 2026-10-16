@@ -30,15 +30,14 @@ UK_LLSYSCALL_R_DEFINE(int, rt_sigprocmask,
 
 	pthread = uk_pthread_current();
 	UK_ASSERT(pthread);
+	if (set)
+		uk_sigcopyset(&tmpset, set);
 
 	if (oldset)
 		*oldset = pthread->signal->mask;
 
 	if (!set)
 		return 0;
-
-	/* copy to mutable set */
-	uk_sigcopyset(&tmpset, set);
 
 	/* ignore attempts to mask SIGKILL / SIGSTOP */
 	uk_sigdelset(&tmpset, SIGKILL);
