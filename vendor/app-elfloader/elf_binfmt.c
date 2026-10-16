@@ -61,17 +61,10 @@ static int uk_binfmt_load_elf(struct uk_binfmt_loader_args *args)
 	rand[1] = 0xF00D;
 #endif /* !CONFIG_LIBUKRANDOM */
 
-	rc = elf_arg_env_count(&args->argc, args->argv,
-			       &args->envc, args->envp,
-			       args->stack_size);
-	if (unlikely(rc < 0)) {
-		uk_pr_err("Could not load ELF (%d)\n", rc);
+	rc = elf_ctx_init(&args->ctx, prog, NULL, args->argv, args->envp,
+			  args->stack_bottom, args->stack_limit, rand, &args->auxv);
+	if (rc)
 		goto err_unload;
-	}
-
-	args->auxv = elf_ctx_init(&args->ctx, prog, args->argv[0],
-				  args->argc - 1, &args->argv[1],
-				  args->envc, args->envp, rand);
 
 	args->image_data_size = prog->image_data_size;
 	elf_release(prog);

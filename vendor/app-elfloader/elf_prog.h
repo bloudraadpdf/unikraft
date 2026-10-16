@@ -130,30 +130,10 @@ void elf_unload(struct elf_prog *elf_prog);
 /* Free loader metadata while retaining the loaded image and context. */
 void elf_release(struct elf_prog *elf_prog);
 
-/* The returned auxiliary vector lives in the supplied application stack. */
-const __uptr *elf_ctx_init(struct ukarch_ctx *ctx, struct elf_prog *prog,
-			   const char *argv0, int argc, const char *argv[],
-			   int envc, const char *environ[],
-			   __u64 rand[2]);
-
-/**
- * Count the number of args and env vars.
- *
- * Besides counting, also validates the total number of ars and env vars against
- * limits. The policy is:
- *
- * The total length of args and env vars can exceed the minimum defined by POSIX
- * (ARG_MAX) as long as it's not larger than 1/4 of the stack size.
- *
- * @param argc[out] Args count. Updated by the function.
- * @param argv      Args vector
- * @param envc[out] Environmental variables count. Updated by the function.
- * @param envp      Environmental variables vector
- * @param stack_sz  Stack size of the process.
- * @return          Length on success, -E2BIG if arguments exceed limit.
- */
-int elf_arg_env_count(int *argc, const char **argv,
-		      int *envc, const char **envp,
-		      __sz stack_sz);
+/* The auxiliary vector lives in the supplied application stack. */
+int elf_ctx_init(struct ukarch_ctx *ctx, struct elf_prog *prog,
+		 const char *argv0, const char *argv[],
+		 const char *environ[], __uptr stack_bottom,
+		 __sz stack_limit, __u64 rand[2], const __uptr **auxv);
 
 #endif /* ELF_PROG_H */

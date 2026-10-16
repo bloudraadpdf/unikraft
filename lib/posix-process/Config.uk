@@ -56,6 +56,12 @@ config LIBPOSIX_PROCESS_EXECVE
 	depends on HAVE_VFS
 	select LIBUKBINFMT
 
+config LIBPOSIX_PROCESS_STACK_SIZE
+	int "Default application stack limit in bytes"
+	depends on LIBPOSIX_PROCESS_EXECVE
+	default 8388608
+	range 4096 1073741824
+
 endif
 
 config LIBPOSIX_PROCESS_MULTIPROCESS

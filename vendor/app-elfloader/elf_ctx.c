@@ -49,6 +49,7 @@
 #include <limits.h>
 #include <string.h>
 #include <uk/assert.h>
+#include <uk/arch/limits.h>
 #include <uk/print.h>
 #include <uk/essentials.h>
 #if CONFIG_ARCH_ARM_64
@@ -199,77 +200,102 @@ static __u64 elf_arm64_hwcap(void)
 #define UK_AUXV_HWCAP		0x0
 #endif /* !CONFIG_ARCH_ARM_64 */
 
-static void infoblk_push(struct ukarch_ctx *ctx, void *buf, __sz len)
+#define ELF_ARG_FLOOR (32 * __PAGE_SIZE)
+#define ELF_ARG_CEILING (6UL * 1024 * 1024)
+#define ELF_ARG_STRLEN (32 * __PAGE_SIZE)
+
+struct elf_arg_count {
+	int argc;
+	int envc;
+	__sz strings;
+};
+
+static int elf_count_string(const char *string, __sz *remaining, __sz *size)
 {
-	UK_ASSERT(ctx);
-	UK_ASSERT(ctx->sp);
-	UK_ASSERT(buf);
-	UK_ASSERT(len);
+	__sz length = strnlen(string, ELF_ARG_STRLEN);
 
-	ctx->sp -= len + 1;
-	memcpy((void *)ctx->sp, buf, len);
-	((char *)ctx->sp)[len] = '\0';
-}
-
-int elf_arg_env_count(int *argc, const char **argv,
-		      int *envc, const char **envp,
-		      __sz stack_sz)
-{
-	const char **a;
-	__sz len;
-
-	*argc = *envc = len = 0;
-	if (!argv && !envp)
-		return 0;
-
-	/* count argv */
-	if (argv)
-		for (a = argv; *a; ++a) {
-			++*argc;
-			len += strlen(*a);
-		}
-
-	/* count envp */
-	if (envp)
-		for (a = envp; *a; ++a) {
-			++*envc;
-			len += strlen(*a);
-		}
-
-	/* POSIX defines the minimum total size of argv + envp to ARG_MAX,
-	 * and leaves the inclusion of NULL terminators, pointers and / or
-	 * alignment bytes as implementation defined. The policy we implement
-	 * is:
-	 *
-	 * - Permit the total length to exceed ARG_MAX as long as it's not
-	 * greater than 1/4 of the stack size. This is essentially the same
-	 * policy as linux (see execve(2)), with the difference that we
-	 * don't apply the MAX_ARG_STRLEN floor of 32 pages.
-	 *
-	 * - Exclude auxv, NULL, alignment bytes from the checked size, as
-	 * these are of fixed size and occupy an insignificant portion of
-	 * the stack.
-	 */
-	UK_ASSERT(IS_ALIGNED(stack_sz, 4));
-	if (unlikely(len > ARG_MAX && len > stack_sz / 4))
+	if (length == ELF_ARG_STRLEN ||
+	    length + 1 + sizeof(__uptr) > *remaining)
 		return -E2BIG;
-
-	return len;
+	*remaining -= length + 1 + sizeof(__uptr);
+	*size += length + 1;
+	return 0;
 }
 
-const __uptr *elf_ctx_init(struct ukarch_ctx *ctx, struct elf_prog *prog,
-			   const char *argv0, int argc, const char *argv[],
-			   int envc, const char *environ[],
-			   __u64 rand[2])
+static int elf_arg_env_count(struct elf_arg_count *count, const char *argv0,
+			     const char **argv, const char **envp,
+			     __sz stack_limit)
 {
-	int args_count = argc + (argv0 ? 1 : 0);
-	char *infoblk_argvp[args_count];
-	char *infoblk_envp[envc];
-	int i, elfvec_len;
-	const __uptr *auxv_start;
+	const char **vectors[] = { argv, envp };
+	int *counts[] = { &count->argc, &count->envc };
+	__sz remaining = MAX(ELF_ARG_FLOOR,
+			    MIN(stack_limit / 4, ELF_ARG_CEILING));
+	int rc;
+
+	memset(count, 0, sizeof(*count));
+	if (argv0) {
+		rc = elf_count_string(argv0, &remaining, &count->strings);
+		if (rc)
+			return rc;
+		++count->argc;
+	}
+	for (__sz i = 0; i < ARRAY_SIZE(vectors); ++i) {
+		const char **vector = vectors[i];
+
+		for (; vector && *vector; ++vector) {
+			rc = elf_count_string(*vector, &remaining,
+					      &count->strings);
+			if (rc)
+				return rc;
+			++*counts[i];
+		}
+	}
+	return 0;
+}
+
+static int infoblk_push(__uptr *sp, __uptr bottom, const void *buffer,
+			__sz size, __uptr *pointer)
+{
+	if (size > *sp - bottom)
+		return -E2BIG;
+	*sp -= size;
+	memcpy((void *)*sp, buffer, size);
+	*pointer = *sp;
+	return 0;
+}
+
+static int infoblk_push_string(__uptr *sp, __uptr bottom, const char *string,
+			       __uptr *pointer)
+{
+	__sz length = strnlen(string, ELF_ARG_STRLEN);
+
+	if (length == ELF_ARG_STRLEN)
+		return -E2BIG;
+	return infoblk_push(sp, bottom, string, length + 1, pointer);
+}
+
+int elf_ctx_init(struct ukarch_ctx *ctx, struct elf_prog *prog,
+		 const char *argv0, const char *argv[],
+		 const char *environ[], __uptr stack_bottom,
+		 __sz stack_limit, __u64 rand[2], const __uptr **auxv_start)
+{
+	struct elf_arg_count count;
+	__uptr sp = ctx->sp;
+	__uptr vector_sp, info_bottom;
+	__uptr *argvec, *envvec, *auxvec;
+	__sz required, vectors, path_size;
+	int i, rc, prefix;
+
+	*auxv_start = NULL;
+	if (!argv0 && (!argv || !argv[0]))
+		argv0 = "";
+	prefix = !!argv0;
+	rc = elf_arg_env_count(&count, argv0, argv, environ, stack_limit);
+	if (rc)
+		return rc;
 
 	UK_ASSERT(prog);
-	UK_ASSERT(argv0 || ((argc >= 1) && argv));
+	UK_ASSERT(count.argc >= 1);
 
 	uk_pr_debug("%s: image:          0x%"PRIx64" - 0x%"PRIx64"\n",
 		    prog->name, (uint64_t) prog->vabase,
@@ -339,101 +365,68 @@ const __uptr *elf_ctx_init(struct ukarch_ctx *ctx, struct elf_prog *prog,
 	};
 	struct auxv_entry auxv_null = { AT_NULL, 0x0 };
 
-	for (i = (int)ARRAY_SIZE(infoblk_auxv) - 1; i >= 0; i--) {
-		infoblk_push(ctx, (void *)infoblk_auxv[i].val,
-			     infoblk_auxv[i].key == AT_RANDOM ?
-			     2 * sizeof(rand[0]) :
-			     strlen((const char *)infoblk_auxv[i].val));
-		/* Overwrite previous pointer to our memory to a pointer to
-		 * the newly copied buffer in the information block.
-		 */
-		infoblk_auxv[i].val = ctx->sp;
+	path_size = strlen((const char *)infoblk_auxv[1].val);
+	if (__builtin_add_overflow(path_size, (__sz)1, &path_size) ||
+	    __builtin_add_overflow(count.strings, path_size, &required) ||
+	    __builtin_add_overflow(required,
+				   (__sz)(sizeof(UK_AUXV_PLATFORM) + sizeof(__u64[2])),
+				   &required) ||
+	    __builtin_mul_overflow((__sz)count.argc + count.envc + 3,
+				   (__sz)sizeof(__uptr), &vectors) ||
+	    __builtin_add_overflow(vectors,
+				   (__sz)(sizeof(auxv) + sizeof(infoblk_auxv) +
+					  sizeof(auxv_null)), &vectors) ||
+	    __builtin_add_overflow(required, vectors, &required) ||
+	    sp < stack_bottom || required > sp - stack_bottom)
+		return -E2BIG;
+	vector_sp = ALIGN_DOWN(sp - required, UKARCH_SP_ALIGN);
+	if (vector_sp < stack_bottom)
+		return -E2BIG;
+
+	argvec = (__uptr *)vector_sp + 1;
+	envvec = argvec + count.argc + 1;
+	auxvec = envvec + count.envc + 1;
+	info_bottom = vector_sp + vectors;
+	for (i = (int)ARRAY_SIZE(infoblk_auxv) - 1; i >= 0; --i) {
+		__uptr pointer;
+
+		if (infoblk_auxv[i].key == AT_RANDOM)
+			rc = infoblk_push(&sp, info_bottom,
+					  (void *)infoblk_auxv[i].val,
+					  sizeof(__u64[2]), &pointer);
+		else
+			rc = infoblk_push_string(&sp, info_bottom,
+						 (char *)infoblk_auxv[i].val,
+						 &pointer);
+		if (rc)
+			return rc;
+		infoblk_auxv[i].val = pointer;
 	}
-
-	if (envc)
-		for (i = envc - 1; i >= 0; i--) {
-			infoblk_push(ctx, (void *)environ[i],
-				     strlen(environ[i]));
-			infoblk_envp[i] = (char *)ctx->sp;
-		}
-
-	if (argc)
-		for (i = argc; i >= 1; i--) {
-			infoblk_push(ctx, (void *)argv[i - 1],
-				     strlen(argv[i - 1]));
-			infoblk_argvp[i] = (char *)ctx->sp;
-		}
-
+	for (i = count.envc - 1; i >= 0; --i) {
+		rc = infoblk_push_string(&sp, info_bottom, environ[i], &envvec[i]);
+		if (rc)
+			return rc;
+	}
+	envvec[count.envc] = 0;
+	for (i = count.argc - prefix - 1; i >= 0; --i) {
+		rc = infoblk_push_string(&sp, info_bottom, argv[i],
+					 &argvec[i + prefix]);
+		if (rc)
+			return rc;
+	}
 	if (argv0) {
-		infoblk_push(ctx, (void *)argv0, strlen(argv0));
-		infoblk_argvp[0] = (char *)ctx->sp;
+		rc = infoblk_push_string(&sp, info_bottom, argv0, &argvec[0]);
+		if (rc)
+			return rc;
 	}
-
-	/* Add a NULL terminator before argv0 as the cherry on top (bottom?)
-	 * and re-align stack to prepare it for what's about to be pushed
-	 * next.
-	 */
-	ctx->sp--;
-	((char *)ctx->sp)[0] = '\0';
-	ctx->sp--;
-	ctx->sp = ALIGN_DOWN(ctx->sp, UKARCH_SP_ALIGN);
-
-	/*
-	 * We need to respect the stack alignment ABI requirements at function
-	 * calls. (eg: x86_64 requires that the stack is 16-byte aligned)
-	 *
-	 * Here we count how many bytes are pushed to the stack:
-	 * - auxiliary vector;
-	 * - environment variables (plus extra NULL pointer);
-	 * - arguments (plus extra NULL pointer and argument count (long))
-	 */
-	elfvec_len = ((ARRAY_SIZE(auxv) + ARRAY_SIZE(infoblk_auxv) + 1) *
-		     sizeof(struct auxv_entry))
-		+ (envc + 1) * sizeof(uintptr_t)
-		+ (argc + (argv0 ? 1 : 0) + 1) * sizeof(uintptr_t)
-		+ sizeof(long);
-
-	ctx->sp = ALIGN_DOWN(ctx->sp - elfvec_len, UKARCH_SP_ALIGN)
-		+ elfvec_len;
-
-	/*
-	 * We need to push the element on the stack in the inverse order they
-	 * will be read by the application's C library (i.e. argc in the end)
-	 *
-	 * Auxiliary vector (NOTE: we push the terminating NULL first)
-	 */
-	ukarch_rctx_stackpush_packed(ctx, auxv_null);
-	for (i = (int)ARRAY_SIZE(infoblk_auxv) - 1; i >= 0; i--)
-		ukarch_rctx_stackpush_packed(ctx, infoblk_auxv[i]);
-	for (i = (int)ARRAY_SIZE(auxv) - 1; i >= 0; --i)
-		ukarch_rctx_stackpush_packed(ctx, auxv[i]);
-	auxv_start = (const __uptr *)ctx->sp;
-
-	/*
-	 * envp
-	 */
-	/* NOTE: As expected, this will push NULL to the stack first */
-	ukarch_rctx_stackpush_packed(ctx, (long)NULL);
-	if (environ) {
-		for (i = envc - 1; i >= 0; --i) {
-			uk_pr_debug("env[%d]=\"%s\"\n", i, infoblk_envp[i]);
-			ukarch_rctx_stackpush_packed(ctx,
-						     (__uptr)infoblk_envp[i]);
-		}
-	}
-
-	/*
-	 * argv + argc
-	 */
-	/* Same as envp, pushing NULL first */
-	ukarch_rctx_stackpush_packed(ctx, (long)NULL);
-	if (args_count)
-		for (i = args_count - 1; i >= 0; i--)
-			ukarch_rctx_stackpush_packed(ctx,
-						     (__uptr)infoblk_argvp[i]);
-	ukarch_rctx_stackpush_packed(ctx, (long)args_count);
-
-	UK_ASSERT(IS_ALIGNED(ctx->sp, UKARCH_SP_ALIGN));
+	argvec[count.argc] = 0;
+	memcpy(auxvec, auxv, sizeof(auxv));
+	memcpy((char *)auxvec + sizeof(auxv), infoblk_auxv,
+	       sizeof(infoblk_auxv));
+	memcpy((char *)auxvec + sizeof(auxv) + sizeof(infoblk_auxv),
+	       &auxv_null, sizeof(auxv_null));
+	*(long *)vector_sp = count.argc;
+	ctx->sp = vector_sp;
 
 	/* ctx will enter the entry point with cleared registers. */
 	if (prog->interp.required) {
@@ -447,5 +440,6 @@ const __uptr *elf_ctx_init(struct ukarch_ctx *ctx, struct elf_prog *prog,
 		/* statically linked executable */
 		ukarch_ctx_init(ctx, ctx->sp, 0x0, prog->entry);
 	}
-	return auxv_start;
+	*auxv_start = auxvec;
+	return 0;
 }

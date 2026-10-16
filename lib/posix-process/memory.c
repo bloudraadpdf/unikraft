@@ -286,3 +286,70 @@ out:
 	return rc;
 }
 #endif
+
+#if CONFIG_LIBPOSIX_PROCESS_EXECVE
+int pprocess_stack_trim(struct posix_vm_context *state,
+			__vaddr_t *bottom, __vaddr_t top, __vaddr_t sp)
+{
+#if CONFIG_LIBUKALLOCSTACK_PAGE_GUARDS
+	struct uk_vas *vas = uk_vas_get_active();
+	rlim_t limit = uk_pprocess_current()->limits[RLIMIT_STACK].rlim_cur;
+	__sz used = UK_PAGING_PAGE_ALIGN_UP(top - sp);
+	__sz length = MAX(used, 32 * UK_PAGING_PAGE_SIZE);
+	int rc;
+
+	limit = UK_PAGING_PAGE_ALIGN_DOWN(limit);
+	if (used > limit)
+		return -E2BIG;
+	length = MIN(length, limit);
+	rc = uk_vma_stack_resize(vas, *bottom, top - length);
+	if (rc)
+		return rc;
+	*bottom = top - length;
+	state->stack_base = *bottom;
+	state->stack_top = top;
+	state->stack_size = length;
+#else
+	state->stack_size = top - *bottom;
+#endif
+	return 0;
+}
+
+int pprocess_memory_stack(__vaddr_t address)
+{
+	struct uk_vas *vas = uk_vas_get_active();
+	struct posix_vm_context *state;
+	struct posix_process *process;
+	struct memory_pages usage;
+	const struct uk_vma *vma;
+	__vaddr_t bottom = UK_PAGING_PAGE_ALIGN_DOWN(address);
+	__sz length, pages;
+	int rc = -EFAULT;
+
+	memory_lock(vas);
+	state = memory_current();
+	if (!state || !state->stack_base || bottom >= state->stack_top)
+		goto out;
+	vma = uk_vma_find(vas, state->stack_base);
+	if (!vma || vma->ops != &uk_vma_stack_ops ||
+	    bottom >= vma->start + UK_VMA_STACK_BOTTOM_GUARD_SIZE)
+		goto out;
+	length = state->stack_top - bottom;
+	process = uk_pprocess_current();
+	if (length > process->limits[RLIMIT_STACK].rlim_cur)
+		goto out;
+	usage = memory_usage(vas, state);
+	pages = (length - state->stack_size) >> UK_PAGING_PAGE_SHIFT;
+	if (!memory_fits(usage.address, pages,
+			 process->limits[RLIMIT_AS].rlim_cur))
+		goto out;
+	rc = uk_vma_stack_resize(vas, state->stack_base, bottom);
+	if (rc)
+		goto out;
+	state->stack_size = length;
+	rc = uk_vma_populate_page(vas, address);
+out:
+	memory_unlock(vas);
+	return rc;
+}
+#endif

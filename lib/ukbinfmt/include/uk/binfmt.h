@@ -30,12 +30,13 @@ enum uk_binfmt_type {
 struct uk_binfmt_loader_args {
 	const char *pathname; /* fully qualified */
 	char *progname;
-	int argc, envc;
 	const char **argv;
 	const char **envp;
 	struct uk_alloc *alloc;
 	struct ukarch_ctx ctx;
 	const __uptr *auxv;
+	__uptr stack_bottom;
+	__sz stack_limit;
 	__sz stack_size;
 	__sz image_data_size;
 };

@@ -64,6 +64,8 @@ struct posix_vm_context {
 	void *auxv;
 	__sz auxv_size;
 	__sz stack_size;
+	__vaddr_t stack_base;
+	__vaddr_t stack_top;
 	__sz image_data_size;
 #endif
 #if CONFIG_LIBPOSIX_PROCESS_BRK
@@ -152,6 +154,11 @@ void pprocess_resource_init(struct posix_process *process,
 			    struct posix_process *parent);
 #if CONFIG_LIBUKVMEM && CONFIG_LIBPOSIX_PROCESS_BRK
 int pprocess_memory_brk(struct posix_vm_context *state, __sz position);
+#endif
+#if CONFIG_LIBUKVMEM && CONFIG_LIBPOSIX_PROCESS_EXECVE
+int pprocess_memory_stack(__vaddr_t address);
+int pprocess_stack_trim(struct posix_vm_context *state,
+			__vaddr_t *bottom, __vaddr_t top, __vaddr_t sp);
 #endif
 #if CONFIG_LIBPOSIX_PROCESS_BRK
 #define PPROCESS_BRK_PAGES UK_BIT(CONFIG_LIBPOSIX_PROCESS_BRK_PAGE_ORDER)

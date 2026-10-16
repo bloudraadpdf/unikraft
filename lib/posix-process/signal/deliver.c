@@ -259,6 +259,12 @@ void sys_error_handler(struct ukarch_execenv *ee __unused, long arg)
 
 	pprocess_enter_application();
 
+#if CONFIG_LIBUKVMEM && CONFIG_LIBPOSIX_PROCESS_EXECVE
+	if (error->signum == SIGSEGV && !error->code &&
+	    !pprocess_memory_stack(error->vaddr))
+		pprocess_execenv_load((long)ee);
+#endif
+
 	if (!pprocess_signal_is_deliverable(pthread, error->signum))
 		uk_sigact_term(error->signum);
 
@@ -270,9 +276,18 @@ void sys_error_handler(struct ukarch_execenv *ee __unused, long arg)
 		sig.siginfo.si_code = SEGV_MAPERR;
 #if CONFIG_LIBUKVMEM
 		struct uk_vas *vas = uk_vas_get_active();
+		const struct uk_vma *vma;
 
 		uk_mutex_lock(&vas->mutation_lock);
-		if (uk_vma_find(vas, error->vaddr))
+		vma = uk_vma_find(vas, error->vaddr);
+		if (vma && vma->ops == &uk_vma_stack_ops) {
+			__vaddr_t start = vma->start + UK_VMA_STACK_BOTTOM_GUARD_SIZE;
+			__vaddr_t end = vma->end - UK_VMA_STACK_TOP_GUARD_SIZE;
+
+			if (!IN_RANGE(error->vaddr, start, end - start))
+				vma = NULL;
+		}
+		if (vma)
 			sig.siginfo.si_code = SEGV_ACCERR;
 		uk_mutex_unlock(&vas->mutation_lock);
 #endif

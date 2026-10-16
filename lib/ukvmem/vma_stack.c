@@ -71,8 +71,9 @@ static int vma_op_stack_fault(struct uk_vma *vma, struct uk_vm_fault *fault)
 		if (likely(fault->type & UK_VMA_FAULT_SOFT))
 			return UK_PAGING_PAGE_MAPX_ESKIP;
 
-		uk_pr_crit("Guard page 0x%lx of stack VMA 0x%lx - 0x%lx hit!\n",
-			   fault->vbase, vma->start, vma->end);
+		if (!(vma->flags & UK_VMA_STACK_GROWABLE))
+			uk_pr_crit("Guard page 0x%lx of stack VMA 0x%lx - 0x%lx hit!\n",
+				   fault->vbase, vma->start, vma->end);
 
 		return -EFAULT;
 	}

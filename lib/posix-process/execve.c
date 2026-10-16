@@ -13,6 +13,9 @@
 #include <uk/syscall.h>
 #include <uk/thread.h>
 #include <uk/sched.h>
+#if CONFIG_LIBUKVMEM
+#include <uk/vmem.h>
+#endif
 #include <string.h>
 
 #include "process.h"
@@ -88,6 +91,7 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 	struct uk_alloc *stack_allocator;
 	void *stack_old;
 	void *stack_new;
+	__sz stack_size = STACK_SIZE;
 	int rc = 0;
 
 	/* Linux deviates from POSIX by treating NULL pointers to
@@ -118,12 +122,20 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 	 */
 	loader_args.alloc = uk_alloc_get_default();
 
+#if CONFIG_LIBUKALLOCSTACK_PAGE_GUARDS
+	stack_size = MIN(uk_pprocess_current()->limits[RLIMIT_STACK].rlim_cur,
+			 (__sz)CONFIG_LIBPOSIX_PROCESS_STACK_SIZE);
+	stack_size = UK_PAGING_PAGE_ALIGN_DOWN(stack_size);
+	if (stack_size <= UKARCH_EXECENV_SIZE)
+		return -E2BIG;
+#endif
+
 	/* Allocate a new stack. Even if we don't come from vfork we
 	 * can't operate on the current thread's stack without either
 	 * corrupting it or wasting space. Use the threads's
 	 * stack allocator for the new stack.
 	 */
-	stack_new = uk_malloc(stack_allocator, STACK_SIZE);
+	stack_new = uk_malloc(stack_allocator, stack_size);
 	if (unlikely(!stack_new)) {
 		uk_pr_err("Could not allocate stack\n");
 		return -ENOMEM;
@@ -135,8 +147,11 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 		goto err_free_stack_new;
 	}
 
-	vm_new->stack_size = STACK_SIZE;
-	loader_args.stack_size = STACK_SIZE;
+	vm_new->stack_size = stack_size;
+	loader_args.stack_size = stack_size;
+	loader_args.stack_bottom = (__uptr)stack_new;
+	loader_args.stack_limit =
+		uk_pprocess_current()->limits[RLIMIT_STACK].rlim_cur;
 	loader_args.ctx.sp = ukarch_gen_sp((__uptr)stack_new,
 					   loader_args.stack_size);
 
@@ -176,9 +191,20 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 	}
 	vm_new->image_data_size = loader_args.image_data_size;
 	rc = execve_auxv_init(vm_new, loader_args.auxv,
-			      (const __uptr *)((char *)stack_new + STACK_SIZE));
+			      (const __uptr *)((char *)stack_new + stack_size));
 	if (rc)
 		goto err_free_stack_new;
+#if CONFIG_LIBUKVMEM
+	{
+		__vaddr_t bottom = (__vaddr_t)stack_new;
+
+		rc = pprocess_stack_trim(vm_new, &bottom,
+					 bottom + stack_size, loader_args.ctx.sp);
+		if (rc)
+			goto err_free_stack_new;
+		stack_new = (void *)bottom;
+	}
+#endif
 
 	/* Do arch-specific context (execenv) initialization */
 	execve_arch_execenv_init(execenv_new, execenv,

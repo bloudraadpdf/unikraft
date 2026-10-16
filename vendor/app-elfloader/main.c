@@ -203,7 +203,6 @@ int main(int argc, const char *argv[])
 #if CONFIG_APPELFLOADER_VFSEXEC_ENVPWD
 	char *env_pwd;
 #endif /* CONFIG_APPELFLOADER_VFSEXEC_ENVPWD */
-	int envc;
 
 	UK_ASSERT(s);
 
@@ -378,15 +377,19 @@ int main(int argc, const char *argv[])
 #endif /* !CONFIG_LIBUKRANDOM */
 
 	uk_pr_debug("%s: Prepare application thread...\n", progname);
-	ret = elf_arg_env_count(&argc, argv, &envc, environ,
-				PAGES2BYTES(CONFIG_APPELFLOADER_STACK_NBPAGES));
-	if (unlikely(ret < 0)) {
-		uk_pr_err("Args + env size exceeds limit, increase stack size\n");
-		goto out_free_thread;
+	{
+		const __uptr *auxv;
+
+		ret = elf_ctx_init(&app_thread->ctx, prog, progname, argv,
+				   environ, (__uptr)app_thread->_mem.stack,
+				   PAGES2BYTES(CONFIG_APPELFLOADER_STACK_NBPAGES),
+				   rand, &auxv);
+		if (ret) {
+			uk_pr_err("Args + env size exceeds stack bounds\n");
+			goto out_free_thread;
+		}
 	}
 
-	elf_ctx_init(&app_thread->ctx, prog, progname,
-		     argc, argv, envc, environ, rand);
 	app_thread->flags |= UK_THREADF_RUNNABLE;
 
 #if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING

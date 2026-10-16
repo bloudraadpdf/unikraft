@@ -109,6 +109,7 @@ extern const struct uk_vma_ops uk_vma_stack_ops;
 
 /* Stack flags */
 #define UK_VMA_STACK_GROWS_UP		(0x1UL << UK_VMA_MAP_EXTF_SHIFT)
+#define UK_VMA_STACK_GROWABLE		(0x2UL << UK_VMA_MAP_EXTF_SHIFT)
 
 #define UK_VMA_STACK_TOP_GUARD_SIZE				\
 	(CONFIG_LIBUKVMEM_STACK_GUARD_PAGES_TOP * UK_PAGING_PAGE_SIZE)
@@ -118,6 +119,9 @@ extern const struct uk_vma_ops uk_vma_stack_ops;
 
 #define UK_VMA_STACK_GUARDS_SIZE				\
 	(UK_VMA_STACK_TOP_GUARD_SIZE + UK_VMA_STACK_BOTTOM_GUARD_SIZE)
+
+int uk_vma_stack_resize(struct uk_vas *vas, __vaddr_t address,
+			__vaddr_t bottom);
 
 /**
  * Creates a new stack VMA. See uk_vma_map() for a description of the

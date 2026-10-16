@@ -187,6 +187,42 @@ const struct uk_vma *uk_vma_find(struct uk_vas *vas, __vaddr_t vaddr)
 	return vma;
 }
 
+int uk_vma_stack_resize(struct uk_vas *vas, __vaddr_t address,
+			__vaddr_t bottom)
+{
+	struct uk_vma *vma;
+	__vaddr_t start;
+	unsigned long previous;
+	int rc = -EINVAL;
+
+	if (!UK_PAGING_PAGE_ALIGNED(bottom) ||
+	    bottom < UK_VMA_STACK_BOTTOM_GUARD_SIZE)
+		return -EINVAL;
+	start = bottom - UK_VMA_STACK_BOTTOM_GUARD_SIZE;
+	previous = vmem_mutation_begin(vas);
+	vma = vmem_vma_find(vas, address, 0);
+	if (!vma || vma->ops != &uk_vma_stack_ops ||
+	    bottom >= vma->end - UK_VMA_STACK_TOP_GUARD_SIZE ||
+	    !uk_paging_vaddr_range_isvalid(start, vma->end - start))
+		goto out;
+	if (start < vma->start) {
+		if (vmem_vma_find(vas, start, vma->start - start)) {
+			rc = -EEXIST;
+			goto out;
+		}
+	} else if (start > vma->start) {
+		rc = vma->ops->unmap(vma, vma->start, bottom - vma->start);
+		if (rc)
+			goto out;
+	}
+	vma->start = start;
+	vma->flags |= UK_VMA_STACK_GROWABLE;
+	rc = 0;
+out:
+	vmem_mutation_end(vas, previous);
+	return rc;
+}
+
 static int vmem_vma_find_range(struct uk_vas *vas, __vaddr_t *vaddr, __sz *len,
 			       struct uk_vma **start, struct uk_vma **end,
 			       int strict)
