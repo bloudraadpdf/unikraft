@@ -52,6 +52,22 @@ int sys_error_handler_except(int signum,
 	handler_desc->code = 0;
 	handler_desc->auxsp = auxsp;
 	handler_desc->vaddr = uk_lcpu_except_err_ctx_get_fault_addr(trap_ctx);
+#if CONFIG_ARCH_ARM_64
+	if (signum == SIGBUS) {
+		__u64 esr = uk_lcpu_arm64_except_err_ctx_get_esr(trap_ctx);
+		__u64 ec = UK_ARCH_ARM64_ESR_EC_FROM(esr);
+
+		if (ec == UK_ARCH_ARM64_ESR_EL1_EC_PC_ALIGN ||
+		    ec == UK_ARCH_ARM64_ESR_EL1_EC_SP_ALIGN ||
+		    ((ec == UK_ARCH_ARM64_ESR_EL1_EC_MMU_DABRT_EL0 ||
+		      ec == UK_ARCH_ARM64_ESR_EL1_EC_MMU_DABRT_EL1) &&
+		     (esr & UK_ARCH_ARM64_ESR_ISS_ABRT_FSC_MASK) ==
+				UK_ARCH_ARM64_ESR_ISS_ABRT_FSC_ALIGN))
+			handler_desc->code = BUS_ADRALN;
+		if (ec == UK_ARCH_ARM64_ESR_EL1_EC_SP_ALIGN)
+			handler_desc->vaddr = curr_sp;
+	}
+#endif
 
 	/* Jump away from the exception context */
 	ukarch_ctx_init_ehtrampo(&ctx,
