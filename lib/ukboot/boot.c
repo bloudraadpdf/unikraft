@@ -177,6 +177,23 @@ static struct uk_alloc *heap_init()
 	if (unlikely(rc))
 		return NULL;
 
+#ifdef CONFIG_LIBUKPAGING_DIRECTMAP
+	{
+		__sz length = UK_PAL_DIRECTMAP_AREA_END -
+			UK_PAL_DIRECTMAP_AREA_START;
+
+		if (UK_PAL_DIRECTMAP_AREA_END < __VADDR_MAX)
+			length++;
+		length = UK_PAGING_PAGE_ALIGN_DOWN(length);
+		vaddr = UK_PAL_DIRECTMAP_AREA_START;
+		rc = uk_vma_reserve_ex(&kernel_vas, &vaddr, length,
+				       UK_PAGING_PAGE_ATTR_PROT_RW, 0,
+				       "direct map");
+		if (unlikely(rc))
+			return NULL;
+	}
+#endif
+
 	free_pages  = pt->fa->free_memory >> UK_PAGING_PAGE_SHIFT;
 	alloc_pages = free_pages - UK_PAGING_PT_PAGES(free_pages);
 

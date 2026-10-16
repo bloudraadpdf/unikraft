@@ -30,8 +30,13 @@ extern "C" {
 
 #define __ARM64_PADDR_VALID(paddr)		    \
 	((paddr) <= (__paddr_t)__ARM64_PADDR_MAX)
-#define __ARM64_VADDR_VALID(vaddr)		    \
-	(((vaddr) & __ARM64_VADDR_MAX) <= (__vaddr_t)__ARM64_VADDR_MAX)
+#if CONFIG_ARM64_FEAT_MTE
+#define __ARM64_VADDR_VALID(vaddr) \
+	(((vaddr) & 0x00ffffffffffffffULL) <= (__vaddr_t)__ARM64_VADDR_MAX)
+#else
+#define __ARM64_VADDR_VALID(vaddr) \
+	((vaddr) <= (__vaddr_t)__ARM64_VADDR_MAX)
+#endif
 
 /* Any address controlled by TTBR1, ie bit[55] == 1 */
 #define __ARM64_INVALID_ADDR		0xBAADBAADBAADBAADUL
@@ -63,11 +68,12 @@ extern "C" {
 static inline
 int uk_plat_native_vaddr_range_isvalid(__vaddr_t start, __sz len)
 {
-	__vaddr_t end = start + len - 1;
-
-	UK_ASSERT(start <= end);
-
-	return (__ARM64_VADDR_VALID(end)) && (__ARM64_VADDR_VALID(start));
+	if (!len || !__ARM64_VADDR_VALID(start))
+		return 0;
+#if CONFIG_ARM64_FEAT_MTE
+	start &= 0x00ffffffffffffffULL;
+#endif
+	return len - 1 <= __ARM64_VADDR_MAX - start;
 }
 
 /**

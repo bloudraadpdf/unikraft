@@ -758,6 +758,8 @@ static int vmem_map(struct uk_vas *vas, __vaddr_t *vaddr, __sz len,
 	} else {
 		if (unlikely(!UK_PAGING_PAGE_Lx_ALIGNED(va, algn_lvl)))
 			return -EINVAL;
+		if (unlikely(!uk_paging_vaddr_range_isvalid(va, len)))
+			return -ENOMEM;
 
 		/* The caller specified an exact address to map to. We only
 		 * allow this if the mapping does not collide with other
