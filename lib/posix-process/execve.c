@@ -13,6 +13,7 @@
 #include <uk/syscall.h>
 #include <uk/thread.h>
 #include <uk/sched.h>
+#include <string.h>
 
 #include "process.h"
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
@@ -22,6 +23,26 @@
 void execve_arch_execenv_init(struct ukarch_execenv *execenv_new,
 			      struct ukarch_execenv *execenv,
 			      __uptr ip, __uptr sp);
+
+static int execve_auxv_init(struct posix_vm_context *state,
+			    const __uptr *auxv, const __uptr *stack_end)
+{
+	const __uptr *auxv_end;
+
+	if (!auxv)
+		return 0;
+	for (auxv_end = auxv; stack_end - auxv_end >= 2; auxv_end += 2)
+		if (!auxv_end[0])
+			break;
+	if (stack_end - auxv_end < 2)
+		return -ENOEXEC;
+	state->auxv_size = (auxv_end + 2 - auxv) * sizeof(*auxv);
+	state->auxv = uk_malloc(state->allocator, state->auxv_size);
+	if (!state->auxv)
+		return -ENOMEM;
+	memcpy(state->auxv, auxv, state->auxv_size);
+	return 0;
+}
 
 /* arg0: execenv_new, arg1: stack_old */
 static void __noreturn execve_ctx_switch(long arg0, long arg1)
@@ -88,6 +109,7 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 	loader_args.pathname = (char *)pathname;
 	loader_args.loader = NULL;
 	loader_args.user = NULL;
+	loader_args.auxv = NULL;
 
 	/* Assume that if argv is set the caller follows the convention */
 	loader_args.progname = (argv && argv[0]) ? argv[0] : "<null>";
@@ -150,6 +172,10 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 		uk_pr_err("%s: Unable to load (%d)\n", pathname, rc);
 		goto err_free_stack_new;
 	}
+	rc = execve_auxv_init(vm_new, loader_args.auxv,
+			      (const __uptr *)((char *)stack_new + STACK_SIZE));
+	if (rc)
+		goto err_free_stack_new;
 
 	/* Do arch-specific context (execenv) initialization */
 	execve_arch_execenv_init(execenv_new, execenv,

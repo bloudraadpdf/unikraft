@@ -126,41 +126,11 @@ struct elf_prog *elf_load_vfs(struct uk_alloc *a, const char *path,
  */
 void elf_unload(struct elf_prog *elf_prog);
 
-/**
- * Initializes an ukarch_ctx with a loaded ELF program. This program
- * will be executed as soon as the context is scheduled/loaded to
- * the CPU. The function will populate the associated stack with
- * auxiliary vector, environment variables, and program arguments.
- *
- * @param ctx:
- *   uakrch_ctx to initialize, an associated stack is required
- * @param prog:
- *   Loaded ELF program (e.g., `elf_load_img()`)
- * @param argv0:
- *   Optional c-string that is prepended to the argument vector (see `argv`)
- *   for the application. If used, do not release/modify while the returned
- *   `ctx` and `prog` are in use.
- * @param argc:
- *   Argument count; can be only `0` if `argv0` is given, must be > 0 otherwise.
- * @param argv:
- *   Argument vector, only optional if `argv0` is given.
- *   This function will only copy the c-string references of argv to the
- *   application. The actual c-strings should not be released/modified while
- *   `ctx` and `prog` are in use.
- * @param environ:
- *   NULL-terminated list of environment variables
- *   This function will only copy the c-string references of environ to the
- *   application. The actual c-strings should not be released/modified while
- *   `ctx` and `prog` are in use.
- * @param rand:
- *   Random seed that is passed to the application
- *   Only a reference to rand[] is handed over to the application. Do not
- *   release/modify while `ctx` and `prog` are in use.
- */
-void elf_ctx_init(struct ukarch_ctx *ctx, struct elf_prog *prog,
-		  const char *argv0, int argc, const char *argv[],
-		  int envc, const char *environ[],
-		  uint64_t rand[2]);
+/* The returned auxiliary vector lives in the supplied application stack. */
+const __uptr *elf_ctx_init(struct ukarch_ctx *ctx, struct elf_prog *prog,
+			   const char *argv0, int argc, const char *argv[],
+			   int envc, const char *environ[],
+			   __u64 rand[2]);
 
 /**
  * Count the number of args and env vars.

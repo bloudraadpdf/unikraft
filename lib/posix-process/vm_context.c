@@ -46,6 +46,9 @@ void pprocess_vm_put(struct posix_vm_context *state)
 #if CONFIG_LIBPOSIX_PROCESS_BRK
 		pprocess_brk_free(state);
 #endif
+#if CONFIG_LIBPOSIX_PROCESS_EXECVE
+		uk_free(state->allocator, state->auxv);
+#endif
 		uk_free(state->allocator, state);
 	}
 	uk_mutex_unlock(&pprocess_mutex);

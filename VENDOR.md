@@ -87,3 +87,28 @@ fallback. ARM64 continues to use its architectural timer.
 `CONFIG_UKPLAT_CPU_MAXCOUNT=1` disables `CONFIG_HAVE_SMP` on both
 architectures. AMD64 excludes the 16-bit secondary startup trampoline in
 this configuration; the common primary CPU entry remains available.
+
+## C library ABI checks
+
+The ELF interpreter path selects `glibc` or `musl` for each application.
+They use one kernel binary and the same Linux syscall handler.
+Tokoloshe owns the pinned `libc-test` runner, Linux controls, result digests
+and operation limits in `conformance/unikraft/libc`.
+
+Application entry clears the signal mask inherited from PID 1. The signal
+mask syscall preserves overlapping input and output. Futex waits validate
+and convert their clock deadlines, support requeue operations and wake for
+pending signals. Waiter removal follows the waiter node after a requeue.
+`waitid` accepts a null output buffer with the Linux return value.
+
+The ELF loader returns the auxiliary vector on the new application stack.
+Each process VM context retains its own vector for `PR_GET_AUXV` and releases
+it with the context. `AT_EXECFN` and `AT_RANDOM` data are copied to the new
+stack before the caller stack is released. Other `prctl` operations return
+`EINVAL` rather than reporting success without an implementation.
+
+The default one-CPU AMD64 and ARM64 builds pass the applicable C library
+checks with static and dynamic application linking. Each architecture
+passes all 22 additional signal, futex, wait, auxiliary-vector and dynamic
+TLS probes. These checks do not establish full Linux compatibility,
+process memory protection or snapshot acceptance.

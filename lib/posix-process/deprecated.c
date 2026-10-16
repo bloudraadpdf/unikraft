@@ -42,6 +42,7 @@
 #include <uk/print.h>
 #include <uk/syscall.h>
 #include <uk/arch/limits.h>
+#include "process.h"
 
 #define UNIKRAFT_SID      0
 #define UNIKRAFT_PGID     0
@@ -299,8 +300,21 @@ UK_SYSCALL_R_DEFINE(int, prctl, int, option,
 		    unsigned long, arg4,
 		    unsigned long, arg5)
 {
-	UK_WARN_STUBBED();
-	return 0; /* syscall has no effect */
+#if CONFIG_LIBPOSIX_PROCESS_EXECVE
+	if (option == 0x41555856) { /* PR_GET_AUXV */
+		struct posix_vm_context *vm = uk_pprocess_current()->vm_context;
+		__sz length = MIN(arg3, vm->auxv_size);
+
+		if (arg4 || arg5 || !vm->auxv)
+			return -EINVAL;
+		if (length && !arg2)
+			return -EFAULT;
+		if (length)
+			memcpy((void *)arg2, vm->auxv, length);
+		return vm->auxv_size;
+	}
+#endif
+	return -EINVAL;
 }
 
 int uk_sys_prlimit64(int pid, unsigned int resource,

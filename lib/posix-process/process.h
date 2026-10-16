@@ -60,6 +60,10 @@ struct posix_vm_context {
 	struct uk_alloc *allocator;
 	unsigned int references;
 	unsigned int membarrier_registered;
+#if CONFIG_LIBPOSIX_PROCESS_EXECVE
+	void *auxv;
+	__sz auxv_size;
+#endif
 #if CONFIG_LIBPOSIX_PROCESS_BRK
 	struct {
 		struct uk_mutex mtx;

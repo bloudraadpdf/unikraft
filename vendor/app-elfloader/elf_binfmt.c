@@ -73,9 +73,9 @@ static int uk_binfmt_load_elf(struct uk_binfmt_loader_args *args)
 		return rc;
 	}
 
-	elf_ctx_init(&args->ctx, prog, args->argv[0],
-		     args->argc - 1, &args->argv[1],
-		     args->envc, args->envp, rand);
+	args->auxv = elf_ctx_init(&args->ctx, prog, args->argv[0],
+				  args->argc - 1, &args->argv[1],
+				  args->envc, args->envp, rand);
 
 	return UK_BINFMT_HANDLED;
 }

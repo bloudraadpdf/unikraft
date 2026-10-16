@@ -257,15 +257,16 @@ int elf_arg_env_count(int *argc, const char **argv,
 	return len;
 }
 
-void elf_ctx_init(struct ukarch_ctx *ctx, struct elf_prog *prog,
-		  const char *argv0, int argc, const char *argv[],
-		  int envc, const char *environ[],
-		  uint64_t rand[2])
+const __uptr *elf_ctx_init(struct ukarch_ctx *ctx, struct elf_prog *prog,
+			   const char *argv0, int argc, const char *argv[],
+			   int envc, const char *environ[],
+			   __u64 rand[2])
 {
 	int args_count = argc + (argv0 ? 1 : 0);
 	char *infoblk_argvp[args_count];
 	char *infoblk_envp[envc];
 	int i, elfvec_len;
+	const __uptr *auxv_start;
 
 	UK_ASSERT(prog);
 	UK_ASSERT(argv0 || ((argc >= 1) && argv));
@@ -299,6 +300,8 @@ void elf_ctx_init(struct ukarch_ctx *ctx, struct elf_prog *prog,
 	 */
 	struct auxv_entry infoblk_auxv[] = {
 		{ AT_PLATFORM, (__uptr)UK_AUXV_PLATFORM	},
+		{ AT_EXECFN, (__uptr)(prog->path ? prog->path : prog->name) },
+		{ AT_RANDOM, (__uptr)rand },
 	};
 
 	/* list of all auxiliary vector entries whose pointer values need
@@ -309,8 +312,6 @@ void elf_ctx_init(struct ukarch_ctx *ctx, struct elf_prog *prog,
 		{ AT_UCACHEBSIZE, 0x0 },
 		{ AT_ICACHEBSIZE, 0x0 },
 		{ AT_DCACHEBSIZE, 0x0 },
-		/* path to executable */
-		{ AT_EXECFN, (long) (prog->path ? prog->path : prog->name) },
 		{ AT_SECURE, 0x0 },
 		{ AT_EGID, 0x0 },
 		{ AT_GID, 0x0 },
@@ -324,7 +325,6 @@ void elf_ctx_init(struct ukarch_ctx *ctx, struct elf_prog *prog,
 		/* base addr of interpreter */
 		{ AT_BASE, prog->interp.prog ?
 			   prog->interp.prog->start : 0x0 },
-		{ AT_RANDOM, (uintptr_t) rand },
 		{ AT_PHENT, prog->phdr.entsize },
 		{ AT_PHNUM, prog->phdr.num },
 		{ AT_PHDR, prog->load_bias + prog->phdr.off },
@@ -341,7 +341,9 @@ void elf_ctx_init(struct ukarch_ctx *ctx, struct elf_prog *prog,
 
 	for (i = (int)ARRAY_SIZE(infoblk_auxv) - 1; i >= 0; i--) {
 		infoblk_push(ctx, (void *)infoblk_auxv[i].val,
-			     strlen((const char*)infoblk_auxv[i].val));
+			     infoblk_auxv[i].key == AT_RANDOM ?
+			     2 * sizeof(rand[0]) :
+			     strlen((const char *)infoblk_auxv[i].val));
 		/* Overwrite previous pointer to our memory to a pointer to
 		 * the newly copied buffer in the information block.
 		 */
@@ -385,7 +387,8 @@ void elf_ctx_init(struct ukarch_ctx *ctx, struct elf_prog *prog,
 	 * - environment variables (plus extra NULL pointer);
 	 * - arguments (plus extra NULL pointer and argument count (long))
 	 */
-	elfvec_len = ((ARRAY_SIZE(auxv) + 1) * sizeof(struct auxv_entry))
+	elfvec_len = ((ARRAY_SIZE(auxv) + ARRAY_SIZE(infoblk_auxv) + 1) *
+		     sizeof(struct auxv_entry))
 		+ (envc + 1) * sizeof(uintptr_t)
 		+ (argc + (argv0 ? 1 : 0) + 1) * sizeof(uintptr_t)
 		+ sizeof(long);
@@ -404,6 +407,7 @@ void elf_ctx_init(struct ukarch_ctx *ctx, struct elf_prog *prog,
 		ukarch_rctx_stackpush_packed(ctx, infoblk_auxv[i]);
 	for (i = (int)ARRAY_SIZE(auxv) - 1; i >= 0; --i)
 		ukarch_rctx_stackpush_packed(ctx, auxv[i]);
+	auxv_start = (const __uptr *)ctx->sp;
 
 	/*
 	 * envp
@@ -443,4 +447,5 @@ void elf_ctx_init(struct ukarch_ctx *ctx, struct elf_prog *prog,
 		/* statically linked executable */
 		ukarch_ctx_init(ctx, ctx->sp, 0x0, prog->entry);
 	}
+	return auxv_start;
 }

@@ -35,6 +35,7 @@ struct uk_binfmt_loader_args {
 	const char **envp;
 	struct uk_alloc *alloc;
 	struct ukarch_ctx ctx;
+	const __uptr *auxv;
 	__sz stack_size;
 	struct uk_binfmt_loader *loader;
 	void *user; /* private loader data */
