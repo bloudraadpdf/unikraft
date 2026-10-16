@@ -30,7 +30,10 @@ void pprocess_signal_wake_waiter(struct posix_thread *thread)
 
 	if (wait) {
 		uk_store_n(&wait->interrupted, 1);
-		uk_waitq_wake_up(wait->queue);
+		if (wait->queue)
+			uk_waitq_wake_up(wait->queue);
+		else
+			uk_thread_wake(thread->thread);
 	} else {
 		uk_waitq_wake_up(&thread->signal->waitq);
 	}

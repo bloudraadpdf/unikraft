@@ -11,7 +11,7 @@ struct posix_thread;
 
 struct uk_posix_signal_wait {
 	struct posix_thread *thread;
-	struct uk_waitq *queue;
+	struct uk_waitq *queue; /* NULL selects direct thread wake-up. */
 	unsigned long saved_mask;
 	unsigned int interrupted;
 	bool masked;

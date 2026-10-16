@@ -65,6 +65,9 @@
 #include <uk/lcpu.h>
 #include <uk/plat/time.h>
 #include <uk/posix-time.h>
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+#include <uk/posix-signal-wait.h>
+#endif
 
 /** @struct uk_futex
  *  @brief Futex structure.
@@ -98,7 +101,9 @@ static uk_spinlock futex_list_lock = UK_SPINLOCK_INITIALIZER();
  *	<1: -EAGAIN (uaddr does not contain val) or -ETIMEDOUT (the futex timed
  *       out)
  */
-static int futex_wait(__u32 *uaddr, __u32 val, const __nsec *timeout)
+static int futex_wait_prepare(__u32 *uaddr, __u32 val,
+			      const __nsec *timeout,
+			      const unsigned int *interrupted)
 {
 	unsigned long irqf;
 	struct uk_thread *current = uk_thread_current();
@@ -130,6 +135,9 @@ static int futex_wait(__u32 *uaddr, __u32 val, const __nsec *timeout)
 	}
 	uk_spin_unlock(&futex_list_lock);
 	uk_lcpu_restore_irqf(irqf);
+	/* A signal can arrive before uk_thread_block(). */
+	if (interrupted && uk_load_n(interrupted))
+		uk_thread_wake(current);
 #if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
 	if (uk_posix_process_exit_requested())
 		uk_thread_wake(current);
@@ -151,6 +159,29 @@ static int futex_wait(__u32 *uaddr, __u32 val, const __nsec *timeout)
 	uk_lcpu_restore_irqf(irqf);
 
 	return 0;
+}
+
+static int futex_wait(__u32 *uaddr, __u32 val, const __nsec *timeout)
+{
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+	struct uk_posix_signal_wait wait;
+	int ret;
+
+	ret = uk_posix_signal_wait_init(&wait, NULL, NULL, 0);
+	if (ret)
+		return ret;
+	ret = uk_posix_signal_wait_check(&wait);
+	if (!ret) {
+		ret = futex_wait_prepare(uaddr, val, timeout,
+					 &wait.interrupted);
+		if (ret == -EINTR)
+			ret = uk_posix_signal_wait_check(&wait);
+	}
+	uk_posix_signal_wait_end(&wait, ret);
+	return ret;
+#else
+	return futex_wait_prepare(uaddr, val, timeout, NULL);
+#endif
 }
 
 /**
