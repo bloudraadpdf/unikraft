@@ -86,7 +86,7 @@ static uk_spinlock futex_list_lock = UK_SPINLOCK_INITIALIZER();
  * Get the futex value atomically and compare it with the expected value. Add
  * the thread to the wait list and then block it if the value is equal to the
  * expected one. If the futex was not removed from the list when the thread was
- * unblocked, then it means that it timed out.
+ * unblocked, remove its entry before returning a timeout or interruption.
  *
  * @param uaddr		The futex userspace address
  * @param val		The expected value
@@ -98,11 +98,9 @@ static uk_spinlock futex_list_lock = UK_SPINLOCK_INITIALIZER();
  *	<1: -EAGAIN (uaddr does not contain val) or -ETIMEDOUT (the futex timed
  *       out)
  */
-static int futex_wait(uint32_t *uaddr, uint32_t val, const __nsec *timeout)
+static int futex_wait(__u32 *uaddr, __u32 val, const __nsec *timeout)
 {
 	unsigned long irqf;
-	struct uk_list_head *itr, *tmp;
-	struct uk_futex *f_tmp;
 	struct uk_thread *current = uk_thread_current();
 	struct uk_futex f = {.uaddr = uaddr, .thread = current};
 
@@ -142,19 +140,12 @@ static int futex_wait(uint32_t *uaddr, uint32_t val, const __nsec *timeout)
 	irqf = uk_lcpu_save_irqf();
 	uk_spin_lock(&futex_list_lock);
 
-	/* If the futex is still in the wait list, then it timed out */
-	uk_list_for_each_safe(itr, tmp, &futex_list) {
-		f_tmp = uk_list_entry(itr, struct uk_futex, list_node);
-
-		if (f_tmp->uaddr == uaddr && f_tmp->thread == current) {
-			/* Remove the thread from the futex list */
-			uk_list_del(&f_tmp->list_node);
-			uk_spin_unlock(&futex_list_lock);
-			uk_lcpu_restore_irqf(irqf);
-
-			uk_pr_debug("FUTEX_WAIT: Woke up because of timeout\n");
-			return -ETIMEDOUT;
-		}
+	if (!uk_list_empty(&f.list_node)) {
+		uk_list_del_init(&f.list_node);
+		uk_spin_unlock(&futex_list_lock);
+		uk_lcpu_restore_irqf(irqf);
+		return timeout && *timeout <= ukplat_monotonic_clock() ?
+			-ETIMEDOUT : -EINTR;
 	}
 	uk_spin_unlock(&futex_list_lock);
 	uk_lcpu_restore_irqf(irqf);
@@ -190,7 +181,7 @@ static int futex_wake(uint32_t *uaddr, uint32_t val)
 
 		if (f->uaddr == uaddr) {
 			/* Remove the thread from the futex list */
-			uk_list_del(&f->list_node);
+			uk_list_del_init(&f->list_node);
 
 			/* TODO: Replace with uk_thread_wakeup when the new
 			 * scheduler API is ready
@@ -223,53 +214,48 @@ static int futex_wake(uint32_t *uaddr, uint32_t val)
  * @param val		Number of waiters to wake
  * @param val2		Number of waiters to requeue (0-INT_MAX)
  * @param uaddr2	Target futex user address
- * @param val3		uaddr expected value
+ * @param expected	Optional uaddr expected value
  *
  * @return
  *	>=0: on success, the number of tasks requeued or woken;
  *	<0: on error
  */
-static int futex_cmp_requeue(uint32_t *uaddr, uint32_t val, uint32_t val2,
-			     uint32_t *uaddr2, uint32_t val3)
+static int futex_requeue(__u32 *uaddr, __u32 val, __u32 val2,
+			 __u32 *uaddr2, const __u32 *expected)
 {
 	unsigned long irqf;
 	struct uk_list_head *itr, *tmp;
 	struct uk_futex *f;
-	int woken_uaddr1;
-	uint32_t waiters_uaddr2 = 0;
-
-	if (!((uint32_t)val3 == uk_load_n(uaddr)))
-		return -EAGAIN;
-
-	/* Wake up val waiters on uaddr */
-	woken_uaddr1 = futex_wake(uaddr, val);
-
-	if (!val2)
-		return woken_uaddr1;
+	__u32 woken = 0;
+	__u32 requeued = 0;
 
 	irqf = uk_lcpu_save_irqf();
 	uk_spin_lock(&futex_list_lock);
+	if (expected && *expected != uk_load_n(uaddr)) {
+		uk_spin_unlock(&futex_list_lock);
+		uk_lcpu_restore_irqf(irqf);
+		return -EAGAIN;
+	}
 
-	/* Requeue val2 waiters on uaddr2 */
 	uk_list_for_each_safe(itr, tmp, &futex_list) {
 		f = uk_list_entry(itr, struct uk_futex, list_node);
-
-		if (f->uaddr == uaddr) {
-			/* Requeue thread to uaddr2 */
-			uk_list_del(&f->list_node);
+		if (f->uaddr != uaddr)
+			continue;
+		if (woken < val) {
+			uk_list_del_init(&f->list_node);
+			uk_thread_wake(f->thread);
+			woken++;
+		} else if (requeued < val2) {
 			f->uaddr = uaddr2;
-			uk_list_add_tail(&f->list_node, &futex_list);
-
-			/* Requeue at most val2 threads */
-			if (++waiters_uaddr2 >= val2)
-				break;
+			requeued++;
+		} else {
+			break;
 		}
 	}
 
 	uk_spin_unlock(&futex_list_lock);
 	uk_lcpu_restore_irqf(irqf);
-
-	return woken_uaddr1 + waiters_uaddr2;
+	return woken + requeued;
 }
 
 static int futex_deadline(const struct timespec *timeout, int cmd,
@@ -361,12 +347,15 @@ UK_LLSYSCALL_R_DEFINE(int, futex, uint32_t *, uaddr, int, futex_op,
 		return futex_wake(uaddr, val);
 
 	case FUTEX_FD:
-	case FUTEX_REQUEUE:
 		return -ENOSYS;
 
+	case FUTEX_REQUEUE:
+		return futex_requeue(uaddr, val, (unsigned long)timeout,
+				     uaddr2, NULL);
+
 	case FUTEX_CMP_REQUEUE:
-		return futex_cmp_requeue(uaddr, val, (unsigned long)timeout,
-					 uaddr2, val3);
+		return futex_requeue(uaddr, val, (unsigned long)timeout,
+				     uaddr2, &val3);
 
 	default:
 		return -ENOSYS;
@@ -450,7 +439,7 @@ static int pthread_exit_handler(void *arg)
 	uk_list_for_each_safe(itr, tmp, &futex_list) {
 		f = uk_list_entry(itr, struct uk_futex, list_node);
 		if (f->thread == child) {
-			uk_list_del(&f->list_node);
+			uk_list_del_init(&f->list_node);
 			break; /* a thread can wait on one futex */
 		}
 	}
