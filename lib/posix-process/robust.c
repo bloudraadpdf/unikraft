@@ -72,7 +72,7 @@ static int robust_owner_died(__uptr entry, long offset, pid_t tid)
 			break;
 	}
 #if CONFIG_LIBPOSIX_FUTEX
-	if (observed & ROBUST_WAITERS)
+	if ((observed & ROBUST_WAITERS) && !(entry & 1))
 		uk_syscall_r_futex((long)address, FUTEX_WAKE, 1, 0, 0, 0);
 #endif
 	return 0;

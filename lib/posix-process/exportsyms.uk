@@ -71,3 +71,7 @@ uk_posix_process_vm_unmap
 uk_posix_process_vm_protect
 uk_posix_process_vm_advise
 uk_posix_process_vm_sync
+
+uk_posix_futex_pi
+uk_posix_futex_lock
+uk_posix_futex_unlock

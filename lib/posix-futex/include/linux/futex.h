@@ -3,6 +3,10 @@
 #ifndef __LINUX_FUTEX_H__
 #define __LINUX_FUTEX_H__
 
+#define FUTEX_WAITERS		0x80000000U
+#define FUTEX_OWNER_DIED	0x40000000U
+#define FUTEX_TID_MASK		0x3fffffffU
+
 /* Second argument to futex syscall */
 
 #define FUTEX_WAIT		0

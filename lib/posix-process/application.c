@@ -41,6 +41,12 @@ static void prepare_application(struct ukarch_execenv *execenv)
 #endif
 #if CONFIG_LIBPOSIX_PROCESS_PREEMPT
 		now = ukplat_monotonic_clock();
+		if (uk_sched_has_higher_priority()) {
+			uk_lcpu_enable_irq();
+			uk_sched_yield();
+			uk_lcpu_disable_irq();
+			continue;
+		}
 		if (thread->application_deadline &&
 		    thread->application_deadline <= now) {
 			thread->application_deadline = 0;

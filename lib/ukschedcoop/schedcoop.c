@@ -37,6 +37,7 @@
 #include <uk/thread_wake_impl.h>
 #include <uk/schedcoop.h>
 #include <uk/essentials.h>
+#include <uk/atomic.h>
 #include "schedcoop.h"
 
 static void schedcoop_schedule(struct uk_sched *s)
@@ -81,7 +82,17 @@ static void schedcoop_schedule(struct uk_sched *s)
 		}
 	}
 
-	next = UK_TAILQ_FIRST(&c->run_queue);
+	next = NULL;
+	UK_TAILQ_FOREACH(thread, &c->run_queue, queue) {
+		if (!next || uk_load_n(&thread->effective_priority) >
+		    uk_load_n(&next->effective_priority))
+			next = thread;
+	}
+	if (prev != &c->idle && uk_thread_is_runnable(prev) &&
+	    !uk_thread_is_exited(prev) && next &&
+	    uk_load_n(&prev->effective_priority) >
+	    uk_load_n(&next->effective_priority))
+		next = NULL;
 	if (!UK_TAILQ_EMPTY(&s->stop_requests)) {
 		next = &c->idle;
 		if (prev != &c->idle && uk_thread_is_runnable(prev))

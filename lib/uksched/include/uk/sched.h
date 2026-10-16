@@ -277,6 +277,8 @@ struct uk_thread *uk_sched_thread_create_fn2(struct uk_sched *s,
 #define uk_sched_foreach_thread_safe(sched, itr, tmp)			\
 	UK_TAILQ_FOREACH_SAFE((itr), &(sched)->thread_list, thread_list, (tmp))
 
+bool uk_sched_has_higher_priority(void);
+
 void uk_sched_dumpk_threads(int klvl, struct uk_sched *s);
 
 void uk_sched_thread_sleep(__nsec nsec);

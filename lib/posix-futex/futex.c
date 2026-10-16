@@ -46,6 +46,7 @@
 #include <inttypes.h>
 
 #include <linux/futex.h>
+#include <uk/futex.h>
 #include <uk/syscall.h>
 #if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
 #include <uk/process.h>
@@ -83,6 +84,77 @@ struct uk_futex {
 static UK_LIST_HEAD(futex_list);
 static uk_spinlock futex_list_lock = UK_SPINLOCK_INITIALIZER();
 
+bool uk_futex_has_waiters(__u32 *address)
+{
+	struct uk_futex *waiter;
+	unsigned long flags;
+	bool found = false;
+
+	flags = uk_lcpu_save_irqf();
+	uk_spin_lock(&futex_list_lock);
+	uk_list_for_each_entry(waiter, &futex_list, list_node) {
+		if (waiter->uaddr == address) {
+			found = true;
+			break;
+		}
+	}
+	uk_spin_unlock(&futex_list_lock);
+	uk_lcpu_restore_irqf(flags);
+	return found;
+}
+
+
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING && CONFIG_LIBPOSIX_PROCESS_SIGNAL
+static __uk_tls bool pi_binary_call;
+static __uk_tls __uptr pi_binary_address;
+
+static void pi_restart_prepare(struct uk_syscall_enter_ctx *context)
+{
+	struct ukarch_execenv *environment = context->execenv;
+	int command;
+
+	if (!(context->flags & UK_SYSCALL_ENTER_CTX_BINARY_SYSCALL))
+		return;
+	pi_binary_call = false;
+	if (_UK_EXECENV_REGS_GET(environment, __syscall_rsyscall) != SYS_futex)
+		return;
+	command = _UK_EXECENV_REGS_GET(environment, __syscall_rarg1) &
+		FUTEX_CMD_MASK;
+	if (command == FUTEX_LOCK_PI || command == FUTEX_LOCK_PI2) {
+		pi_binary_address =
+			_UK_EXECENV_REGS_GET(environment, __syscall_rarg0);
+		pi_binary_call = true;
+	}
+}
+
+static void pi_restart_complete(struct uk_syscall_exit_ctx *context)
+{
+	struct ukarch_execenv *environment = context->execenv;
+	__uptr pc;
+
+	if (!(context->flags & UK_SYSCALL_EXIT_CTX_BINARY_SYSCALL) ||
+	    !pi_binary_call)
+		return;
+	pi_binary_call = false;
+	if ((long)_UK_EXECENV_REGS_GET(environment, __syscall_rret0) != -EINTR)
+		return;
+	_UK_EXECENV_REGS_SET(environment, __syscall_rarg0, pi_binary_address);
+	_UK_EXECENV_REGS_SET(environment, __syscall_rsyscall, SYS_futex);
+	pc = uk_lcpu_regs_get(environment->regs, PC);
+#if CONFIG_ARCH_X86_64
+	_UK_EXECENV_REGS_SET(environment, __syscall_rret0, SYS_futex);
+	pc -= 2;
+#else
+	pc -= 4;
+#endif
+	uk_lcpu_regs_set(environment->regs, PC, pc);
+}
+
+uk_syscall_entertab_prio(pi_restart_prepare, UK_PRIO_LATEST);
+uk_syscall_exittab_prio(pi_restart_complete,
+	UK_PRIO_BEFORE(UK_PRIO_BEFORE(UK_PRIO_LATEST)));
+#endif
+
 /**
  * Prepare to wait on a futex.
  *
@@ -109,16 +181,28 @@ static int futex_wait_prepare(__u32 *uaddr, __u32 val,
 	struct uk_thread *current = uk_thread_current();
 	struct uk_futex f = {.uaddr = uaddr, .thread = current};
 
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+	int ret = uk_posix_futex_lock(uaddr, NULL);
+
+	if (ret)
+		return ret;
+#endif
 	irqf = uk_lcpu_save_irqf();
 	uk_spin_lock(&futex_list_lock);
 	if (uk_load_n(uaddr) != val) {
 		uk_spin_unlock(&futex_list_lock);
 		uk_lcpu_restore_irqf(irqf);
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+		uk_posix_futex_unlock();
+#endif
 		return -EAGAIN;
 	}
 	if (timeout && *timeout <= ukplat_monotonic_clock()) {
 		uk_spin_unlock(&futex_list_lock);
 		uk_lcpu_restore_irqf(irqf);
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+		uk_posix_futex_unlock();
+#endif
 		return -ETIMEDOUT;
 	}
 	uk_list_add_tail(&f.list_node, &futex_list);
@@ -135,6 +219,9 @@ static int futex_wait_prepare(__u32 *uaddr, __u32 val,
 	}
 	uk_spin_unlock(&futex_list_lock);
 	uk_lcpu_restore_irqf(irqf);
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+	uk_posix_futex_unlock();
+#endif
 	/* A signal can arrive before uk_thread_block(). */
 	if (interrupted && uk_load_n(interrupted))
 		uk_thread_wake(current);
@@ -204,6 +291,12 @@ static int futex_wake(uint32_t *uaddr, uint32_t val)
 	struct uk_futex *f;
 	uint32_t count = 0;
 
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+	int ret = uk_posix_futex_lock(uaddr, NULL);
+
+	if (ret)
+		return ret;
+#endif
 	irqf = uk_lcpu_save_irqf();
 	uk_spin_lock(&futex_list_lock);
 
@@ -228,6 +321,9 @@ static int futex_wake(uint32_t *uaddr, uint32_t val)
 	uk_spin_unlock(&futex_list_lock);
 	uk_lcpu_restore_irqf(irqf);
 
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+	uk_posix_futex_unlock();
+#endif
 	return (int) count;
 }
 
@@ -260,11 +356,20 @@ static int futex_requeue(__u32 *uaddr, __u32 val, __u32 val2,
 	__u32 woken = 0;
 	__u32 requeued = 0;
 
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+	int ret = uk_posix_futex_lock(uaddr, uaddr2);
+
+	if (ret)
+		return ret;
+#endif
 	irqf = uk_lcpu_save_irqf();
 	uk_spin_lock(&futex_list_lock);
 	if (expected && *expected != uk_load_n(uaddr)) {
 		uk_spin_unlock(&futex_list_lock);
 		uk_lcpu_restore_irqf(irqf);
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+		uk_posix_futex_unlock();
+#endif
 		return -EAGAIN;
 	}
 
@@ -286,6 +391,9 @@ static int futex_requeue(__u32 *uaddr, __u32 val, __u32 val2,
 
 	uk_spin_unlock(&futex_list_lock);
 	uk_lcpu_restore_irqf(irqf);
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+	uk_posix_futex_unlock();
+#endif
 	return woken + requeued;
 }
 
@@ -307,8 +415,9 @@ static int futex_deadline(const struct timespec *timeout, int cmd,
 	else
 		target = ukarch_time_sec_to_nsec(timeout->tv_sec) +
 			timeout->tv_nsec;
-	if (cmd == FUTEX_WAIT_BITSET) {
-		if (!(flags & FUTEX_CLOCK_REALTIME)) {
+	if (cmd == FUTEX_WAIT_BITSET || cmd == FUTEX_LOCK_PI ||
+	    cmd == FUTEX_LOCK_PI2) {
+		if (cmd != FUTEX_LOCK_PI && !(flags & FUTEX_CLOCK_REALTIME)) {
 			*deadline = target;
 			return 0;
 		}
@@ -354,7 +463,8 @@ UK_LLSYSCALL_R_DEFINE(int, futex, uint32_t *, uaddr, int, futex_op,
 		cmd == FUTEX_WAIT_REQUEUE_PI))
 		return -ENOSYS;
 
-	if (timeout && (cmd == FUTEX_WAIT || cmd == FUTEX_WAIT_BITSET)) {
+	if (timeout && (cmd == FUTEX_WAIT || cmd == FUTEX_WAIT_BITSET ||
+			cmd == FUTEX_LOCK_PI || cmd == FUTEX_LOCK_PI2)) {
 		ret = futex_deadline(timeout, cmd, futex_op, &timeout_ns);
 		if (ret)
 			return ret;
@@ -377,6 +487,34 @@ UK_LLSYSCALL_R_DEFINE(int, futex, uint32_t *, uaddr, int, futex_op,
 	case FUTEX_WAKE:
 		return futex_wake(uaddr, val);
 
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+	case FUTEX_TRYLOCK_PI:
+	case FUTEX_UNLOCK_PI:
+		return uk_posix_futex_pi(uaddr, cmd, NULL, NULL);
+	case FUTEX_LOCK_PI:
+	case FUTEX_LOCK_PI2:
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+	{
+		struct uk_posix_signal_wait wait;
+
+		ret = uk_posix_signal_wait_init(&wait, NULL, NULL, 0);
+		if (ret)
+			return ret;
+		ret = uk_posix_signal_wait_check(&wait);
+		if (!ret)
+			ret = uk_posix_futex_pi(uaddr, cmd,
+				timeout ? &timeout_ns : NULL,
+				&wait.interrupted);
+		if (ret == -EINTR)
+			ret = uk_posix_signal_wait_check(&wait);
+		uk_posix_signal_wait_end(&wait, ret);
+		return ret;
+	}
+#else
+		return uk_posix_futex_pi(uaddr, cmd,
+			timeout ? &timeout_ns : NULL, NULL);
+#endif
+#endif
 	case FUTEX_FD:
 		return -ENOSYS;
 

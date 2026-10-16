@@ -664,3 +664,23 @@ struct uk_sched *uk_sched_select(void)
 			return scheduler;
 	UK_CRASH("No started scheduler selected");
 }
+
+bool uk_sched_has_higher_priority(void)
+{
+	struct uk_thread *current = uk_thread_current(), *thread;
+	struct uk_sched *scheduler = current->sched;
+	unsigned long flags;
+	bool found = false;
+
+	ukplat_spin_lock_irqsave(&scheduler->lock, flags);
+	uk_sched_foreach_thread(scheduler, thread) {
+		if (uk_thread_is_runnable(thread) && !uk_thread_is_exited(thread) &&
+		    uk_load_n(&thread->effective_priority) >
+		    uk_load_n(&current->effective_priority)) {
+			found = true;
+			break;
+		}
+	}
+	ukplat_spin_unlock_irqrestore(&scheduler->lock, flags);
+	return found;
+}

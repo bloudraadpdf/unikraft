@@ -44,3 +44,4 @@ uk_sched_get_cpu_mask
 sched_setaffinity
 uk_sched_select
 uk_sched_membarrier
+uk_sched_has_higher_priority

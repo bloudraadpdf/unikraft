@@ -85,6 +85,12 @@ pid_t uk_sys_getpid(void);
  */
 int uk_posix_process_create_pthread(struct uk_thread *thread);
 bool uk_posix_process_exit_requested(void);
+#if CONFIG_LIBPOSIX_FUTEX
+int uk_posix_futex_lock(__u32 *address, __u32 *second);
+void uk_posix_futex_unlock(void);
+int uk_posix_futex_pi(__u32 *address, int command, const __nsec *deadline,
+		       const unsigned int *interrupted);
+#endif
 #if CONFIG_LIBUKVMEM
 struct uk_vas;
 struct uk_vma_ops;

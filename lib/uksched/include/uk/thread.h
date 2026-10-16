@@ -67,6 +67,9 @@ struct uk_thread {
 	struct uk_waitq_ticket wait_ticket;
 	struct uk_waitq stop_wait;
 	bool stop_complete;
+	unsigned int sched_priority;
+	unsigned int effective_priority;
+	int sched_policy;
 
 	struct {
 		struct uk_alloc *t_a;

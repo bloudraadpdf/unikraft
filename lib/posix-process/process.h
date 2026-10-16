@@ -190,6 +190,8 @@ extern __uk_tls struct posix_thread *pthread_self;
 #define uk_pprocess_current()						\
 	uk_pthread_current()->process
 
+void pprocess_pi_update(struct uk_thread *changed);
+
 struct posix_process *pid2pprocess(pid_t pid);
 struct uk_thread *tid2ukthread(pid_t tid);
 struct posix_thread *tid2pthread(pid_t tid);
