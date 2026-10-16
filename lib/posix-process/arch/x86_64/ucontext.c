@@ -9,6 +9,7 @@
 #include <signal.h>
 #include <string.h>
 #include <uk/sched.h>
+#include <uk/nofault.h>
 #include <uk/plat/native/ectx.h>
 #include "../../signal/signal.h"
 
@@ -153,21 +154,24 @@ void pprocess_signal_arch_prepare(struct uk_signal *signal,
 {
 	struct pprocess_signal_stack stack;
 	__uptr sp = uk_lcpu_regs_get(execenv->regs, SP);
-	struct x86_signal_frame *frame;
+	struct x86_signal_frame storage = { 0 };
+	struct x86_signal_frame *frame = &storage;
 	__sz fp_size = uk_plat_native_ectx_size();
 	__u64 features = uk_plat_native_ectx_features();
-	void *fp;
+	void *fp, *buffer;
+	bool copied;
 
 	stack = pprocess_signal_stack_prepare(action, sp, 128);
 	sp = stack.sp;
 	if (sp < fp_size + 4 + sizeof(*frame) + 80)
-		goto bad_stack;
+		pprocess_signal_bad_stack();
 	fp = (void *)ALIGN_DOWN(sp - fp_size - 4, 64);
 	sp = ALIGN_DOWN((__uptr)fp - sizeof(*frame), 16) - 8;
-	if (stack.on_altstack && sp < (__uptr)stack.previous.ss_sp)
-		goto bad_stack;
-	frame = (void *)sp;
-	memset(frame, 0, sizeof(*frame));
+	if (pprocess_signal_stack_reserve(&stack, sp, (__uptr)fp + fp_size + 4))
+		pprocess_signal_bad_stack();
+	buffer = uk_memalign(uk_alloc_get_default(), 64, fp_size + 4);
+	if (!buffer)
+		pprocess_signal_bad_stack();
 	frame->restorer = (__uptr)(action->ks_flags & SA_RESTORER ?
 		action->ks_restorer : pprocess_signal_return);
 	frame->info = signal->siginfo;
@@ -182,16 +186,22 @@ void pprocess_signal_arch_prepare(struct uk_signal *signal,
 	     signal->siginfo.si_signo == SIGSEGV))
 		frame->context.uc_mcontext.gregs[REG_CR2] =
 			(__uptr)signal->siginfo.si_addr;
-	uk_plat_native_ectx_export((const void *)execenv->ectx, fp);
+	uk_plat_native_ectx_export((const void *)execenv->ectx, buffer);
 	if (features) {
-		struct xstate_metadata *metadata = (void *)((char *)fp + 464);
+		struct xstate_metadata *metadata = (void *)((char *)buffer + 464);
 
 		*metadata = (struct xstate_metadata){
 			.magic = XSTATE_MAGIC, .extended_size = fp_size + 4,
 			.features = features, .state_size = fp_size
 		};
-		*(__u32 *)((char *)fp + fp_size) = XSTATE_END;
+		*(__u32 *)((char *)buffer + fp_size) = XSTATE_END;
 	}
+	copied = uk_nofault_memcpy(fp, buffer, fp_size + (features ? 4 : 0), 0) ==
+		fp_size + (features ? 4 : 0);
+	uk_free(uk_alloc_get_default(), buffer);
+	if (!copied || !uk_nofault_try_write(storage, (struct x86_signal_frame *)sp))
+		pprocess_signal_bad_stack();
+	frame = (void *)sp;
 	uk_lcpu_regs_set(execenv->regs, RIP, (__uptr)action->ks_handler);
 	uk_lcpu_regs_set(execenv->regs, RSP, sp);
 	uk_lcpu_regs_set(execenv->regs, RDI, signal->siginfo.si_signo);
@@ -200,49 +210,58 @@ void pprocess_signal_arch_prepare(struct uk_signal *signal,
 	uk_lcpu_regs_set(execenv->regs, RAX, 0);
 	uk_lcpu_regs_set(execenv->regs, RFLAGS,
 			 uk_lcpu_regs_get(execenv->regs, RFLAGS) & ~0x10500UL);
-	return;
-
-bad_stack:
-	pprocess_exit(uk_pprocess_current(), POSIX_PROCESS_KILLED,
-		      SIGSEGV);
-	uk_sched_thread_exit();
 }
 
 static int restore_fp(struct x86_signal_context *context,
 		      struct ukarch_execenv *execenv)
 {
 	const void *fp = context->uc_mcontext.fpregs;
-	const struct xstate_metadata *metadata;
+	struct xstate_metadata metadata;
 	__sz size = 512;
 	__u64 features = 3;
+	__u32 end;
+	void *buffer;
+	int rc = -EFAULT;
 
 	if (!fp)
 		return uk_plat_native_ectx_import((void *)execenv->ectx,
 					 NULL, 0, 0);
-	metadata = (const void *)((const char *)fp + 464);
-	if (metadata->magic == XSTATE_MAGIC) {
-		size = metadata->state_size;
-		features = metadata->features;
+	if ((__uptr)fp > __PTR_MAX - 512 ||
+	    !uk_nofault_try_read(metadata,
+		(const struct xstate_metadata *)((const char *)fp + 464)))
+		return -EFAULT;
+	if (metadata.magic == XSTATE_MAGIC) {
+		size = metadata.state_size;
+		features = metadata.features;
 		if (!IS_ALIGNED((__uptr)fp, 64) || size < 576 ||
 		    size > uk_plat_native_ectx_size() ||
-		    metadata->extended_size != size + 4 ||
-		    *(__u32 *)((const char *)fp + size) != XSTATE_END)
+		    metadata.extended_size != size + 4 ||
+		    (__uptr)fp > __PTR_MAX - size - 4 ||
+		    !uk_nofault_try_read(end,
+				(const __u32 *)((const char *)fp + size)) ||
+		    end != XSTATE_END)
 			return -EINVAL;
 	}
-	return uk_plat_native_ectx_import((void *)execenv->ectx, fp,
-					 size, features);
+	buffer = uk_memalign(uk_alloc_get_default(), 64, size);
+	if (!buffer)
+		return -ENOMEM;
+	if (uk_nofault_memcpy(buffer, fp, size, 0) == size)
+		rc = uk_plat_native_ectx_import((void *)execenv->ectx,
+						buffer, size, features);
+	uk_free(uk_alloc_get_default(), buffer);
+	return rc;
 }
 
 UK_LLSYSCALL_R_E_DEFINE(long, rt_sigreturn)
 {
-	struct x86_signal_frame *frame =
-		(void *)(uk_lcpu_regs_get(execenv->regs, SP) - 8);
+	struct x86_signal_frame storage;
+	struct x86_signal_frame *frame = &storage;
+	__uptr sp = uk_lcpu_regs_get(execenv->regs, SP);
 
-	if (restore_fp(&frame->context, execenv)) {
-		pprocess_exit(uk_pprocess_current(), POSIX_PROCESS_KILLED,
-			      SIGSEGV);
-		uk_sched_thread_exit();
-	}
+	if (sp < 8 ||
+	    !uk_nofault_try_read(storage, (const struct x86_signal_frame *)(sp - 8)) ||
+	    restore_fp(&frame->context, execenv))
+		pprocess_signal_bad_stack();
 	get_ucontext(&frame->context, execenv);
 	pprocess_signal_restore_mask(frame->context.uc_sigmask);
 	pprocess_signal_restore_altstack(&frame->context.uc_stack,

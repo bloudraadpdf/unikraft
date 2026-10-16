@@ -9,7 +9,12 @@
 #include <string.h>
 #include <sys/types.h>
 
+#include <uk/nofault.h>
+#if CONFIG_HAVE_PAGING
+#include <uk/paging.h>
+#endif
 #include <uk/process.h>
+#include <uk/sched.h>
 #include <uk/syscall.h>
 
 #include "signal.h"
@@ -57,7 +62,8 @@ pprocess_signal_stack_prepare(const struct kern_sigaction *action,
 	stack.sp = sp >= redzone ? sp - redzone : 0;
 	if ((action->ks_flags & SA_ONSTACK) &&
 	    !(current->ss_flags & (SS_DISABLE | SS_ONSTACK))) {
-		stack.sp = (__uptr)current->ss_sp + current->ss_size;
+		stack.sp = (__uptr)current->ss_sp <= __PTR_MAX - current->ss_size ?
+			(__uptr)current->ss_sp + current->ss_size : 0;
 		stack.on_altstack = true;
 		if ((unsigned int)current->ss_flags & SS_AUTODISARM)
 			*current = (stack_t){ .ss_flags = SS_DISABLE };
@@ -65,6 +71,38 @@ pprocess_signal_stack_prepare(const struct kern_sigaction *action,
 			current->ss_flags |= SS_ONSTACK;
 	}
 	return stack;
+}
+
+int pprocess_signal_stack_reserve(const struct pprocess_signal_stack *stack,
+				  __uptr bottom, __uptr top)
+{
+	__sz length;
+
+	if (bottom >= top || top > stack->sp)
+		return -EFAULT;
+	if (stack->on_altstack &&
+	    (bottom < (__uptr)stack->previous.ss_sp ||
+	     top - (__uptr)stack->previous.ss_sp > stack->previous.ss_size))
+		return -EFAULT;
+	length = top - bottom;
+#if CONFIG_HAVE_PAGING
+	if (!uk_paging_vaddr_range_isvalid(bottom, length))
+		return -EFAULT;
+#endif
+	if (uk_nofault_probe_rw(bottom, length, 0) == length)
+		return 0;
+#if CONFIG_LIBUKVMEM && CONFIG_LIBPOSIX_PROCESS_EXECVE
+	if (!stack->on_altstack && !pprocess_memory_stack(bottom) &&
+	    uk_nofault_probe_rw(bottom, length, 0) == length)
+		return 0;
+#endif
+	return -EFAULT;
+}
+
+void pprocess_signal_bad_stack(void)
+{
+	pprocess_exit(uk_pprocess_current(), POSIX_PROCESS_KILLED, SIGSEGV);
+	uk_sched_thread_exit();
 }
 
 void pprocess_signal_restore_altstack(const stack_t *stack, __uptr sp)
@@ -80,7 +118,7 @@ UK_SYSCALL_R_E_DEFINE(int, sigaltstack, const stack_t *, ss,
 		    stack_t *, old_ss)
 {
 	stack_t *current = &uk_pthread_current()->signal->altstack;
-	stack_t previous;
+	stack_t previous, next;
 	int ret;
 
 	if (execenv)
@@ -88,12 +126,14 @@ UK_SYSCALL_R_E_DEFINE(int, sigaltstack, const stack_t *, ss,
 	previous = *current;
 
 	if (ss) {
-		ret = set_altstack(current, ss);
+		if (!uk_nofault_try_read(next, ss))
+			return -EFAULT;
+		ret = set_altstack(current, &next);
 		if (ret)
 			return ret;
 	}
-	if (old_ss)
-		*old_ss = previous;
+	if (old_ss && !uk_nofault_try_write(previous, old_ss))
+		return -EFAULT;
 	return 0;
 }
 

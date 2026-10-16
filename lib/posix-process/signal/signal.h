@@ -310,6 +310,9 @@ struct pprocess_signal_stack {
 struct pprocess_signal_stack
 pprocess_signal_stack_prepare(const struct kern_sigaction *action,
 			      __uptr sp, __sz redzone);
+int pprocess_signal_stack_reserve(const struct pprocess_signal_stack *stack,
+				  __uptr bottom, __uptr top);
+void pprocess_signal_bad_stack(void) __noreturn;
 void pprocess_signal_arch_prepare(struct uk_signal *signal,
 	const struct kern_sigaction *action, struct ukarch_execenv *execenv,
 	const uk_sigset_t *saved_mask);

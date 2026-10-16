@@ -10,6 +10,7 @@
 
 #include <uk/essentials.h>
 #include <uk/syscall.h>
+#include <uk/nofault.h>
 #include <uk/sched.h>
 #include "../../signal/signal.h"
 #if CONFIG_LIBUKPLAT_NATIVE_ECTX
@@ -190,19 +191,16 @@ void pprocess_signal_arch_prepare(struct uk_signal *signal,
 {
 	struct pprocess_signal_stack stack;
 	__uptr sp = uk_lcpu_regs_get(execenv->regs, SP);
-	struct arm64_signal_frame *frame;
+	struct arm64_signal_frame storage;
+	struct arm64_signal_frame *frame = &storage;
 
 	stack = pprocess_signal_stack_prepare(action, sp, 0);
 	sp = stack.sp;
-	if (sp < sizeof(*frame) ||
-	    (stack.on_altstack &&
-	     ALIGN_DOWN(sp - sizeof(*frame), UKARCH_SP_ALIGN) <
-	     (__uptr)stack.previous.ss_sp)) {
-		pprocess_exit(uk_pprocess_current(), POSIX_PROCESS_KILLED, SIGSEGV);
-		uk_sched_thread_exit();
-	}
+	if (sp < sizeof(*frame))
+		pprocess_signal_bad_stack();
 	sp = ALIGN_DOWN(sp - sizeof(*frame), UKARCH_SP_ALIGN);
-	frame = (void *)sp;
+	if (pprocess_signal_stack_reserve(&stack, sp, sp + sizeof(*frame)))
+		pprocess_signal_bad_stack();
 	frame->previous.fp = uk_lcpu_regs_get(execenv->regs, X29);
 	frame->previous.lr = uk_lcpu_regs_get(execenv->regs, LR);
 	frame->info = signal->siginfo;
@@ -212,6 +210,9 @@ void pprocess_signal_arch_prepare(struct uk_signal *signal,
 	if (signal->siginfo.si_code > 0 &&
 	    (signal->siginfo.si_signo == SIGBUS || signal->siginfo.si_signo == SIGSEGV))
 		frame->context.uc_mcontext.fault_address = (__uptr)signal->siginfo.si_addr;
+	if (!uk_nofault_try_write(storage, (struct arm64_signal_frame *)sp))
+		pprocess_signal_bad_stack();
+	frame = (void *)sp;
 	uk_lcpu_regs_set(execenv->regs, PC, (__uptr)action->ks_handler);
 	uk_lcpu_regs_set(execenv->regs, SP, sp);
 	uk_lcpu_regs_set(execenv->regs, X0, signal->siginfo.si_signo);
@@ -224,16 +225,16 @@ void pprocess_signal_arch_prepare(struct uk_signal *signal,
 
 UK_LLSYSCALL_R_E_DEFINE(long, rt_sigreturn)
 {
-	struct arm64_signal_frame *frame = (void *)uk_lcpu_regs_get(execenv->regs, SP);
-	struct posix_thread *thread = uk_pthread_current();
-	struct posix_process *process = thread->process;
+	struct arm64_signal_frame storage;
+	const struct arm64_signal_frame *user =
+		(void *)uk_lcpu_regs_get(execenv->regs, SP);
+	struct arm64_signal_frame *frame = &storage;
 	uk_sigset_t mask;
 
-	if (!IS_ALIGNED((__uptr)frame, UKARCH_SP_ALIGN) ||
-	    pprocess_signal_arch_get_ucontext(&frame->context, execenv)) {
-		pprocess_exit(process, POSIX_PROCESS_KILLED, SIGSEGV);
-		uk_sched_thread_exit();
-	}
+	if (!IS_ALIGNED((__uptr)user, UKARCH_SP_ALIGN) ||
+	    !uk_nofault_try_read(storage, user) ||
+	    pprocess_signal_arch_get_ucontext(&frame->context, execenv))
+		pprocess_signal_bad_stack();
 	memcpy(&mask, &frame->context.uc_sigmask, sizeof(mask));
 	pprocess_signal_restore_mask(mask);
 	pprocess_signal_restore_altstack(&frame->context.uc_stack,
