@@ -903,8 +903,7 @@ int ramfs_live_ctl(struct ramfs_node *n, int fam, int req,
 		}
 		break;
 	case UKFILE_CTL_IOCTL:
-		/* No ioctls supported */
-		return -EINVAL;
+		return -ENOTTY;
 	default:
 		return -ENOSYS;
 	}
