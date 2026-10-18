@@ -46,6 +46,9 @@
 #include "lwip/pbuf.h"
 #include "lwip/ip_addr.h"
 #include "lwip/ip6_addr.h"
+#if LWIP_SOCKET
+#include <time.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -61,6 +64,9 @@ struct netbuf {
   struct pbuf *p, *ptr;
   ip_addr_t addr;
   u16_t port;
+#if LWIP_SOCKET
+  struct timespec timestamp;
+#endif
 #if LWIP_NETBUF_RECVINFO || LWIP_CHECKSUM_ON_COPY
   u8_t flags;
   u16_t toport_chksum;

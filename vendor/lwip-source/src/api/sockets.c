@@ -522,6 +522,8 @@ alloc_socket(struct netconn *newconn, int accepted)
       sockets[i].lastdata.pointer = NULL;
       sockets[i].shutdown = 0;
       sockets[i].pending_read = 0;
+      sockets[i].timestamp_mode = 0;
+      sockets[i].receive_original_destination = 0;
 #if LWIP_SOCKET_SELECT || LWIP_SOCKET_POLL
       LWIP_ASSERT("sockets[i].select_waiting == 0", sockets[i].select_waiting == 0);
       sockets[i].rcvevent   = 0;
@@ -1355,6 +1357,33 @@ lwip_recv_tcp_from(struct lwip_sock *sock, struct sockaddr *from, socklen_t *fro
 }
 #endif
 
+static int
+socket_cmsg_append(struct msghdr *message, size_t capacity, int level,
+                   int type, const void *data, size_t size)
+{
+  size_t available = capacity - message->msg_controllen;
+  struct cmsghdr header = {
+    .cmsg_level = level, .cmsg_type = type,
+    .cmsg_len = LWIP_MIN(available, CMSG_LEN(size))
+  };
+  char *output = (char *)message->msg_control + message->msg_controllen;
+  size_t payload;
+
+  if (available < CMSG_LEN(size)) {
+    message->msg_flags |= MSG_CTRUNC;
+  }
+  if (available < CMSG_LEN(0)) {
+    return 1;
+  }
+  payload = header.cmsg_len - CMSG_LEN(0);
+  if (uk_nofault_memcpy(output, (const char *)&header, sizeof(header), 0) != sizeof(header) ||
+      uk_nofault_memcpy(output + CMSG_LEN(0), data, payload, 0) != payload) {
+    return 0;
+  }
+  message->msg_controllen += LWIP_MIN(available, CMSG_SPACE(size));
+  return 1;
+}
+
 /* Helper function to receive a netbuf from a udp or raw netconn.
  * Keeps sock->lastdata for peeking.
  */
@@ -1439,45 +1468,49 @@ lwip_recvfrom_udp_raw(struct lwip_sock *sock, int flags, struct msghdr *msg, u16
   msg->msg_flags = 0;
 
   {
-    size_t available = msg->msg_controllen;
+    size_t capacity = msg->msg_control ? msg->msg_controllen : 0;
+    unsigned int timestamp_mode = uk_load_n(&sock->timestamp_mode);
 
     msg->msg_controllen = 0;
+    if (timestamp_mode) {
+      struct timespec stamp = buf->timestamp;
+
+      if (timestamp_mode == SO_TIMESTAMP || timestamp_mode == SO_TIMESTAMP_NEW) {
+        stamp.tv_nsec /= 1000;
+      }
+      if (!socket_cmsg_append(msg, capacity, SOL_SOCKET, timestamp_mode,
+                              &stamp, sizeof(stamp))) {
+        goto control_done;
+      }
+    }
 #if LWIP_NETBUF_RECVINFO && LWIP_IPV4
     if ((buf->flags & NETBUF_FLAG_DESTADDR) && IP_IS_V4(&buf->toaddr)) {
-      union {
-        struct cmsghdr alignment;
-        unsigned char bytes[CMSG_SPACE(sizeof(struct in_pktinfo))];
-      } owned = {0};
-      struct cmsghdr *header = &owned.alignment;
-      struct in_pktinfo info = {0};
-      size_t length = LWIP_MIN(available, CMSG_LEN(sizeof(info)));
-      size_t payload;
+      if (uk_load_n(&sock->conn->flags) & NETCONN_FLAG_PKTINFO) {
+        struct in_pktinfo info = {0};
 
-      if (length < CMSG_LEN(sizeof(info))) {
-        msg->msg_flags |= MSG_CTRUNC;
-      }
-      if (length >= CMSG_LEN(0)) {
-        header->cmsg_level = IPPROTO_IP;
-        header->cmsg_type = IP_PKTINFO;
-        header->cmsg_len = length;
         info.ipi_ifindex = buf->p->if_idx;
         inet_addr_from_ip4addr(&info.ipi_addr, ip_2_ip4(&buf->toaddr));
         inet_addr_from_ip4addr(&info.ipi_spec_dst, &buf->spec_dst);
-        MEMCPY(owned.bytes + CMSG_LEN(0), &info, sizeof(info));
-        payload = length - CMSG_LEN(0);
-        if (uk_nofault_memcpy(msg->msg_control, (const char *)owned.bytes,
-                              CMSG_LEN(0), 0) == CMSG_LEN(0) &&
-            uk_nofault_memcpy((char *)msg->msg_control + CMSG_LEN(0),
-                              (const char *)owned.bytes + CMSG_LEN(0),
-                              payload, 0) == payload) {
-          msg->msg_controllen = LWIP_MIN(available, sizeof(owned.bytes));
+        if (!socket_cmsg_append(msg, capacity, IPPROTO_IP, IP_PKTINFO,
+                                &info, sizeof(info))) {
+          goto control_done;
+        }
+      }
+      if (uk_load_n(&sock->receive_original_destination)) {
+        struct sockaddr_in destination = {0};
+
+        destination.sin_family = AF_INET;
+        destination.sin_port = buf->toport_chksum;
+        inet_addr_from_ip4addr(&destination.sin_addr, ip_2_ip4(&buf->toaddr));
+        if (!socket_cmsg_append(msg, capacity, IPPROTO_IP, IP_ORIGDSTADDR,
+                                &destination, sizeof(destination))) {
+          goto control_done;
         }
       }
     }
-#else
-    LWIP_UNUSED_ARG(available);
 #endif
   }
+control_done:
 
   /* If we don't peek the incoming message: zero lastdata pointer and free the netbuf */
   if ((flags & MSG_PEEK) == 0) {
@@ -3170,6 +3203,21 @@ lwip_getsockopt_impl(int s, int level, int optname, void *optval, socklen_t *opt
     case SOL_SOCKET:
       switch (optname) {
 
+        case SO_TIMESTAMP:
+        case SO_TIMESTAMPNS:
+        case SO_TIMESTAMP_NEW:
+        case SO_TIMESTAMPNS_NEW:
+          LWIP_SOCKOPT_CHECK_OPTLEN_CONN(sock, *optlen, int);
+          {
+            unsigned int mode = uk_load_n(&sock->timestamp_mode);
+            int nanoseconds = optname == SO_TIMESTAMPNS || optname == SO_TIMESTAMPNS_NEW;
+
+            *(int *)optval = mode &&
+              (nanoseconds == (mode == SO_TIMESTAMPNS || mode == SO_TIMESTAMPNS_NEW));
+          }
+          break;
+
+
 #if LWIP_TCP
         case SO_ACCEPTCONN:
           LWIP_SOCKOPT_CHECK_OPTLEN_CONN_PCB(sock, *optlen, int);
@@ -3302,6 +3350,14 @@ lwip_getsockopt_impl(int s, int level, int optname, void *optval, socklen_t *opt
     /* Level: IPPROTO_IP */
     case IPPROTO_IP:
       switch (optname) {
+
+#if LWIP_NETBUF_RECVINFO
+        case IP_RECVORIGDSTADDR:
+          LWIP_SOCKOPT_CHECK_OPTLEN_CONN_PCB_TYPE(sock, *optlen, int, NETCONN_UDP);
+          *(int *)optval = uk_load_n(&sock->receive_original_destination);
+          break;
+#endif
+
         case IP_TTL:
           LWIP_SOCKOPT_CHECK_OPTLEN_CONN_PCB(sock, *optlen, int);
           *(int *)optval = sock->conn->pcb.ip->ttl;
@@ -3620,6 +3676,15 @@ lwip_setsockopt_impl(int s, int level, int optname, const void *optval, socklen_
     case SOL_SOCKET:
       switch (optname) {
 
+        case SO_TIMESTAMP:
+        case SO_TIMESTAMPNS:
+        case SO_TIMESTAMP_NEW:
+        case SO_TIMESTAMPNS_NEW:
+          LWIP_SOCKOPT_CHECK_OPTLEN_CONN(sock, optlen, int);
+          uk_store_n(&sock->timestamp_mode, *(const int *)optval ? optname : 0);
+          break;
+
+
         /* SO_ACCEPTCONN is get-only */
 
         /* The option flags */
@@ -3782,6 +3847,14 @@ lwip_setsockopt_impl(int s, int level, int optname, const void *optval, socklen_
     /* Level: IPPROTO_IP */
     case IPPROTO_IP:
       switch (optname) {
+
+#if LWIP_NETBUF_RECVINFO
+        case IP_RECVORIGDSTADDR:
+          LWIP_SOCKOPT_CHECK_OPTLEN_CONN_PCB_TYPE(sock, optlen, int, NETCONN_UDP);
+          uk_store_n(&sock->receive_original_destination, !!*(const int *)optval);
+          break;
+#endif
+
         case IP_TTL:
           LWIP_SOCKOPT_CHECK_OPTLEN_CONN_PCB(sock, optlen, int);
           sock->conn->pcb.ip->ttl = (u8_t)(*(const int *)optval);

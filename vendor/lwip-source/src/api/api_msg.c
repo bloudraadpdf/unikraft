@@ -55,6 +55,9 @@
 #include "lwip/priv/tcpip_priv.h"
 
 #include <string.h>
+#if LWIP_SOCKET
+#include <uk/posix-time.h>
+#endif
 
 /* netconns are polled once per second (e.g. continue write on memory error) */
 #define NETCONN_TCP_POLL_INTERVAL 2
@@ -223,6 +226,12 @@ recv_raw(void *arg, struct raw_pcb *pcb, struct pbuf *p,
 
       buf->p = q;
       buf->ptr = q;
+#if LWIP_SOCKET
+      (void)uk_sys_clock_gettime(CLOCK_REALTIME, &buf->timestamp);
+#endif
+#if LWIP_NETBUF_RECVINFO
+      buf->flags = 0;
+#endif
       ip_addr_copy(buf->addr, *ip_current_src_addr());
       buf->port = pcb->protocol;
 
@@ -292,10 +301,13 @@ recv_udp(void *arg, struct udp_pcb *pcb, struct pbuf *p,
   } else {
     buf->p = p;
     buf->ptr = p;
+#if LWIP_SOCKET
+    (void)uk_sys_clock_gettime(CLOCK_REALTIME, &buf->timestamp);
+#endif
     ip_addr_set(&buf->addr, addr);
     buf->port = port;
 #if LWIP_NETBUF_RECVINFO
-    if (conn->flags & NETCONN_FLAG_PKTINFO) {
+    if (LWIP_SOCKET || (conn->flags & NETCONN_FLAG_PKTINFO)) {
       /* get the UDP header - always in the first pbuf, ensured by udp_input */
       const struct udp_hdr *udphdr = (const struct udp_hdr *)ip_next_header_ptr();
       buf->flags = NETBUF_FLAG_DESTADDR;

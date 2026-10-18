@@ -76,6 +76,8 @@ union lwip_sock_lastdata {
 struct lwip_sock {
   unsigned int shutdown;
   unsigned int pending_read;
+  unsigned int timestamp_mode;
+  unsigned int receive_original_destination;
   /** sockets currently are built on netconns, each socket has one netconn */
   struct netconn *conn;
   /** data that was left from the previous read */
