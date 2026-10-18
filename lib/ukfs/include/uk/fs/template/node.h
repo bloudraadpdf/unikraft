@@ -370,7 +370,7 @@ UK_FS_TMPL_NODE_GEN_LIVE_OPSTABLE_STATIC(drv);				\
 UK_FS_TMPL_LIVE_GENERATE_STATIC(drv,  UK_FS_TMPL_NODE_LIVE_NODETYPE(drv),\
 				UK_FS_TMPL_NODE_LIVE_NODECMP(drv),	\
 				UK_FS_TMPL_NODE_LIVE_OPSTABLE(drv),	\
-				mode_constraints, NULL)
+				mode_constraints, NULL, false)
 
 /**
  * Declare common node driver boilerplate as regular linkage.

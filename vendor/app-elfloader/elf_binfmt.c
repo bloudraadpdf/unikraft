@@ -31,7 +31,8 @@ static int uk_binfmt_load_elf(struct uk_binfmt_loader_args *args)
 	 * check the parameters before we load the file, as atm we're forced
 	 * to do an elf_unload() on bad parameters.
 	 */
-	prog = elf_load_vfs(args->alloc, args->pathname, args->progname);
+	prog = elf_load_vfs(args->alloc, args->pathname, args->progname,
+			    args->source);
 	if (unlikely(PTRISERR(prog))) {
 		rc = PTR2ERR(prog);
 		if (rc == -ENOEXEC) {

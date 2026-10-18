@@ -23,17 +23,23 @@
 extern const struct uk_file_ops uk_file_nops;
 extern const struct uk_file_ops uk_file_anon_ops;
 
-ssize_t uk_file_anon_noio(const struct uk_file *f,
+ssize_t uk_file_anon_read(const struct uk_file *f,
 			  const struct iovec *iov, size_t iovcnt,
 			  size_t off, long flags);
+
+struct uk_file_io_result
+uk_file_anon_write(const struct uk_file *f, const struct iovec *iov,
+		   size_t iovcnt, size_t off, long flags,
+		   enum uk_file_write_kind kind __unused);
 
 ssize_t uk_file_nop_read(const struct uk_file *f,
 			 const struct iovec *iov, size_t iovcnt,
 			 size_t off, long flags);
 
-ssize_t uk_file_nop_write(const struct uk_file *f,
-			  const struct iovec *iov, size_t iovcnt,
-			  size_t off, long flags);
+struct uk_file_io_result
+uk_file_nop_write(const struct uk_file *f, const struct iovec *iov,
+		  size_t iovcnt, size_t off, long flags,
+		  enum uk_file_write_kind kind __unused);
 
 ssize_t uk_file_nop_mem(const struct uk_file *f, enum uk_file_mem_op op,
 			size_t off, size_t len,

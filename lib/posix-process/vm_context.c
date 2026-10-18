@@ -24,6 +24,7 @@ void pprocess_vm_unmap_owned(struct posix_vm_context *state,
 	__sz length;
 	int rc;
 
+	UK_ASSERT(!uk_mutex_is_locked(&pprocess_mutex));
 	uk_mutex_lock(&vas->mutation_lock);
 	for (;;) {
 		for (vma = uk_vma_first(vas); vma; vma = uk_vma_next(vma))
@@ -47,7 +48,9 @@ struct posix_vm_context *pprocess_vm_alloc(struct uk_alloc *allocator)
 	if (!state)
 		return NULL;
 	state->allocator = allocator;
+	state->users = 1;
 	state->references = 1;
+	state->view.context = state;
 #if CONFIG_LIBPOSIX_PROCESS_BRK
 	if (pprocess_brk_init(state)) {
 		uk_free(allocator, state);
@@ -71,78 +74,150 @@ int pprocess_vm_init(struct posix_process *process, struct posix_process *parent
 	uk_mutex_lock(&pprocess_mutex);
 	process->vm_context = parent->vm_context;
 	UK_ASSERT(process->vm_context);
+	process->vm_context->users++;
 	process->vm_context->references++;
 	uk_mutex_unlock(&pprocess_mutex);
 	return 0;
 }
 
-void pprocess_vm_put(struct posix_vm_context *state, pid_t pid __maybe_unused)
+void uk_posix_vm_reference_put(struct posix_vm_context *state)
 {
-	if (!state)
-		return;
+	bool release;
+
+	UK_ASSERT(!uk_mutex_is_locked(&pprocess_mutex));
 	uk_mutex_lock(&pprocess_mutex);
-	UK_ASSERT(state->references);
-	if (!--state->references) {
-#if CONFIG_LIBPOSIX_PROCESS_SYSV_SHM
-		pprocess_shm_release(state, pid);
-#endif
-#if CONFIG_LIBUKVMEM
-		pprocess_vm_unmap_owned(state, NULL);
-#endif
-#if CONFIG_LIBPOSIX_PROCESS_BRK && !CONFIG_LIBUKVMEM
-		pprocess_brk_free(state);
-#endif
-#if CONFIG_LIBPOSIX_PROCESS_EXECVE
-		uk_free(state->allocator, state->auxv);
-#if CONFIG_LIBPOSIX_VFS
-		uk_posix_vfs_path_release(state->executable);
-#endif
-#endif
-		uk_free(state->allocator, state);
-	}
+	UK_ASSERT(state->references > state->users);
+	release = !--state->references;
+	UK_ASSERT(!release || !state->users);
 	uk_mutex_unlock(&pprocess_mutex);
+	if (release)
+		uk_free(state->allocator, state);
 }
 
-void pprocess_vm_replace(struct posix_process *process,
-			struct posix_vm_context *state)
+void pprocess_vm_retire_locked(struct posix_vm_context *state,
+			       pid_t pid __maybe_unused,
+			       struct pprocess_retired *retired)
 {
-	UK_ASSERT(state);
-	uk_arch_mb();
+	UK_ASSERT(uk_mutex_is_locked(&pprocess_mutex));
+	if (!state)
+		return;
+	UK_ASSERT(state->users && state->references >= state->users);
+	if (--state->users) {
+		state->references--;
+		return;
+	}
+#if CONFIG_LIBPOSIX_PROCESS_SYSV_SHM
+	pprocess_shm_retire_locked(state, pid);
+#endif
+	state->retired_next = retired->vms;
+	retired->vms = state;
+}
+
+void pprocess_vm_destroy_retired(struct posix_vm_context *state)
+{
+	UK_ASSERT(!uk_mutex_is_locked(&pprocess_mutex));
+	UK_ASSERT(!state->users);
+#if CONFIG_LIBUKVMEM
+	pprocess_vm_unmap_owned(state, NULL);
+#endif
+#if CONFIG_LIBPOSIX_PROCESS_BRK && !CONFIG_LIBUKVMEM
+	pprocess_brk_free(state);
+#endif
+#if CONFIG_LIBPOSIX_PROCESS_EXECVE
+	uk_free(state->allocator, state->auxv);
+	state->auxv = NULL;
+#if CONFIG_LIBPOSIX_VFS
+	uk_posix_vfs_path_release(state->executable);
+	state->executable = NULL;
+#endif
+#endif
+	uk_posix_vm_reference_put(state);
+}
+
+void pprocess_vm_release_user(struct posix_vm_context *state, pid_t pid)
+{
+	struct pprocess_retired retired = {0};
+
+	UK_ASSERT(!uk_mutex_is_locked(&pprocess_mutex));
 	uk_mutex_lock(&pprocess_mutex);
+	pprocess_vm_retire_locked(state, pid, &retired);
+	uk_mutex_unlock(&pprocess_mutex);
+	pprocess_retired_release(&retired);
+}
+
+void pprocess_vm_replace(struct uk_thread *thread,
+			 struct posix_vm_context *state)
+{
+	struct pprocess_retired retired = {0};
+	struct posix_process *process;
+	struct posix_thread *target;
+
+	UK_ASSERT(state);
+	pprocess_thread_cleanup(thread);
+	UK_ASSERT(!uk_mutex_is_locked(&pprocess_mutex));
 #if CONFIG_LIBPOSIX_PROCESS_BRK && CONFIG_LIBUKVMEM
 	pprocess_brk_commit(state);
 #endif
-	pprocess_vm_put(process->vm_context, process->pid);
+	uk_arch_mb();
+	uk_mutex_lock(&pprocess_mutex);
+	target = uk_thread_uktls_var(thread, pthread_self);
+	UK_ASSERT(target && target->process);
+	process = target->process;
+	pprocess_vm_retire_locked(process->vm_context, process->pid, &retired);
 	process->vm_context = state;
 	uk_mutex_unlock(&pprocess_mutex);
-}
-
-static int pprocess_vm_exit(void *arg)
-{
-	struct posix_process_ppexit_event_data *event = arg;
-	struct posix_process *process;
-
+	pprocess_retired_release(&retired);
 	uk_mutex_lock(&pprocess_mutex);
-	process = pid2pprocess(event->pid);
-	pprocess_vm_put(process->vm_context, process->pid);
-	process->vm_context = NULL;
+	UK_ASSERT(uk_thread_uktls_var(thread, pthread_self) == target);
+	target->cleanup_started = false;
 	uk_mutex_unlock(&pprocess_mutex);
-	return 0;
 }
-
-POSIX_PROCESS_PPEXIT_HANDLER(pprocess_vm_exit);
 
 #if CONFIG_LIBPOSIX_PROCESS_EXECVE && CONFIG_LIBPOSIX_VFS
-struct uk_vfs_path *uk_posix_process_executable(struct posix_process *process)
+struct uk_vfs_path *
+uk_posix_process_task_executable(struct posix_process *process,
+				 struct uk_posix_task *task)
 {
 	struct uk_vfs_path *path = NULL;
 
 	uk_mutex_lock(&pprocess_mutex);
-	if (process->vm_context)
+	if (pprocess_task_resolve_locked(process, task) &&
+	    process->vm_context && process->vm_context->users)
 		path = process->vm_context->executable;
 	if (path)
 		uk_posix_vfs_path_acquire(path);
 	uk_mutex_unlock(&pprocess_mutex);
 	return path ? path : ERR2PTR(-ENOENT);
+}
+#endif
+
+#if CONFIG_LIBUKVMEM && CONFIG_LIBPOSIX_VFS
+struct uk_posix_vm_view *
+uk_posix_process_task_vm_view_get(struct posix_process *process,
+				  struct uk_posix_task *task)
+{
+	struct uk_posix_vm_view *view = NULL;
+	struct posix_vm_context *state;
+
+	uk_mutex_lock(&pprocess_mutex);
+	if (!uk_posix_process_task_attached(process, task)) {
+		view = ERR2PTR(-ESRCH);
+	} else if (pprocess_task_resolve_locked(process, task)) {
+		state = process->vm_context;
+		if (state && state->users) {
+			state->references++;
+			view = &state->view;
+		}
+	}
+	uk_mutex_unlock(&pprocess_mutex);
+	return view;
+}
+#endif
+
+#if CONFIG_LIBUKVMEM
+void uk_posix_vm_view_put(struct uk_posix_vm_view *view)
+{
+	if (view)
+		uk_posix_vm_reference_put(view->context);
 }
 #endif

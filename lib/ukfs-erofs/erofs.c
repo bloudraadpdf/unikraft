@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
+#include <sys/statvfs.h>
 #include <erofs/internal.h>
 #include <erofs/dir.h>
 #include <uk/file.h>
@@ -28,12 +29,14 @@ struct erofs_volume {
 	struct uk_fs_vopen_memimg image;
 	const struct uk_file *source;
 	struct uk_mutex lock;
+	struct uk_mutex nodes_lock;
+	struct erofs_node *nodes;
 	unsigned int references;
-	/* After mount, the volume lock protects cached reads. */
 	struct erofs_cached_block cache[64];
 };
 
 struct erofs_node {
+	struct erofs_node *next;
 	struct erofs_volume *volume;
 	struct erofs_inode inode;
 	struct uk_file_state state;
@@ -101,35 +104,74 @@ static void volume_release(struct erofs_volume *volume)
 {
 	if (__atomic_sub_fetch(&volume->references, 1, __ATOMIC_ACQ_REL))
 		return;
+	UK_ASSERT(!volume->nodes);
 	if (volume->source)
 		uk_file_release(volume->source);
 	free(volume->super.devs);
 	free(volume);
 }
 
-static void node_acquire(struct erofs_node *node)
+static struct erofs_node *node_find(struct erofs_volume *volume,
+				    erofs_nid_t nid)
 {
-	__atomic_add_fetch(&node->references, 1, __ATOMIC_RELAXED);
+	struct erofs_node *node;
+
+	for (node = volume->nodes; node; node = node->next)
+		if (node->inode.nid == nid)
+			return node;
+	return NULL;
 }
 
-static void node_release(struct erofs_node *node)
+static void node_acquire(struct erofs_node *node)
+{
+	uk_mutex_lock(&node->volume->nodes_lock);
+	node->references++;
+	uk_mutex_unlock(&node->volume->nodes_lock);
+}
+
+static void node_free(struct erofs_node *node)
 {
 	struct erofs_volume *volume = node->volume;
 
-	if (__atomic_sub_fetch(&node->references, 1, __ATOMIC_ACQ_REL))
-		return;
 	free(node->link);
 	free(node);
 	volume_release(volume);
 }
 
+static void node_release(struct erofs_node *node)
+{
+	struct erofs_volume *volume = node->volume;
+	struct erofs_node **entry;
+	bool last;
+
+	uk_mutex_lock(&volume->nodes_lock);
+	last = !--node->references;
+	if (last) {
+		for (entry = &volume->nodes; *entry != node;
+		     entry = &(*entry)->next)
+			;
+		*entry = node->next;
+	}
+	uk_mutex_unlock(&volume->nodes_lock);
+	if (last)
+		node_free(node);
+}
+
 static struct erofs_node *new_node(struct erofs_volume *volume,
 				 struct erofs_inode *inode)
 {
-	struct erofs_node *node = calloc(1, sizeof(*node));
+	struct erofs_node *node, *existing;
 	struct erofs_vfile file;
 	int result;
 
+	uk_mutex_lock(&volume->nodes_lock);
+	existing = node_find(volume, inode->nid);
+	if (existing)
+		existing->references++;
+	uk_mutex_unlock(&volume->nodes_lock);
+	if (existing)
+		return existing;
+	node = calloc(1, sizeof(*node));
 	if (!node)
 		return ERR2PTR(-ENOMEM);
 	node->volume = volume;
@@ -156,9 +198,22 @@ static struct erofs_node *new_node(struct erofs_volume *volume,
 		node->link[inode->i_size] = '\0';
 	}
 	uk_file_state_event_set(&node->state, POLLIN | POLLOUT);
+	uk_mutex_lock(&volume->nodes_lock);
+	existing = node_find(volume, inode->nid);
+	if (existing) {
+		existing->references++;
+	} else {
+		node->next = volume->nodes;
+		volume->nodes = node;
+	}
+	uk_mutex_unlock(&volume->nodes_lock);
+	if (existing) {
+		node_free(node);
+		return existing;
+	}
 	return node;
 failure:
-	node_release(node);
+	node_free(node);
 	return ERR2PTR(result);
 }
 
@@ -210,6 +265,7 @@ static struct erofs_node *volume_open(union uk_fs_vopen_vol input,
 	volume->super.bdev.ops = &image_ops;
 	memcpy(volume->super.bdev.payload, &volume, sizeof(volume));
 	uk_mutex_init(&volume->lock);
+	uk_mutex_init(&volume->nodes_lock);
 	result = erofs_read_superblock(&volume->super);
 	if (!result && volume->super.extra_devices)
 		result = -EOPNOTSUPP;
@@ -312,11 +368,19 @@ static int node_setstat(struct erofs_node *node __unused,
 }
 
 static int node_control(struct erofs_node *node __unused, int family,
-		int request, uintptr_t arg1 __unused, uintptr_t arg2 __unused,
+		int request, uintptr_t arg1, uintptr_t arg2,
 		uintptr_t arg3 __unused, unsigned long flags __unused)
 {
-	if (family == UKFILE_CTL_FILE && request == UKFILE_CTL_FILE_SYNC)
-		return 0;
+	if (family == UKFILE_CTL_FILE) {
+		if (request == UKFILE_CTL_FILE_SYNC ||
+		    request == UKFILE_CTL_FILE_SYNC_RANGE)
+			return 0;
+		if (request == UKFILE_CTL_FILE_TOUCH) {
+			if (arg1 > UK_FILE_TOUCH_WRITE || (arg2 & ~O_NOATIME))
+				return -EINVAL;
+			return 0;
+		}
+	}
 	return family == UKFILE_CTL_IOCTL ? -ENOTTY : -EROFS;
 }
 
@@ -324,6 +388,7 @@ static int volume_stat(struct erofs_node *node, struct statfs *stat)
 {
 	memset(stat, 0, sizeof(*stat));
 	stat->f_type = EROFS_SUPER_MAGIC_V1;
+	stat->f_flags = ST_RDONLY;
 	stat->f_bsize = erofs_blksiz(&node->volume->super);
 	stat->f_blocks = node->volume->super.total_blocks;
 	stat->f_files = node->volume->super.inos;
@@ -494,7 +559,7 @@ static const struct erofs_live_ops erofs_ops = {
 };
 
 UK_FS_TMPL_LIVE_GENERATE_STATIC(erofs, struct erofs_node *, node_compare,
-			      erofs_ops, 0, NULL);
+			      erofs_ops, 0, NULL, false);
 UK_FS_DRIVER_REGISTER(erofs, UK_FS_TMPL_LIVE_OP_VOPEN(erofs),
 		      UK_FS_VOPEN_VOL_MEMIMG | UK_FS_VOPEN_VOL_RAW |
 		      UK_FS_VOPEN_DATA_IGNORE);

@@ -53,23 +53,26 @@ int uk_sparsebuf_truncate(const struct uk_sparsebuf_ctx *ctx,
 			  struct uk_sparsebuf_blk **headp, __sz size)
 {
 	const __sz pglo = ALIGN_UP(size, UK_PAGING_PAGE_SIZE);
+	const __sz pgoff = uk_sparsebuf_pgoff(pglo);
 	const __sz rem = pglo - size;
 	struct uk_sparsebuf_cur cur;
-	__sz toscoop;
+	__u64 upper = __U64_MAX;
 	int r;
 
-	/* Get last slice by looking up highest possible offset */
-	r = uk_sparsebuf_lookup(headp, __U64_MAX, &cur);
-	if (unlikely(!r))
-		/* Sparse buffer empty, nothing to do */
-		return 0;
+	while (upper && uk_sparsebuf_lookup(headp, upper - 1, &cur)) {
+		const struct uk_sparsebuf_slice *sl =
+			uk_sparsebuf_slice_at(&cur);
+		const __u64 end = MIN(upper, uk_sparsebuf_slice_pgend(sl));
+		const __u64 start = MAX(pgoff, sl->pgoff);
 
-	toscoop = uk_sparsebuf_slice_pgend(uk_sparsebuf_slice_at(&cur)) - pglo;
-	r = uk_sparsebuf_scoop(ctx, headp, uk_sparsebuf_pgoff(pglo),
-			       toscoop / UK_PAGING_PAGE_SIZE);
-	if (unlikely(r)) {
-		UK_ASSERT(r < 0);
-		return r;
+		if (sl->pgoff >= upper || end <= pgoff)
+			break;
+		r = uk_sparsebuf_scoop(ctx, headp, start, end - start);
+		if (unlikely(r)) {
+			UK_ASSERT(r < 0);
+			return r;
+		}
+		upper = start;
 	}
 	/* Clear up to next page boundary & success */
 	if (rem && uk_sparsebuf_lookup(headp, uk_sparsebuf_pgoff(size), &cur))
@@ -100,20 +103,31 @@ int uk_sparsebuf_punch_hole(const struct uk_sparsebuf_ctx *ctx,
 {
 	const __sz end = off + len;
 	const __sz pglo = ALIGN_UP(off, UK_PAGING_PAGE_SIZE);
-	const __sz pgoff = uk_sparsebuf_pgoff(pglo);
 	const __sz pghi = ALIGN_DOWN(end, UK_PAGING_PAGE_SIZE);
-	const __sz npages = uk_sparsebuf_pgoff(pghi) - pgoff;
 	const __sz remlo = pglo - off;
 	const __sz remhi = end - pghi;
 	struct uk_sparsebuf_cur cur;
+	__sz pgoff = uk_sparsebuf_pgoff(pglo);
+	__sz npages;
 	int r;
 
-	r = uk_sparsebuf_scoop(ctx, headp, pgoff, npages);
-	if (unlikely(r)) {
-		UK_ASSERT(r < 0);
-		return r;
+	if (pghi < pglo) {
+		if (uk_sparsebuf_lookup(headp, uk_sparsebuf_pgoff(off), &cur))
+			uk_sparsebuf_memclear(&cur, off, len);
+		return 0;
 	}
+	npages = uk_sparsebuf_pgoff(pghi) - pgoff;
+	while (npages) {
+		const __u32 count = MIN(npages, __U32_MAX);
 
+		r = uk_sparsebuf_scoop(ctx, headp, pgoff, count);
+		if (unlikely(r)) {
+			UK_ASSERT(r < 0);
+			return r;
+		}
+		pgoff += count;
+		npages -= count;
+	}
 	if (remlo && uk_sparsebuf_lookup(headp, uk_sparsebuf_pgoff(off), &cur))
 		uk_sparsebuf_memclear(&cur, off, remlo);
 	if (remhi && uk_sparsebuf_lookup(headp, uk_sparsebuf_pgoff(end), &cur))

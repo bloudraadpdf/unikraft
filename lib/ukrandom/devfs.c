@@ -112,12 +112,12 @@ int hwrng_getstat(const struct uk_file *f __maybe_unused,
 	return 0;
 }
 
-static
-ssize_t deny_write(const struct uk_file *f __unused,
-		   const struct iovec *iov __unused, size_t iovcnt __unused,
-		   size_t off __unused, long flags __unused)
+static struct uk_file_io_result
+deny_write(const struct uk_file *f __unused, const struct iovec *iov __unused,
+	   size_t iovcnt __unused, size_t off __unused, long flags __unused,
+	   enum uk_file_write_kind kind __unused)
 {
-	return -EPERM;
+	return uk_file_io_status(-EPERM);
 }
 
 static const struct uk_file_ops urandom_ops = {

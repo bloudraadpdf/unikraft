@@ -15,6 +15,7 @@
 
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 #include "signal/signal.h"
+#include "signal/timer.h"
 #include "signal.h"
 #endif /* CONFIG_LIBPOSIX_PROCESS_SIGNAL */
 
@@ -81,7 +82,8 @@ static inline int signal_exit(struct posix_process *pprocess)
  * Notice: Unlike pprocesses, pthreads are released upon exit.
  */
 void pprocess_exit_pthread(struct posix_thread *pthread,
-			   enum posix_thread_state state)
+			   enum posix_thread_state state,
+			   struct pprocess_retired *retired)
 {
 	struct posix_process_ptexit_event_data event_data;
 	struct posix_process *pprocess;
@@ -111,7 +113,7 @@ void pprocess_exit_pthread(struct posix_thread *pthread,
 
 	pprocess_complete_vfork(pthread);
 
-	pprocess_release_pthread(pthread);
+	pprocess_release_pthread(pthread, retired);
 }
 
 static void request_thread_exit(struct posix_thread *thread,
@@ -218,7 +220,8 @@ uk_syscall_entertab_prio(process_syscall_enter, UK_PRIO_EARLIEST);
 uk_syscall_exittab_prio(process_syscall_exit, UK_PRIO_EARLIEST);
 
 void pprocess_finish_exit(struct posix_process *pprocess,
-			 struct posix_thread *thread)
+			  struct posix_thread *thread,
+			  struct pprocess_retired *retired)
 {
 	struct posix_process_ppexit_event_data event_data;
 	struct posix_process *parent_process;
@@ -260,7 +263,10 @@ void pprocess_finish_exit(struct posix_process *pprocess,
 	}
 #endif /* CONFIG_LIBPOSIX_PROCESS_SIGNAL */
 
-	pprocess_exit_pthread(thread, PP2PT_EXIT_STATE(state));
+	pprocess_exit_pthread(thread, PP2PT_EXIT_STATE(state), retired);
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+	pprocess_timers_stop_locked(pprocess, true, retired);
+#endif
 
 	UK_ASSERT(uk_list_empty(&pprocess->threads));
 
@@ -277,13 +283,15 @@ void pprocess_finish_exit(struct posix_process *pprocess,
 
 	/* Notify handlers */
 	event_data.pid = pprocess->pid;
+	pprocess_vm_retire_locked(pprocess->vm_context, pprocess->pid, retired);
+	pprocess->vm_context = NULL;
 	pprocess_raise_ppexit_event(&event_data);
 
 	pprocess->state = state;
 	uk_semaphore_up(&pprocess->exit_semaphore);
 
 	if (nowait)
-		pprocess_release(pprocess);
+		pprocess_release(pprocess, retired);
 	else if (parent_process)
 		uk_waitq_wake_up(&parent_process->child_wait);
 }

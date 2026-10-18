@@ -5,6 +5,8 @@
  */
 
 #include <string.h>
+#include <limits.h>
+#include <sys/ioctl.h>
 #include <sys/un.h>
 
 #include <uk/assert.h>
@@ -241,7 +243,7 @@ void *unix_socket_create(struct posix_socket_driver *d,
 		if (type == SOCK_DGRAM) {
 			/* Create rpipe */
 			struct uk_file *pipes[2];
-			int r = uk_pipefile_create(pipes);
+			int r = uk_pipefile_create(pipes, UK_PIPEFILE_SOCKET);
 			if (unlikely(r)) {
 				unix_sock_free(d, data);
 				data = ERR2PTR(r);
@@ -264,10 +266,15 @@ static void unix_sock_dgram_events(struct unix_sock_data *data)
 }
 
 static void unix_sock_dgram_wakeup(uk_pollevent events __unused,
-				   enum uk_poll_chain_op operation __unused,
+				   enum uk_poll_chain_op operation,
 				   struct uk_poll_chain *chain)
 {
-	unix_sock_dgram_events(chain->arg);
+	struct unix_sock_data *data = chain->arg;
+
+	if (operation == UK_POLL_CHAINOP_IO_CHANGE)
+		uk_pollq_notify_io(data->events, UKFD_POLLOUT);
+	else
+		unix_sock_dgram_events(data);
 }
 
 static void unix_sock_dgram_poll(struct unix_sock_data *data)
@@ -276,6 +283,7 @@ static void unix_sock_dgram_poll(struct unix_sock_data *data)
 		data->dgram_io =
 			UK_POLL_CHAIN_CALLBACK(UKFD_POLLOUT,
 					       unix_sock_dgram_wakeup, data);
+		data->dgram_io.io_changes = 1;
 		uk_pollq_register(&data->wpipe->state->pollq, &data->dgram_io);
 		data->flags |= UNIXSOCK_WREV;
 	}
@@ -323,6 +331,7 @@ void unix_socket_poll_setup(posix_sock *file)
 		data->budget_io =
 			UK_POLL_CHAIN_CALLBACK(UKFD_POLLOUT,
 					       unix_sock_dgram_wakeup, data);
+		data->budget_io.io_changes = 1;
 		uk_pollq_register(&data->budget->state->pollq,
 				  &data->budget_io);
 		data->flags |= UNIXSOCK_BREV;
@@ -359,10 +368,10 @@ int unix_socket_socketpair(struct posix_socket_driver *d,
 		goto err_free0;
 	}
 
-	ret = uk_pipefile_create(pipes[0]);
+	ret = uk_pipefile_create(pipes[0], UK_PIPEFILE_SOCKET);
 	if (unlikely(ret))
 		goto err_free;
-	ret = uk_pipefile_create(pipes[1]);
+	ret = uk_pipefile_create(pipes[1], UK_PIPEFILE_SOCKET);
 	if (unlikely(ret))
 		goto err_release;
 
@@ -494,7 +503,7 @@ int unix_socket_bind(posix_sock *file,
 
 	/* Prep name string */
 	/* Linux ensures names are zero-terminated; replicate this behavior */
-	bindlen = name[0] ? strnlen(name, len) + 1 : len;
+	bindlen = name[0] ? strnlen(name, len) + 1 : (size_t)len;
 	bindname = uk_malloc(d->allocator, bindlen);
 	if (unlikely(!bindname))
 		return -ENOMEM;
@@ -687,10 +696,10 @@ int unix_sock_connect_stream(posix_sock *file, posix_sock *target)
 		goto err_out;
 	}
 	/* Create pipes */
-	err = uk_pipefile_create(pipes[0]);
+	err = uk_pipefile_create(pipes[0], UK_PIPEFILE_SOCKET);
 	if (unlikely(err))
 		goto err_out;
-	err = uk_pipefile_create(pipes[1]);
+	err = uk_pipefile_create(pipes[1], UK_PIPEFILE_SOCKET);
 	if (unlikely(err))
 		goto err_release;
 
@@ -835,23 +844,33 @@ static
 ssize_t unix_socket_recvmsg(posix_sock *file, struct msghdr *msg, int flags)
 {
 	struct unix_sock_data *data = posix_sock_get_data(file);
-	ssize_t ret;
+	const bool packet = data->type != SOCK_STREAM;
+	ssize_t ret = 0;
+	size_t packet_size = 0;
 
-	if (unlikely(flags & ~(MSG_PEEK | MSG_DONTWAIT))) {
+	if (unlikely(flags & ~(MSG_PEEK | MSG_DONTWAIT | MSG_TRUNC))) {
 		uk_pr_warn("Unsupported recv flags: %x\n", flags);
 		return -EOPNOTSUPP;
 	}
 	if (!data->rpipe) {
-		if (likely(data->flags & UNIXSOCK_CONN))
-			return 0;
-		else
+		if (!(data->flags & UNIXSOCK_CONN))
 			return -EINVAL;
+		goto out_metadata;
 	}
 
 	uk_file_rlock(data->rpipe);
-	ret = uk_file_read(data->rpipe, msg->msg_iov, msg->msg_iovlen, 0,
-			   flags & MSG_PEEK ? UK_PIPE_READ_PEEK : 0);
+	ret = uk_pipefile_recv(data->rpipe, msg->msg_iov, msg->msg_iovlen,
+			       flags & MSG_PEEK ? UK_PIPE_READ_PEEK : 0,
+			       &packet_size);
 	uk_file_runlock(data->rpipe);
+	if (ret < 0)
+		return ret;
+out_metadata:
+	msg->msg_flags = packet && packet_size > (size_t)ret ?
+		MSG_TRUNC : 0;
+	msg->msg_controllen = 0;
+	if (packet && (flags & MSG_TRUNC))
+		ret = packet_size;
 	/* Get remote addr */
 	if (msg->msg_name) {
 		if (_SOCK_CONNECTION(data->type))
@@ -861,7 +880,6 @@ ssize_t unix_socket_recvmsg(posix_sock *file, struct msghdr *msg, int flags)
 			/* TODO: impl DGRAM remote addr */
 			unix_sock_unnamed(msg->msg_name, &msg->msg_namelen);
 	}
-	/* We ignore ancillary data & return flags for now */
 	return ret;
 }
 
@@ -943,9 +961,7 @@ ssize_t unix_socket_sendmsg(posix_sock *file,
 	}
 	if (unlikely(!wpipe))
 		return (data->flags & UNIXSOCK_CONN)
-			? (_SOCK_CONNECTION(data->type)
-				? -EPIPE : -ECONNREFUSED)
-			: (msg->msg_name
+			? -EPIPE : (msg->msg_name
 				? -ECONNREFUSED : -ENOTCONN);
 
 	if (data->type == SOCK_SEQPACKET &&
@@ -955,13 +971,18 @@ ssize_t unix_socket_sendmsg(posix_sock *file,
 		goto out_release;
 	}
 	uk_file_wlock(wpipe);
-	if (data->budget)
+	if (data->budget) {
 		ret = uk_pipefile_write_packet(wpipe, msg->msg_iov,
 					       msg->msg_iovlen, data->budget);
-	else
-		ret = uk_file_write(wpipe, msg->msg_iov, msg->msg_iovlen, 0,
-				    data->type != SOCK_STREAM ?
-					O_DIRECT | UK_PIPE_WRITE_ATOMIC : 0);
+	} else {
+		struct uk_file_io_result written =
+			uk_file_write(wpipe, msg->msg_iov, msg->msg_iovlen, 0,
+				      data->type != SOCK_STREAM ?
+					O_DIRECT | UK_PIPE_WRITE_ATOMIC : 0,
+				      UK_FILE_WRITE_VECTOR);
+
+		ret = written.count ? (ssize_t)written.count : written.error;
+	}
 	uk_file_wunlock(wpipe);
 	/* We ignore ancillary data for now */
 
@@ -997,7 +1018,7 @@ ssize_t unix_socket_sendto(posix_sock *file, const void *buf,
 
 static
 ssize_t unix_socket_read(posix_sock *file,
-			 const struct iovec *iov, size_t iovcnt)
+			 const struct iovec *iov, size_t iovcnt, int flags)
 {
 	struct msghdr msg = {
 		.msg_name = NULL,
@@ -1008,7 +1029,7 @@ ssize_t unix_socket_read(posix_sock *file,
 		.msg_controllen = 0,
 		.msg_flags = 0
 	};
-	return unix_socket_recvmsg(file, &msg, 0);
+	return unix_socket_recvmsg(file, &msg, flags);
 }
 
 static
@@ -1056,6 +1077,8 @@ int unix_sock_shutdown(posix_sock *file, int how, int notify)
 					&data->werr);
 	}
 	if ((how == SHUT_RD || how == SHUT_RDWR) && data->rpipe) {
+		if (notify && _SOCK_CONNECTION(data->type))
+			return uk_pipefile_shutdown_read(data->rpipe);
 		uk_pollq_unregister(&data->rpipe->state->pollq, &data->rio);
 		uk_pollq_unregister(&data->rpipe->state->pollq, &data->rerr);
 		uk_file_release(data->rpipe);
@@ -1123,14 +1146,31 @@ int unix_socket_close(posix_sock *file)
 }
 
 static
-int unix_socket_ioctl(posix_sock *file __unused, int request __unused,
-		      void *argp __unused)
+int unix_socket_ioctl(posix_sock *file, int request, void *argp)
 {
-	return -ENOSYS;
+	struct unix_sock_data *data = posix_sock_get_data(file);
+	enum uk_pipefile_count_kind kind = data->type == SOCK_DGRAM ?
+		UK_PIPEFILE_COUNT_PACKET : UK_PIPEFILE_COUNT_TOTAL;
+	ssize_t bytes = 0;
+	int available;
+
+	if (request != FIONREAD)
+		return -ENOTTY;
+	if (data->flags & UNIXSOCK_LISTEN)
+		return -EINVAL;
+	if (data->rpipe)
+		bytes = uk_pipefile_readable_bytes(data->rpipe, kind);
+	if (bytes < 0)
+		return bytes;
+	if (bytes > INT_MAX)
+		return -EOVERFLOW;
+	available = bytes;
+	return uk_nofault_try_write(available, (int *)argp) ? 0 : -EFAULT;
 }
 
 
 static struct posix_socket_ops unix_posix_socket_ops = {
+	.nofault_io = true,
 	/* POSIX interfaces */
 	.create      = unix_socket_create,
 	.accept4     = unix_socket_accept4,

@@ -73,6 +73,16 @@ static inline int uk_vma_reserve_ex(struct uk_vas *vas, __vaddr_t *vaddr,
  */
 extern const struct uk_vma_ops uk_vma_anon_ops;
 
+#define UK_VMA_ANON_SHARED (0x1UL << UK_VMA_MAP_EXTF_SHIFT)
+
+struct uk_vma_anon_identity;
+
+/* Acquire while the VAS mutation lock protects the borrowed VMA. */
+struct uk_vma_anon_identity *
+uk_vma_anon_identity_acquire(const struct uk_vma *vma, __vaddr_t address,
+			     __sz *offset);
+void uk_vma_anon_identity_release(struct uk_vma_anon_identity *identity);
+
 /**
  * Creates a new anonymous memory mapping. See uk_vma_map() for a description
  * of the parameters.
@@ -86,24 +96,13 @@ static inline int uk_vma_map_anon(struct uk_vas *vas, __vaddr_t *vaddr,
 }
 
 /**
- * Stack ----------------------------------------------------------------------
- *                                                ┌────────────┐
- *                                                │ GUARD PAGE │
- * A stack VMA can be used as a thread stack that ├────────────┤    Stack Base
- * automatically grows as needed. The stack       │/  /  /  /  │ │
- * behaves like regular anonymous memory with     │  /STACK/  /│ │
- * guard pages at both ends to detect simple stack│ /  /  /  / │ │
- * overflows. Furthermore, it cannot be split     ├────────────┤ ▼  Stack Top
- * into multiple VMAs or merged with neighboring  │            │
- * ones. The stack has an initial size and        │            │
- * grows up to the full size of the VMA. Due to   │  RESERVED  │
- * the guard pages the actual stack size          │            │
- * is bigger than the desired VMA size. Memory is │            │
- * only consumed for the allocated parts. Stack   ├────────────┤
- * memory is not freed after having been          │ GUARD PAGE │
- * allocated on the first touch.                  └────────────┘
+ * A stack behaves like anonymous memory with guard pages at both ends of
+ * its allocation. It has an initial size and grows up to the reserved size.
+ * Guards increase the allocation size beyond the requested stack size.
+ * Memory is consumed only for allocated parts and retained after first touch.
  *
- * Stack VMAs are never merged or split to keep the guard pages intact.
+ * Split VMAs retain the allocation bounds and outer guards. Fragments merge
+ * only within the same stack allocation.
  */
 extern const struct uk_vma_ops uk_vma_stack_ops;
 
@@ -122,6 +121,9 @@ extern const struct uk_vma_ops uk_vma_stack_ops;
 
 int uk_vma_stack_resize(struct uk_vas *vas, __vaddr_t address,
 			__vaddr_t bottom);
+int uk_vma_stack_bounds(const struct uk_vma *vma, __vaddr_t *start,
+			__vaddr_t *end);
+int uk_vma_stack_unmap(struct uk_vas *vas, __vaddr_t address);
 
 /**
  * Creates a new stack VMA. See uk_vma_map() for a description of the

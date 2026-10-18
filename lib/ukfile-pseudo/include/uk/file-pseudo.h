@@ -4,7 +4,7 @@
  * You may not use this file except in compliance with the License.
  */
 
-/* Pseudofiles for Unikraft that ignore all writes */
+/* Pseudofiles for Unikraft */
 
 #ifndef __UK_FILE_PSEUDO_H__
 #define __UK_FILE_PSEUDO_H__
@@ -17,6 +17,7 @@
 extern const struct uk_file uk_file_null;
 /* Zero file: always reads zero */
 extern const struct uk_file uk_file_zero;
+extern const struct uk_file uk_file_full;
 /* Void file: read always returns -EAGAIN */
 extern const struct uk_file uk_file_void;
 

@@ -62,7 +62,8 @@ static const int err_to_errno_table[] = {
   ECONNABORTED,  /* ERR_ABRT       -13     Connection aborted.      */
   ECONNRESET,    /* ERR_RST        -14     Connection reset.        */
   ENOTCONN,      /* ERR_CLSD       -15     Connection closed.       */
-  EIO            /* ERR_ARG        -16     Illegal argument.        */
+  EINVAL,        /* ERR_ARG        -16     Illegal argument.        */
+  EFAULT         /* ERR_FAULT      -17     Invalid memory access.   */
 };
 
 int
@@ -94,7 +95,8 @@ static const char *err_strerr[] = {
   "Connection aborted.",    /* ERR_ABRT       -13 */
   "Connection reset.",      /* ERR_RST        -14 */
   "Connection closed.",     /* ERR_CLSD       -15 */
-  "Illegal argument."       /* ERR_ARG        -16 */
+  "Illegal argument.",      /* ERR_ARG        -16 */
+  "Invalid memory access."  /* ERR_FAULT      -17 */
 };
 
 /**

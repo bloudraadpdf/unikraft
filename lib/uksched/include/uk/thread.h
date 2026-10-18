@@ -43,7 +43,12 @@
 extern "C" {
 #endif
 
+#define UK_THREAD_CPU_MASK_WORDS                                               \
+	((CONFIG_UKPLAT_CPU_MAXCOUNT + sizeof(unsigned long) * 8 - 1) /        \
+	 (sizeof(unsigned long) * 8))
+
 struct uk_sched;
+struct uk_sched_affinity;
 struct uk_thread;
 
 typedef void (*uk_thread_dtor_t)(struct uk_thread *);
@@ -64,6 +69,9 @@ struct uk_thread {
 	uint32_t flags;
 	__snsec wakeup_time;
 	struct uk_sched *sched;
+	unsigned long allowed_cpus[UK_THREAD_CPU_MASK_WORDS];
+	unsigned int affinity_pending;
+	struct uk_sched_affinity *affinity_wait;
 	struct uk_waitq_ticket wait_ticket;
 	struct uk_waitq stop_wait;
 	bool stop_complete;

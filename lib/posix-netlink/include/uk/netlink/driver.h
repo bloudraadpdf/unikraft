@@ -10,7 +10,9 @@
 #include <uk/essentials.h>
 #include <uk/socket_driver.h>
 #include <linux/netlink.h>
-#include <uk/mbox.h>
+#include <uk/atomic.h>
+#include <uk/list.h>
+#include <uk/mutex.h>
 #include <uk/streambuf.h>
 
 #ifdef __cplusplus
@@ -19,24 +21,30 @@ extern "C" {
 
 /* Netlink context and driver helpers */
 
-struct nl_ctx {
-	const struct posix_netlink_protocol *drv;
-	struct uk_mbox *nl_recvqueue;
-	struct uk_alloc *allocator;
+struct nl_ctx;
 
-	__u32 flags; /* Internal use flags */
-	__u32 nl_groups;
-#if CONFIG_LIBPOSIX_PROCESS
-	pid_t nl_pid; /* port of client */
-#endif /* CONFIG_LIBPOSIX_PROCESS */
+struct nl_reply_batch {
+	struct nl_ctx *context;
+	struct uk_list_head messages;
+	size_t bytes, count;
 };
 
-/* Helper to get pid from ctx agnostic of CONFIG_LIBPOSIX_PROCESS */
-#if CONFIG_LIBPOSIX_PROCESS
-#define nl_ctx_pid(ctx) ({ (ctx)->nl_pid; })
-#else /* !CONFIG_LIBPOSIX_PROCESS */
-#define nl_ctx_pid(ctx) (0)
-#endif /* !CONFIG_LIBPOSIX_PROCESS */
+struct nl_ctx {
+	const struct posix_netlink_protocol *drv;
+	struct uk_alloc *allocator;
+	struct nl_reply_batch receive;
+	struct uk_mutex receive_lock;
+	struct uk_list_head port_link;
+	posix_sock *socket;
+	__u32 flags;
+	__u32 nl_groups;
+	__u32 nl_pid;
+};
+
+static inline __u32 nl_ctx_pid(const struct nl_ctx *ctx)
+{
+	return uk_load_n(&ctx->nl_pid);
+}
 
 static inline struct uk_streambuf *nlbuf_alloc(struct nl_ctx *ctx, size_t len)
 {
@@ -44,10 +52,10 @@ static inline struct uk_streambuf *nlbuf_alloc(struct nl_ctx *ctx, size_t len)
 				   UK_STREAMBUF_C_WIPEZERO);
 }
 
-#define nlbuf_reserve(nlbuf, len)	uk_streambuf_reserve((nlbuf), (len))
-#define nlbuf_free(nlbuf)		uk_streambuf_free((nlbuf))
-#define nlbuf_len(nlbuf)		uk_streambuf_seek((nlbuf))
-#define nlbuf_data(nlbuf)		uk_streambuf_buf((nlbuf))
+#define nlbuf_reserve(nlbuf, len) uk_streambuf_reserve((nlbuf), (len))
+#define nlbuf_free(nlbuf) uk_streambuf_free((nlbuf))
+#define nlbuf_len(nlbuf) uk_streambuf_seek((nlbuf))
+#define nlbuf_data(nlbuf) uk_streambuf_buf((nlbuf))
 
 static inline void *nlbuf_align(struct uk_streambuf *nlbuf, size_t align)
 {
@@ -56,27 +64,26 @@ static inline void *nlbuf_align(struct uk_streambuf *nlbuf, size_t align)
 	return uk_streambuf_reserve(nlbuf, ALIGN_UP(seek, align) - seek);
 }
 
-static inline void nlbuf_send(struct nl_ctx *ctx, struct uk_streambuf *nlbuf)
-{
-	uk_mbox_post(ctx->nl_recvqueue, nlbuf);
-}
+/* Takes ownership of nlbuf, including on error. */
+int nlbuf_send(struct nl_reply_batch *batch, struct uk_streambuf *nlbuf);
 
 /* Netlink driver ops & driver registration */
 
 /**
  * REQUIRED. Handle netlink requests on a socket.
  *
- * Drivers should attempt to signal any error conditions as netlink replies, and
- * error out of the handler ONLY when replying is impossible.
- * It is forbidden to return error after a reply has been sent.
+ * Drivers append owned replies to the batch. The socket publishes the batch
+ * after successful request handling, or releases it on error.
  *
  * @param ctx Netlink context of the socket
- * @param nlh Netlink request message
+ * @param batch Owned response batch
+ * @param nlh Owned netlink request message
  *
  * @return 0 on success, negative errno otherwise
  */
 typedef int (*posix_netlink_protocol_handle_func_t)(struct nl_ctx *ctx,
-						    const struct nlmsghdr *nlh);
+				struct nl_reply_batch *batch,
+				const struct nlmsghdr *nlh);
 
 /**
  * OPTIONAL. Callback on creating a netlink socket.
@@ -114,10 +121,10 @@ struct posix_netlink_protocol {
 	const int protocol;
 } __align(8);
 
-#define _POSIX_NETLINK_PROTOCOL_DRVRNAME(lib, prot) \
-	posix_netlink_protocol_ ## lib ## _ ## prot
+#define _POSIX_NETLINK_PROTOCOL_DRVRNAME(lib, prot)                            \
+	posix_netlink_protocol_##lib##_##prot
 
-#define _POSIX_NETLINK_PROTOCOL_SECNAME(lib, prot) \
+#define _POSIX_NETLINK_PROTOCOL_SECNAME(lib, prot)                             \
 	STRINGIFY(_POSIX_NETLINK_PROTOCOL_DRVRNAME(lib, prot))
 
 /* Register a netlink driver part of `lib` with `vops` for AF `prot`. */
@@ -131,7 +138,7 @@ struct posix_netlink_protocol {
 		.ops = (vops)						\
 	}
 
-#define POSIX_NETLINK_PROTOCOL_REGISTER(prot, vops) \
+#define POSIX_NETLINK_PROTOCOL_REGISTER(prot, vops)                            \
 	_POSIX_NETLINK_PROTOCOL_REGISTER(__LIBNAME__, prot, vops)
 
 #ifdef __cplusplus

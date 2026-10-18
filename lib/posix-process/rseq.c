@@ -4,7 +4,7 @@
 #include <uk/arch/ctx.h>
 #include <uk/lcpu.h>
 #include <uk/nofault.h>
-#if CONFIG_HAVE_PAGING
+#if CONFIG_LIBUKPAGING
 #include <uk/paging.h>
 #endif
 #include <uk/process.h>
@@ -72,7 +72,7 @@ UK_LLSYSCALL_R_DEFINE(int, rseq, struct rseq_area *, area, __u32, length,
 		return -EINVAL;
 	if ((__uptr)area > __PTR_MAX - length)
 		return -EFAULT;
-#if CONFIG_HAVE_PAGING
+#if CONFIG_LIBUKPAGING
 	if (!uk_paging_vaddr_range_isvalid((__vaddr_t)area, length))
 		return -EFAULT;
 #endif

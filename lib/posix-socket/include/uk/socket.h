@@ -43,6 +43,7 @@
 #include <sys/socket.h>
 
 #include <uk/config.h>
+#include <uk/arch/types.h>
 
 struct posix_socket_driver;
 
@@ -51,6 +52,8 @@ struct posix_socket_node {
 	void *sock_data;
 	/** The driver to use for this socket */
 	struct posix_socket_driver *driver;
+	__u64 receive_timeout_ms;
+	__u64 send_timeout_ms;
 };
 
 #ifdef CONFIG_LIBPOSIX_SOCKET_PRINT_ERRORS

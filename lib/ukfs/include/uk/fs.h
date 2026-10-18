@@ -10,7 +10,10 @@
 #define __UKFS_FS_H__
 
 #include <stdbool.h>
+#include <errno.h>
 #include <sys/statfs.h>
+
+#include <sys/stat.h>
 
 #include <uk/assert.h>
 #include <uk/alloc.h>
@@ -73,6 +76,7 @@ struct uk_fs_specfile {
 #define UKFS_LOOKUP_NO_MNTAUX 2
 #define UKFS_LOOKUP_NO_SYMAUX 4
 #define UKFS_LOOKUP_IGNMNT_START 8
+#define UKFS_LOOKUP_CACHED 16
 
 /* (Partial) success return codes from lookup */
 #define UKFS_SUCCESS    0
@@ -141,6 +145,8 @@ union uk_fs_lookup_out {
  * If the target path does not exist, return -ENOENT.
  *
  * Behavior is influenced by bits set in `flags`:
+ * - UKFS_LOOKUP_CACHED: require lookup without backing-store access; return
+ *   -EAGAIN when the provider cannot satisfy that requirement
  * - UKFS_LOOKUP_IGNMNT: ignore mounted filesystems and perform lookups on the
  *   referenced mount point itself
  * - UKFS_LOOKUP_IGNMNT_START: ignore the mount on the initial node only;
@@ -262,11 +268,11 @@ union uk_fs_create_target {
  * @param target Target of create operation
  *
  * @return
- *  `mode & S_IFMT` in (S_IFDIR, S_IFREG, S_IFSOCK, S_IFLNK, S_IFMT):
+ *  `mode & S_IFMT` in (S_IFDIR, S_IFREG, S_IFSOCK, S_IFIFO, S_IFLNK, S_IFMT):
  *    !PTRISERR: Live reference to newly created file (or in case of a hardlink,
  *               a duplicate reference to target)
  *     PTRISERR: Negative error code encoded in return
- *  `mode & S_IFMT` in (S_IFCHR, S_IFBLK, S_IFIFO, 0):
+ *  `mode & S_IFMT` in (S_IFCHR, S_IFBLK, 0):
  *         NULL: Success
  *     PTRISERR: Negative error code encoded in return
  */
@@ -440,15 +446,28 @@ typedef int (*uk_fs_stat_func)(const struct uk_file *f, struct statfs *buf);
  */
 typedef int (*uk_fs_sync_func)(const struct uk_file *f);
 
+enum uk_fs_link_policy {
+	UKFS_LINK_FOLLOW,
+	UKFS_LINK_NO_MAGIC,
+	UKFS_LINK_SCOPED
+};
+
+struct uk_vfs_path;
+
 /* Filesystem ops table */
 struct uk_fs_ops {
+	/* Lookup and symlink data require no backing-store access. */
+	bool cached_lookup;
+	/* Borrowed canonical inode, retained by a filesystem open proxy. */
+	const struct uk_file *(*inode)(const struct uk_file *f);
 	/* Ops targeting individual files */
 	/* Lookup must be implemented by all filesystem-backed files */
 	uk_fs_lookup_func lookup;
 	/* Symlink ops; must be NULL for non-symlinks */
 	uk_fs_readlink_func readlink;
-	/* Optional magic link: acquired target, NULL for path lookup, or error. */
-	const struct uk_file *(*follow_link)(const struct uk_file *f);
+	/* Counted path; NULL for text, error pointer on failure. */
+	struct uk_vfs_path *(*follow_link)(const struct uk_file *f,
+					   enum uk_fs_link_policy policy);
 	/* Directory ops; must be NULL for non-directories */
 	uk_fs_listdir_func listdir;
 	uk_fs_create_func create;
@@ -494,6 +513,12 @@ bool uk_fs_issym(const struct uk_file *f)
 	return uk_fs_isfs(f) && f->fsops->readlink;
 }
 
+static inline
+const struct uk_file *uk_fs_inode(const struct uk_file *f)
+{
+	return f->fsops && f->fsops->inode ? f->fsops->inode(f) : f;
+}
+
 /* Operations inlines */
 
 static inline
@@ -503,6 +528,8 @@ int uk_fs_lookupat(const struct uk_file *f, const char *path, size_t len,
 {
 	UK_ASSERT(f->fsops);
 	UK_ASSERT(f->fsops->lookup);
+	if ((flags & UKFS_LOOKUP_CACHED) && !f->fsops->cached_lookup)
+		return -EAGAIN;
 	return f->fsops->lookup(f, path, len, flags, out, nout);
 }
 
@@ -531,6 +558,8 @@ const struct uk_file *uk_fs_createat(const struct uk_file *f,
 {
 	UK_ASSERT(f->fsops);
 	UK_ASSERT(f->fsops->create);
+	if ((mode & S_IFMT) == S_IFMT)
+		target.file = uk_fs_inode(target.file);
 	return f->fsops->create(f, name, len, mode, flags, target);
 }
 
@@ -548,6 +577,8 @@ int uk_fs_renameat(const struct uk_file *f, const char *name, size_t nlen,
 		   const struct uk_file *dest, const char *dname, size_t dlen,
 		   unsigned int flags)
 {
+	if (f->vol != dest->vol)
+		return -EXDEV;
 	UK_ASSERT(f->fsops);
 	UK_ASSERT(f->fsops->rename);
 	return f->fsops->rename(f, name, nlen, dest, dname, dlen, flags);

@@ -56,9 +56,11 @@ sigismember
 sigprocmask
 tgkill
 signalfd
-uk_posix_process_create_pthread
+uk_posix_process_attach_application
 uk_posix_process_run
 sched_getaffinity
+sched_setaffinity
+uk_posix_signal_current
 uk_posix_signal_wait_init
 uk_posix_signal_wait_check
 uk_posix_signal_wait_end
@@ -67,23 +69,73 @@ uk_posix_signal_file_poll_unregister
 uk_posix_process_exit_requested
 uk_posix_nofile_limit
 uk_posix_process_vm_map
-uk_posix_process_maps
-uk_posix_process_maps_release
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING && CONFIG_LIBUKVMEM
+uk_posix_vm_maps
+uk_posix_vm_view_put
+uk_posix_vm_maps_release
+#if CONFIG_LIBPOSIX_VFS
+uk_posix_process_task_vm_view_get
+#endif
+#endif
 uk_posix_process_vm_unmap
 uk_posix_process_vm_protect
 uk_posix_process_vm_advise
 uk_posix_process_vm_sync
 
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+uk_posix_vm_reference_put
+#if CONFIG_LIBPOSIX_FUTEX
+uk_posix_futex_vm_get
+#if CONFIG_LIBUKVMEM
+uk_posix_futex_mapping_owned
+#endif
 uk_posix_futex_pi
 uk_posix_futex_lock
 uk_posix_futex_unlock
+#endif
+#endif
 uk_posix_process_get
 uk_posix_process_put
 uk_posix_process_next_pid
-uk_posix_process_executable
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING && CONFIG_LIBPOSIX_PROCESS_EXECVE && CONFIG_LIBPOSIX_VFS
+uk_posix_process_task_executable
+#endif
 
 uk_posix_process_attached
 
 #if CONFIG_LIBPOSIX_FDTAB && CONFIG_LIBPOSIX_PROCESS_MULTITHREADING && CONFIG_LIBPOSIX_VFS
-uk_posix_process_fdtable
+uk_posix_process_task_fdtable
+#endif
+
+capget
+capset
+
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING && CONFIG_LIBPOSIX_VFS
+uk_posix_process_next_tid
+uk_posix_process_task_get
+uk_posix_process_task_acquire
+uk_posix_process_task_serial
+uk_posix_process_task_put
+uk_posix_process_task_attached
+uk_posix_process_task_name
+uk_posix_process_task_status
+uk_posix_process_task_status_release
+uk_posix_process_task_set_name
+#endif
+
+#if CONFIG_LIBPOSIX_PROCESS_SYSV_SEM
+uk_posix_sem_limits_get
+uk_posix_sem_limits_write
+#endif
+
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+uk_posix_timer_create
+uk_posix_timer_delete
+uk_posix_timer_settime
+uk_posix_timer_gettime
+uk_posix_timer_getoverrun
+uk_posix_setitimer
+uk_posix_getitimer
+uk_posix_alarm
+uk_posix_timers_clock_changed
 #endif

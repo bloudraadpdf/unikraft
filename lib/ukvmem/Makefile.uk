@@ -9,6 +9,14 @@ LIBUKVMEM_SRCS-y += $(LIBUKVMEM_BASE)/vma_anon.c|isr
 LIBUKVMEM_SRCS-y += $(LIBUKVMEM_BASE)/vma_stack.c|isr
 LIBUKVMEM_SRCS-y += $(LIBUKVMEM_BASE)/vma_dma.c|isr
 
+ifneq ($(filter y,$(CONFIG_LIBUKVMEM_ANON_TEST) $(CONFIG_LIBUKTEST_ALL)),)
+LIBUKVMEM_SRCS-y += $(LIBUKVMEM_BASE)/tests/test_anon_identity.c
+endif
+
+ifneq ($(filter y,$(CONFIG_LIBUKVMEM_STACK_TEST) $(CONFIG_LIBUKTEST_ALL)),)
+LIBUKVMEM_SRCS-y += $(LIBUKVMEM_BASE)/tests/test_stack_lifetime.c
+endif
+
 ifeq ($(CONFIG_HAVE_PAGING),y)
 LIBUKVMEM_SRCS-$(CONFIG_ARCH_X86_64) += \
 	$(LIBUKVMEM_BASE)/arch/x86_64/pagefault.c|isr
@@ -21,4 +29,8 @@ CINCLUDES-y   += -I$(LIBUKVMEM_BASE)/tests/include
 CXXINCLUDES-y += -I$(LIBUKVMEM_BASE)/tests/include
 
 LIBUKVMEM_SRCS-y += $(LIBUKVMEM_BASE)/tests/test_vmem.c
+endif
+
+ifneq ($(filter y,$(CONFIG_LIBUKVMEM_ACCESS_TEST) $(CONFIG_LIBUKTEST_ALL)),)
+LIBUKVMEM_SRCS-y += $(LIBUKVMEM_BASE)/tests/test_access.c
 endif

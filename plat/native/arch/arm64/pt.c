@@ -95,13 +95,17 @@ __pte_t uk_plat_native_pte_create(__paddr_t paddr, unsigned long attr,
 	return pte;
 }
 
-__pte_t uk_plat_native_pte_change_attr(__pte_t pte __unused,
-				       unsigned long new_attr __unused,
-				       unsigned int level __unused)
+__pte_t uk_plat_native_pte_change_attr(__pte_t pte, unsigned long new_attr,
+				       unsigned int level)
 {
-	UK_CRASH("%s: Not implemented", __func__);
+	const __pte_t mask =
+		UK_ARCH_ARM64_PTE_ATTR_AP(UK_ARCH_ARM64_PTE_ATTR_AP_RO) |
+		UK_ARCH_ARM64_PTE_ATTR_XN | UK_ARCH_ARM64_PTE_ATTR_SH_MASK |
+		UK_ARCH_ARM64_PTE_ATTR_IDX_MASK;
+	__pte_t encoded =
+		uk_plat_native_pte_create(0, new_attr, level, 0, level);
 
-	return 0;
+	return (pte & ~mask) | (encoded & mask);
 }
 
 unsigned long uk_plat_native_attr_from_pte(__pte_t pte,

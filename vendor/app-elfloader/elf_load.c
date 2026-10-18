@@ -44,6 +44,10 @@
 #include <uk/config.h>
 #if CONFIG_LIBPOSIX_VFS
 #include <uk/vfs-path.h>
+#include <uk/posix-fdio.h>
+#if CONFIG_LIBPOSIX_MMAP
+#include <uk/posix-mmap.h>
+#endif
 #endif
 
 #include <libelf.h>
@@ -69,6 +73,7 @@
 #include <uk/paging.h>
 
 #include "libelf_helper.h"
+#include <uk/binfmt.h>
 #include "elf_prog.h"
 
 static int get_phdr_mmap_prot(GElf_Phdr *phdr)
@@ -366,6 +371,147 @@ err_out:
 }
 
 #if CONFIG_HAVE_VFS
+static int elf_source_open(struct uk_binfmt_source *source, const char *path)
+{
+#if CONFIG_LIBPOSIX_VFS
+	source->file = uk_posix_vfs_exec_open(path, &source->path);
+	if (PTRISERR(source->file))
+		return PTR2ERR(source->file);
+#else
+	source->fd = open(path, O_RDONLY);
+	if (source->fd < 0)
+		return -errno;
+#endif
+	return 0;
+}
+
+static void elf_source_close(struct uk_binfmt_source *source)
+{
+#if CONFIG_LIBPOSIX_VFS
+	uk_ofile_release(source->file);
+	uk_posix_vfs_path_release(source->path);
+#else
+	close(source->fd);
+#endif
+}
+
+#if CONFIG_LIBPOSIX_VFS || CONFIG_APPELFLOADER_VFSEXEC_EXECBIT
+static int elf_source_stat(const struct uk_binfmt_source *source,
+			   struct stat *metadata)
+{
+#if CONFIG_LIBPOSIX_VFS
+	return uk_sys_fstat(source->file, metadata);
+#else
+	return fstat(source->fd, metadata) ? -errno : 0;
+#endif
+}
+#endif
+
+#if CONFIG_LIBPOSIX_VFS || !CONFIG_LIBPOSIX_MMAP
+static ssize_t elf_source_read(const struct uk_binfmt_source *source,
+			       void *buffer, size_t length, off_t offset)
+{
+#if CONFIG_LIBPOSIX_VFS
+	return uk_sys_pread(source->file, buffer, length, offset);
+#else
+	ssize_t rc = pread(source->fd, buffer, length, offset);
+
+	return rc < 0 ? -errno : rc;
+#endif
+}
+#endif
+
+#if CONFIG_LIBPOSIX_MMAP
+static void *elf_source_map(void *address, size_t length, int protection,
+			    int flags, const struct uk_binfmt_source *source,
+			    off_t offset)
+{
+#if CONFIG_LIBPOSIX_VFS
+	int rc = uk_posix_mmap_file(&address, length, protection, flags,
+				    source->file, offset);
+
+	if (rc) {
+		errno = -rc;
+		return MAP_FAILED;
+	}
+	return address;
+#else
+	return mmap(address, length, protection, flags, source->fd, offset);
+#endif
+}
+#endif
+
+struct elf_source_image {
+	Elf *elf;
+#if CONFIG_LIBPOSIX_VFS
+	void *bytes;
+	size_t length;
+#if CONFIG_LIBPOSIX_MMAP
+	bool mapped;
+#endif
+#endif
+};
+
+static void elf_source_image_free(struct elf_source_image *image)
+{
+	if (image->elf)
+		elf_end(image->elf);
+#if CONFIG_LIBPOSIX_VFS
+	if (image->bytes) {
+#if CONFIG_LIBPOSIX_MMAP
+		if (image->mapped)
+			munmap(image->bytes, image->length);
+		else
+#endif
+			uk_free(uk_alloc_get_default(), image->bytes);
+	}
+#endif
+}
+
+static int elf_source_image_init(struct elf_source_image *image,
+				 const struct uk_binfmt_source *source)
+{
+#if CONFIG_LIBPOSIX_VFS
+	struct stat metadata;
+	size_t copied = 0;
+	int rc = elf_source_stat(source, &metadata);
+
+	if (rc)
+		return rc;
+	image->length = metadata.st_size;
+	if (metadata.st_size <= 0 || (off_t)image->length != metadata.st_size)
+		return -ENOEXEC;
+#if CONFIG_LIBPOSIX_MMAP
+	image->bytes = elf_source_map(NULL, image->length, PROT_READ,
+				      MAP_PRIVATE, source, 0);
+	if (image->bytes != MAP_FAILED)
+		image->mapped = true;
+	else
+		image->bytes = NULL;
+#endif
+	if (!image->bytes) {
+		image->bytes = uk_malloc(uk_alloc_get_default(), image->length);
+		if (!image->bytes)
+			return -ENOMEM;
+		while (copied < image->length) {
+			ssize_t bytes = elf_source_read(source,
+				(char *)image->bytes + copied,
+				image->length - copied, copied);
+
+			if (bytes == -EINTR)
+				continue;
+			if (bytes <= 0)
+				return bytes ? bytes : -ENOEXEC;
+			copied += bytes;
+		}
+	}
+	image->elf = elf_memory(image->bytes, image->length);
+#else
+	image->elf = elf_open(source->fd);
+#endif
+	return image->elf ? 0 : -ENOEXEC;
+}
+
 #if CONFIG_LIBPOSIX_MMAP
 /* If vastart + phdr.p_filesz (vastart) < vastart + phdr.p_memsz (vaend),
  * 0 out that remainder, either through memset or through anonymous mappings
@@ -416,7 +562,7 @@ static int elf_load_mmap_filesz_memsz_diff(struct elf_prog *elf_prog,
 	if (unlikely(vastart == (uintptr_t)MAP_FAILED)) {
 		uk_pr_err("Failed to mmap the NOBITS part of phdr at "
 			  "offset %lu\n", phdr->p_offset);
-		return (int)vastart;
+		return -errno;
 	}
 
 	return 0;
@@ -424,10 +570,12 @@ static int elf_load_mmap_filesz_memsz_diff(struct elf_prog *elf_prog,
 
 /* Use this to mmap first PT_LOAD */
 static int do_elf_load_fdphdr_0(struct elf_prog *elf_prog,
-				GElf_Phdr *phdr, int fd)
+				GElf_Phdr *phdr,
+				const struct uk_binfmt_source *source)
 {
 	uintptr_t vastart, vaend;
 	__sz mmap_len;
+	void *address;
 	int rc;
 
 	/* First start/vabase can't be !0 before loading first PT_LOAD */
@@ -464,14 +612,13 @@ static int do_elf_load_fdphdr_0(struct elf_prog *elf_prog,
 		    (uint64_t)elf_prog->vabase + elf_prog->valen);
 
 
-	vastart = (uintptr_t)mmap((void *)(elf_prog->load_bias + phdr->p_vaddr),
-				  phdr->p_filesz,
-				  get_phdr_mmap_prot(phdr),
-				  MAP_PRIVATE | MAP_FIXED,
-				  fd, phdr->p_offset);
+	address = (void *)(elf_prog->load_bias + phdr->p_vaddr);
+	vastart = (uintptr_t)elf_source_map(address, phdr->p_filesz,
+		get_phdr_mmap_prot(phdr), MAP_PRIVATE | MAP_FIXED,
+		source, phdr->p_offset);
 	if (unlikely(vastart == (uintptr_t)MAP_FAILED)) {
 		uk_pr_err("Failed to mmap first phdr\n");
-		return (int)vastart;
+		return -errno;
 	}
 	elf_prog->start = vastart;
 
@@ -501,7 +648,8 @@ static int do_elf_load_fdphdr_0(struct elf_prog *elf_prog,
 
 /* Use this to mmap every PT_LOAD but the first one */
 static int do_elf_load_fdphdr_not0(struct elf_prog *elf_prog,
-				   GElf_Phdr *phdr, int fd)
+				   GElf_Phdr *phdr,
+				const struct uk_binfmt_source *source)
 {
 	uintptr_t vastart, vaend;
 	uint64_t delta_p_offset;
@@ -535,14 +683,16 @@ static int do_elf_load_fdphdr_not0(struct elf_prog *elf_prog,
 	 * be manually re-adjusted later.
 	 */
 	if (phdr->p_filesz) {
-		vastart = (uintptr_t)mmap(addr, phdr->p_filesz + delta_p_offset,
-					  get_phdr_mmap_prot(phdr),
-					  MAP_FIXED | MAP_PRIVATE,
-					  fd, phdr->p_offset - delta_p_offset);
+		size_t map_length = phdr->p_filesz + delta_p_offset;
+		off_t map_offset = phdr->p_offset - delta_p_offset;
+
+		vastart = (uintptr_t)elf_source_map(addr, map_length,
+			get_phdr_mmap_prot(phdr), MAP_FIXED | MAP_PRIVATE,
+			source, map_offset);
 		if (unlikely(vastart == (uintptr_t)MAP_FAILED)) {
 			uk_pr_err("Failed to mmap the phdr at offset %lu\n",
 				  phdr->p_offset);
-			return (int)vastart;
+			return -errno;
 		}
 
 		vastart += phdr->p_filesz + delta_p_offset;
@@ -568,28 +718,29 @@ static int do_elf_load_fdphdr_not0(struct elf_prog *elf_prog,
 	return 0;
 }
 
-static int elf_load_fdphdr(struct elf_prog *elf_prog, GElf_Phdr *phdr, int fd)
+static int elf_load_fdphdr(struct elf_prog *elf_prog, GElf_Phdr *phdr,
+			   const struct uk_binfmt_source *source)
 {
 	if (elf_prog->vabase && elf_prog->start)
-		return do_elf_load_fdphdr_not0(elf_prog, phdr, fd);
+		return do_elf_load_fdphdr_not0(elf_prog, phdr, source);
 
-	return do_elf_load_fdphdr_0(elf_prog, phdr, fd);
+	return do_elf_load_fdphdr_0(elf_prog, phdr, source);
 }
 #else /* !CONFIG_LIBPOSIX_MMAP */
 /* Read from fd exact `len` bytes from offset `roff`, fail otherwise */
-static int elf_load_fdphdr_read(int fd, off_t roff, void *dst, size_t len)
+static int elf_load_fdphdr_read(const struct uk_binfmt_source *source,
+				off_t roff, void *dst, size_t len)
 {
 	ssize_t rc;
 	char *ptr;
 
 	ptr = (char *)dst;
 	while (len) {
-		rc = pread(fd, ptr, len, roff);
+		rc = elf_source_read(source, ptr, len, roff);
 		if (unlikely(rc < 0)) {
-			if (errno == EINTR)
-				continue; /* retry */
-			/* abort on any other error */
-			return -errno;
+			if (rc == -EINTR)
+				continue;
+			return rc;
 		}
 		if (unlikely(rc == 0))
 			break; /* end-of-file */
@@ -605,7 +756,8 @@ static int elf_load_fdphdr_read(int fd, off_t roff, void *dst, size_t len)
 	return 0;
 }
 
-static int elf_load_fdphdr(struct elf_prog *elf_prog, GElf_Phdr *phdr, int fd)
+static int elf_load_fdphdr(struct elf_prog *elf_prog, GElf_Phdr *phdr,
+			   const struct uk_binfmt_source *source)
 {
 	uintptr_t vastart, vaend;
 	int ret;
@@ -622,7 +774,7 @@ static int elf_load_fdphdr(struct elf_prog *elf_prog, GElf_Phdr *phdr, int fd)
 		    (uint64_t)vastart,
 		    (uint64_t)vaend);
 
-	ret = elf_load_fdphdr_read(fd, phdr->p_offset, (void *)vastart,
+	ret = elf_load_fdphdr_read(source, phdr->p_offset, (void *)vastart,
 				   phdr->p_filesz);
 	if (unlikely(ret < 0)) {
 		uk_pr_err("%s: Read error: %s\n", elf_prog->name,
@@ -644,7 +796,8 @@ static int elf_load_fdphdr(struct elf_prog *elf_prog, GElf_Phdr *phdr, int fd)
 }
 #endif /* !CONFIG_LIBPOSIX_MMAP */
 
-static int elf_load_fd(struct elf_prog *elf_prog, Elf *elf, int fd)
+static int elf_load_fd(struct elf_prog *elf_prog, Elf *elf,
+		       const struct uk_binfmt_source *source)
 {
 	size_t phnum, phi;
 	GElf_Ehdr ehdr;
@@ -740,7 +893,7 @@ static int elf_load_fd(struct elf_prog *elf_prog, Elf *elf, int fd)
 		if (phdr.p_type != PT_LOAD)
 			continue;
 
-		ret = elf_load_fdphdr(elf_prog, &phdr, fd);
+		ret = elf_load_fdphdr(elf_prog, &phdr, source);
 		if (unlikely(ret))
 			return ret;
 	}
@@ -951,59 +1104,48 @@ err_out:
 
 #if CONFIG_HAVE_VFS
 static struct elf_prog *do_elf_load_vfs(struct uk_alloc *a, const char *path,
-					const char *progname, bool nointerp)
+					const char *progname, bool nointerp,
+					const struct uk_binfmt_source *source)
 {
-	int fd = -1;
-#if CONFIG_LIBPOSIX_VFS
-	struct uk_vfs_path *executable = NULL;
-#endif
-#if CONFIG_APPELFLOADER_VFSEXEC_EXECBIT
+	struct uk_binfmt_source opened;
+	struct elf_source_image image = {0};
+	bool own_source = !source;
+#if CONFIG_APPELFLOADER_VFSEXEC_EXECBIT && !CONFIG_LIBPOSIX_VFS
 	struct stat fd_stat;
 #endif /* CONFIG_APPELFLOADER_VFSEXEC_EXECBIT */
 	struct elf_prog *elf_prog = NULL;
 	Elf *elf;
 	int ret;
 
-#if CONFIG_LIBPOSIX_VFS
-	fd = uk_posix_vfs_exec_open(path, &executable);
-	if (fd < 0)
-		errno = -fd;
-#else
-	fd = open(path, O_RDONLY);
-#endif
-	if (unlikely(fd < 0)) {
-		uk_pr_err("%s: Failed to execute %s: %s\n",
-			  progname, path, strerror(errno));
-		ret = -errno;
-		goto err_out;
+	if (own_source) {
+		ret = elf_source_open(&opened, path);
+		if (ret)
+			goto err_out;
+		source = &opened;
 	}
 
-#if CONFIG_APPELFLOADER_VFSEXEC_EXECBIT
+#if CONFIG_APPELFLOADER_VFSEXEC_EXECBIT && !CONFIG_LIBPOSIX_VFS
 	/* Check for executable bit */
-	ret = fstat(fd, &fd_stat);
+	ret = elf_source_stat(source, &fd_stat);
 	if (unlikely(ret != 0)) {
 		uk_pr_err("%s: Failed to execute %s: %s\n",
-			  progname, path, strerror(errno));
-		ret = -errno;
-		goto err_close_fd;
+			  progname, path, strerror(-ret));
+		goto err_end_elf;
 	}
 	if (unlikely(!(fd_stat.st_mode & S_IXUSR))) {
 		uk_pr_err("%s: Failed to execute %s: %s\n",
 			  progname, path, strerror(EPERM));
 		ret = -EPERM;
-		goto err_close_fd;
+		goto err_end_elf;
 	}
-#else /* !CONFIG_APPELFLOADER_VFSEXEC_EXECBIT */
+#elif !CONFIG_LIBPOSIX_VFS
 	uk_pr_debug("%s: Note, ignoring executable bit state\n", progname);
 #endif /* !CONFIG_APPELFLOADER_VFSEXEC_EXECBIT */
 
-	elf = elf_open(fd);
-	if (unlikely(!elf)) {
-		elferr_err("%s: Failed to initialize ELF parser\n",
-			   progname);
-		ret = -EBUSY;
-		goto err_close_fd;
-	}
+	ret = elf_source_image_init(&image, source);
+	if (ret)
+		goto err_end_elf;
+	elf = image.elf;
 
 	elf_prog = uk_calloc(a, 1, sizeof(*elf_prog));
 	if (unlikely(!elf_prog)) {
@@ -1014,8 +1156,8 @@ static struct elf_prog *do_elf_load_vfs(struct uk_alloc *a, const char *path,
 	elf_prog->name = progname;
 	elf_prog->path = path;
 #if CONFIG_LIBPOSIX_VFS
-	elf_prog->executable = executable;
-	executable = NULL;
+	elf_prog->executable = source->path;
+	uk_posix_vfs_path_acquire(elf_prog->executable);
 #endif
 
 	ret = elf_load_parse(elf_prog, elf);
@@ -1031,7 +1173,7 @@ static struct elf_prog *do_elf_load_vfs(struct uk_alloc *a, const char *path,
 		goto err_free_elf_prog;
 	}
 
-	ret = elf_load_fd(elf_prog, elf, fd);
+	ret = elf_load_fd(elf_prog, elf, source);
 	if (unlikely(ret < 0)) {
 		uk_pr_err("%s: Failed to copy the executable: %d\n",
 			  progname, ret);
@@ -1048,8 +1190,9 @@ static struct elf_prog *do_elf_load_vfs(struct uk_alloc *a, const char *path,
 	}
 #endif /* !CONFIG_LIBPOSIX_MMAP */
 
-	elf_end(elf);
-	close(fd);
+	elf_source_image_free(&image);
+	if (own_source)
+		elf_source_close(&opened);
 	return elf_prog;
 
 #if !CONFIG_LIBPOSIX_MMAP
@@ -1062,23 +1205,21 @@ err_free_elf_prog:
 #endif
 	uk_free(a, elf_prog);
 err_end_elf:
-	elf_end(elf);
-err_close_fd:
-#if CONFIG_LIBPOSIX_VFS
-	uk_posix_vfs_path_release(executable);
-#endif
-	close(fd);
+	elf_source_image_free(&image);
+	if (own_source)
+		elf_source_close(&opened);
 err_out:
 	return ERR2PTR(ret);
 }
 
 struct elf_prog *elf_load_vfs(struct uk_alloc *a, const char *path,
-			      const char *progname)
+			      const char *progname,
+			      const struct uk_binfmt_source *source)
 {
 	struct elf_prog *elf_prog;
 	int err;
 
-	elf_prog = do_elf_load_vfs(a, path, progname, false);
+	elf_prog = do_elf_load_vfs(a, path, progname, false, source);
 	if (PTRISERR(elf_prog) || !elf_prog) {
 		err = PTR2ERR(elf_prog);
 		goto err_out;
@@ -1090,7 +1231,7 @@ struct elf_prog *elf_load_vfs(struct uk_alloc *a, const char *path,
 			    elf_prog->name, elf_prog->interp.path);
 		elf_prog->interp.prog = do_elf_load_vfs(a,
 							elf_prog->interp.path,
-							"<interp>", true);
+							"<interp>", true, NULL);
 		if (unlikely(PTRISERR(elf_prog->interp.prog) ||
 			     !elf_prog->interp.prog)) {
 			err = PTR2ERR(elf_prog->interp.prog);

@@ -33,9 +33,10 @@ static void socket_listening(const struct uk_socket_event *event)
 
 UK_SOCKET_EVENT_RECEIVER(AF_INET, LISTEN, socket_listening);
 
-static ssize_t listen_watch(const struct uk_file *file __unused,
-			    const struct iovec *iov, size_t count,
-			    size_t offset __unused, long flags __unused)
+static struct uk_file_io_result
+listen_watch(const struct uk_file *file __unused, const struct iovec *iov,
+	     size_t count, size_t offset __unused, long flags __unused,
+	     enum uk_file_write_kind kind __unused)
 {
 	uint8_t bytes[2];
 	uint16_t port, expected = 0;
@@ -43,19 +44,19 @@ static ssize_t listen_watch(const struct uk_file *file __unused,
 
 	for (size_t i = 0; i < count; ++i) {
 		if (iov[i].iov_len > sizeof(bytes) - copied)
-			return -EINVAL;
+			return uk_file_io_status(-EINVAL);
 		memcpy(bytes + copied, iov[i].iov_base, iov[i].iov_len);
 		copied += iov[i].iov_len;
 	}
 	if (copied != sizeof(bytes))
-		return -EINVAL;
+		return uk_file_io_status(-EINVAL);
 	memcpy(&port, bytes, sizeof(port));
 	if (!port)
-		return -EINVAL;
+		return uk_file_io_status(-EINVAL);
 	if (!__atomic_compare_exchange_n(&watched_port, &expected, port, 0,
 					__ATOMIC_RELEASE, __ATOMIC_RELAXED))
-		return -EBUSY;
-	return copied;
+		return uk_file_io_status(-EBUSY);
+	return uk_file_io_status(copied);
 }
 
 static int listen_stat(const struct uk_file *file __unused,

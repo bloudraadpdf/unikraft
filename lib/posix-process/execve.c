@@ -16,9 +16,22 @@
 #if CONFIG_LIBUKVMEM
 #include <uk/vmem.h>
 #endif
+#include <limits.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <string.h>
+#include <uk/nofault.h>
+#if CONFIG_LIBPOSIX_VFS
+#include <uk/vfs-path.h>
+#include <uk/posix-fd.h>
+#endif
+
+#if CONFIG_LIBPOSIX_FDTAB
+#include <uk/posix-fdtab.h>
+#endif
 
 #include "process.h"
+#include "execve-args.h"
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 #include "signal/signal.h"
 #endif
@@ -64,6 +77,9 @@ static void __noreturn execve_ctx_switch(long arg0, long arg1)
 	pthread = uk_pthread_current();
 	UK_ASSERT(pthread);
 
+#if CONFIG_LIBPOSIX_FDTAB
+	uk_fdtab_execve_commit(this_thread);
+#endif
 	pprocess_complete_vfork(pthread);
 	if (stack_old)
 		uk_free(this_thread->_mem.stack_a, stack_old);
@@ -75,13 +91,40 @@ static void __noreturn execve_ctx_switch(long arg0, long arg1)
 #endif
 }
 
+static void execve_source_close(struct uk_binfmt_source *source)
+{
+#if CONFIG_LIBPOSIX_VFS
+	if (source->file) {
+		uk_ofile_release(source->file);
+		source->file = NULL;
+	}
+	uk_posix_vfs_path_release(source->path);
+	source->path = NULL;
+#else
+	if (source->fd >= 0) {
+		close(source->fd);
+		source->fd = -1;
+	}
+#endif
+}
+
 UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 		      char *const *, argv,
 		      char *const *, envp)
 {
 	struct posix_process_execve_event_data event_data;
-	struct uk_binfmt_loader_args loader_args;
+	struct uk_binfmt_loader_args loader_args = {0};
+	struct uk_binfmt_source source = {
+#if CONFIG_LIBPOSIX_VFS
+		.file = NULL
+#else
+		.fd = -1
+#endif
+	};
+	struct execve_arguments arguments = {0};
 	struct posix_vm_context *vm_new = NULL;
+	char *path_copy;
+	char task_name[UK_POSIX_TASK_NAME_SIZE];
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 	struct uk_sigaction *signal_actions = NULL;
 #endif
@@ -92,25 +135,50 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 	void *stack_old;
 	void *stack_new;
 	__sz stack_size = STACK_SIZE;
+	__sz stack_limit;
 	int rc = 0;
 
-	/* Linux deviates from POSIX by treating NULL pointers to
-	 * argv / envp equivalently to passing a list with a single
-	 * NULL element. Preserve this behavior for compatibiltiy
-	 * and treat NULL pointers as valid.
-	 */
-	UK_ASSERT(pathname);
 
 	this_thread = uk_thread_current();
 	UK_ASSERT(this_thread);
+
+	path_copy = uk_malloc(uk_alloc_get_default(), PATH_MAX);
+	if (!path_copy)
+		return -ENOMEM;
+	rc = uk_nofault_copy_string(path_copy, pathname, PATH_MAX);
+	if (rc)
+		goto err_free_path;
+	pprocess_task_name_from_path(path_copy, task_name);
+#if CONFIG_LIBPOSIX_VFS
+	source.file = uk_posix_vfs_exec_open(path_copy, &source.path);
+	if (PTRISERR(source.file)) {
+		rc = PTR2ERR(source.file);
+		source.file = NULL;
+		goto err_free_path;
+	}
+#else
+	source.fd = open(path_copy, O_RDONLY | O_CLOEXEC);
+	if (source.fd < 0) {
+		rc = -errno;
+		goto err_free_path;
+	}
+#endif
+	uk_mutex_lock(&pprocess_mutex);
+	stack_limit = uk_pprocess_current()->limits[RLIMIT_STACK].rlim_cur;
+	uk_mutex_unlock(&pprocess_mutex);
+	rc = execve_arguments_init(&arguments, argv, envp, stack_limit,
+				   strlen(path_copy) + 1);
+	if (rc)
+		goto err_free_path;
 
 	stack_allocator = this_thread->_mem.stack_a;
 	if (!stack_allocator)
 		stack_allocator = uk_sched_current()->a_stack;
 
-	loader_args.argv = (const char **)argv;
-	loader_args.envp = (const char **)envp;
-	loader_args.pathname = (char *)pathname;
+	loader_args.argv = arguments.argv;
+	loader_args.envp = arguments.envp;
+	loader_args.source = &source;
+	loader_args.pathname = path_copy;
 	loader_args.auxv = NULL;
 	loader_args.image_data_size = 0;
 	loader_args.stack_executable = false;
@@ -118,8 +186,7 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 	loader_args.executable = NULL;
 #endif
 
-	/* Assume that if argv is set the caller follows the convention */
-	loader_args.progname = (argv && argv[0]) ? argv[0] : "<null>";
+	loader_args.progname = (char *)arguments.argv[0];
 
 	/* Assign the default allocator to the loader. This will be used
 	 * to allocate memory for the executable image.
@@ -127,11 +194,13 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 	loader_args.alloc = uk_alloc_get_default();
 
 #if CONFIG_LIBUKALLOCSTACK_PAGE_GUARDS
-	stack_size = MIN(uk_pprocess_current()->limits[RLIMIT_STACK].rlim_cur,
+	stack_size = MIN(stack_limit,
 			 (__sz)CONFIG_LIBPOSIX_PROCESS_STACK_SIZE);
 	stack_size = UK_PAGING_PAGE_ALIGN_DOWN(stack_size);
-	if (stack_size <= UKARCH_EXECENV_SIZE)
-		return -E2BIG;
+	if (stack_size <= UKARCH_EXECENV_SIZE) {
+		rc = -E2BIG;
+		goto err_free_path;
+	}
 #endif
 
 	/* Allocate a new stack. Even if we don't come from vfork we
@@ -142,7 +211,8 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 	stack_new = uk_malloc(stack_allocator, stack_size);
 	if (unlikely(!stack_new)) {
 		uk_pr_err("Could not allocate stack\n");
-		return -ENOMEM;
+		rc = -ENOMEM;
+		goto err_free_path;
 	}
 
 	vm_new = pprocess_vm_alloc(uk_pprocess_current()->_a);
@@ -154,8 +224,7 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 	vm_new->stack_size = stack_size;
 	loader_args.stack_size = stack_size;
 	loader_args.stack_bottom = (__uptr)stack_new;
-	loader_args.stack_limit =
-		uk_pprocess_current()->limits[RLIMIT_STACK].rlim_cur;
+	loader_args.stack_limit = stack_limit;
 	loader_args.ctx.sp = ukarch_gen_sp((__uptr)stack_new,
 					   loader_args.stack_size);
 
@@ -189,8 +258,9 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 	uk_pthread_current()->exec_vm = vm_new;
 	rc = uk_binfmt_load(&loader_args);
 	uk_pthread_current()->exec_vm = NULL;
+	execve_source_close(&source);
 	if (unlikely(rc)) {
-		uk_pr_err("%s: Unable to load (%d)\n", pathname, rc);
+		uk_pr_err("%s: Unable to load (%d)\n", path_copy, rc);
 		goto err_free_stack_new;
 	}
 	vm_new->image_data_size = loader_args.image_data_size;
@@ -256,7 +326,12 @@ UK_SYSCALL_R_E_DEFINE(int, execve, const char *, pathname,
 	uk_pr_debug("%s: Old stack at %p - %p\n", loader_args.progname,
 		    stack_old, (void *)((uintptr_t)stack_old + STACK_SIZE));
 
-	pprocess_vm_replace(uk_pprocess_current(), vm_new);
+	rc = pprocess_task_name_set(this_thread, task_name);
+	if (rc)
+		goto err_free_stack_new;
+	execve_arguments_free(&arguments);
+	uk_free(uk_alloc_get_default(), path_copy);
+	pprocess_vm_replace(this_thread, vm_new);
 	this_thread->_mem.stack_a = stack_allocator;
 	this_thread->_mem.stack = stack_new;
 	this_thread->ctx = loader_args.ctx;
@@ -274,8 +349,11 @@ err_free_stack_new:
 	if (signal_actions)
 		pprocess_signal_sigaction_release(signal_actions);
 #endif
-	pprocess_vm_put(vm_new, uk_pprocess_current()->pid);
+	pprocess_vm_release_user(vm_new, uk_pprocess_current()->pid);
 	uk_free(stack_allocator, stack_new);
-
+err_free_path:
+	execve_source_close(&source);
+	execve_arguments_free(&arguments);
+	uk_free(uk_alloc_get_default(), path_copy);
 	return rc;
 }

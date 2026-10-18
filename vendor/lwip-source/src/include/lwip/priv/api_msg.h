@@ -218,6 +218,9 @@ void lwip_netconn_do_gethostbyname(void *arg);
 
 struct netconn* netconn_alloc(enum netconn_type t, netconn_callback callback);
 void netconn_free(struct netconn *conn);
+#if LWIP_TCP
+void lwip_netconn_set_sendbufsize(struct netconn *conn, u32_t bytes);
+#endif /* LWIP_TCP */
 
 #endif /* LWIP_NETCONN || LWIP_SOCKET */
 

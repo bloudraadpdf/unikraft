@@ -203,7 +203,6 @@ static bool deliver_pending(struct posix_thread *thread, bool process_queue,
 {
 	struct posix_process *proc = thread->process;
 	struct posix_thread *target = process_queue ? NULL : thread;
-	struct uk_alloc *alloc = process_queue ? proc->_a : thread->_a;
 	struct uk_signal *sig;
 	struct uk_signal delivery;
 	int signum;
@@ -217,7 +216,7 @@ static bool deliver_pending(struct posix_thread *thread, bool process_queue,
 			if (!sig)
 				break;
 			delivery.siginfo = sig->siginfo;
-			uk_signal_free(alloc, sig);
+			uk_signal_free(sig);
 			if (do_deliver(thread, &delivery, execenv, NULL))
 				return true;
 		}
@@ -341,12 +340,13 @@ void sys_error_handler(struct ukarch_execenv *ee __unused, long arg)
 #if CONFIG_LIBUKVMEM
 		struct uk_vas *vas = uk_vas_get_active();
 		const struct uk_vma *vma;
+		__vaddr_t start, end;
 
 		uk_mutex_lock(&vas->mutation_lock);
 		vma = uk_vma_find(vas, error->vaddr);
-		if (vma && vma->ops == &uk_vma_stack_ops) {
-			__vaddr_t start = vma->start + UK_VMA_STACK_BOTTOM_GUARD_SIZE;
-			__vaddr_t end = vma->end - UK_VMA_STACK_TOP_GUARD_SIZE;
+		if (!uk_vma_stack_bounds(vma, &start, &end)) {
+			start += UK_VMA_STACK_BOTTOM_GUARD_SIZE;
+			end -= UK_VMA_STACK_TOP_GUARD_SIZE;
 
 			if (!IN_RANGE(error->vaddr, start, end - start))
 				vma = NULL;

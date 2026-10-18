@@ -38,10 +38,14 @@
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <uk/essentials.h>
+#include <uk/nofault.h>
 #include <uk/process.h>
 #include <uk/print.h>
 #include <uk/syscall.h>
 #include <uk/arch/limits.h>
+#if CONFIG_LIBPOSIX_USER
+#include <uk/credentials.h>
+#endif
 #include "process.h"
 
 #define UNIKRAFT_SID      0
@@ -294,12 +298,75 @@ default:
 	return rc;
 }
 
+static int process_name_prctl(int option, unsigned long address)
+{
+	char name[UK_POSIX_TASK_NAME_SIZE] = {0};
+	int rc;
+
+	if (option == PR_SET_NAME) {
+		for (size_t i = 0; i < sizeof(name) - 1; i++) {
+			if (!uk_nofault_try_read(name[i],
+						 (const char *)(address + i)))
+				return -EFAULT;
+			if (!name[i])
+				break;
+		}
+		return pprocess_task_name_set(uk_thread_current(), name);
+	}
+	rc = pprocess_task_name_get(uk_thread_current(), name);
+	if (rc)
+		return rc;
+	return uk_nofault_memcpy((char *)address, name, sizeof(name), 0) ==
+		sizeof(name) ? 0 : -EFAULT;
+}
+
+#if CONFIG_LIBPOSIX_USER
+static int process_credentials_query(int option, unsigned long arg2,
+				     unsigned long arg3, unsigned long arg4,
+				     unsigned long arg5)
+{
+	struct pu_credentials *credentials;
+	const struct pu_privileges *privileges;
+	bool no_new_privs;
+	int result;
+
+	if (option == PR_GET_NO_NEW_PRIVS && (arg2 || arg3 || arg4 || arg5))
+		return -EINVAL;
+	if (option == PR_CAPBSET_READ && arg2 > PU_CAP_LAST)
+		return -EINVAL;
+	if (option == PR_CAP_AMBIENT && (arg2 != PR_CAP_AMBIENT_IS_SET ||
+					 arg3 > PU_CAP_LAST || arg4 || arg5))
+		return -EINVAL;
+	credentials =
+	    pu_credentials_acquire(uk_thread_current(), &no_new_privs);
+	if (!credentials)
+		return -ESRCH;
+	privileges = pu_credentials_privileges(credentials);
+	if (option == PR_GET_NO_NEW_PRIVS)
+		result = no_new_privs;
+	else if (option == PR_CAPBSET_READ)
+		result = !!(privileges->bounding & (UINT64_C(1) << arg2));
+	else
+		result = !!(privileges->ambient & (UINT64_C(1) << arg3));
+	pu_credentials_release(credentials);
+	return result;
+}
+#endif
+
 UK_SYSCALL_R_DEFINE(int, prctl, int, option,
 		    unsigned long, arg2,
 		    unsigned long, arg3,
 		    unsigned long, arg4,
 		    unsigned long, arg5)
 {
+	if (option == PR_SET_NAME || option == PR_GET_NAME)
+		return process_name_prctl(option, arg2);
+#if CONFIG_LIBPOSIX_USER
+	if (option == PR_GET_NO_NEW_PRIVS || option == PR_CAPBSET_READ ||
+	    option == PR_CAP_AMBIENT)
+		return process_credentials_query(option, arg2, arg3, arg4,
+						 arg5);
+#endif
 #if CONFIG_LIBPOSIX_PROCESS_EXECVE
 	if (option == 0x41555856) { /* PR_GET_AUXV */
 		struct posix_vm_context *vm = uk_pprocess_current()->vm_context;
@@ -307,10 +374,9 @@ UK_SYSCALL_R_DEFINE(int, prctl, int, option,
 
 		if (arg4 || arg5 || !vm->auxv)
 			return -EINVAL;
-		if (length && !arg2)
+		if (length && uk_nofault_memcpy((void *)arg2, vm->auxv,
+						length, 0) != length)
 			return -EFAULT;
-		if (length)
-			memcpy((void *)arg2, vm->auxv, length);
 		return vm->auxv_size;
 	}
 #endif

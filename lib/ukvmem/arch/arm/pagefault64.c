@@ -15,23 +15,12 @@
 
 #include <string.h>
 
-static int vmem_arch_pagefault(void *data)
+unsigned int uk_vmem_arch_fault_type(struct uk_lcpu_except_err_ctx *ctx)
 {
-	const char *faultstr[] __maybe_unused = {
-		"read", "write", "exec"
-	};
-	struct uk_lcpu_except_err_ctx *ctx;
 	unsigned int faulttype;
 	unsigned long dfsc;
-	struct uk_vas *vas;
-	__vaddr_t vaddr;
 	__u64 esr, ec;
-	int rc;
 
-	ctx = (struct uk_lcpu_except_err_ctx *)data;
-	UK_ASSERT(ctx);
-
-	vaddr = (__vaddr_t)uk_lcpu_except_err_ctx_get_fault_addr(ctx);
 	esr = uk_lcpu_arm64_except_err_ctx_get_esr(ctx);
 
 	ec = UK_ARCH_ARM64_ESR_EC_FROM(esr);
@@ -47,8 +36,31 @@ static int vmem_arch_pagefault(void *data)
 	if (dfsc >= UK_ARCH_ARM64_ESR_ISS_ABRT_FSC_TRANS_L0 &&
 	    dfsc <= UK_ARCH_ARM64_ESR_ISS_ABRT_FSC_TRANS_L3)
 		faulttype |= UK_VMA_FAULT_NONPRESENT;
-	else
+	else if (dfsc < UK_ARCH_ARM64_ESR_ISS_ABRT_FSC_PERM_L0 ||
+		 dfsc > UK_ARCH_ARM64_ESR_ISS_ABRT_FSC_PERM_L3)
 		faulttype |= UK_VMA_FAULT_MISCONFIG;
+
+	return faulttype;
+}
+
+static int vmem_arch_pagefault(void *data)
+{
+	const char *faultstr[] __maybe_unused = {
+		"read", "write", "exec"
+	};
+	struct uk_lcpu_except_err_ctx *ctx;
+	unsigned int faulttype;
+	struct uk_vas *vas;
+	__vaddr_t vaddr;
+	__u64 esr;
+	int rc;
+
+	ctx = (struct uk_lcpu_except_err_ctx *)data;
+	UK_ASSERT(ctx);
+
+	vaddr = (__vaddr_t)uk_lcpu_except_err_ctx_get_fault_addr(ctx);
+	faulttype = uk_vmem_arch_fault_type(ctx);
+	esr = uk_lcpu_arm64_except_err_ctx_get_esr(ctx);
 
 	rc = vmem_pagefault(vaddr, faulttype,
 			    (struct uk_lcpu_regs *)

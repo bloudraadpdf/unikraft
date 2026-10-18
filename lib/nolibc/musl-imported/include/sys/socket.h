@@ -24,16 +24,15 @@ struct msghdr {
         void *msg_name;
         socklen_t msg_namelen;
         struct iovec *msg_iov;
-        int msg_iovlen, __pad1;
+	size_t msg_iovlen;
         void *msg_control;
-        socklen_t msg_controllen, __pad2;
+	size_t msg_controllen;
         int msg_flags;
 };
 
 /* from bits/socket.h */
 struct cmsghdr {
-        socklen_t cmsg_len;
-        int __pad1;
+	size_t cmsg_len;
         int cmsg_level;
         int cmsg_type;
 };

@@ -795,3 +795,83 @@ int ext4_extent_remove_space(struct ext4_inode_ref *inode, ext4_lblk_t from,
 		ext4_extent_tree_init(inode);
 	return path_close(inode, &path, error);
 }
+
+static int extent_flush_node(struct ext4_inode_ref *inode,
+			     struct extent_node *node, uint64_t first,
+			     uint64_t limit)
+{
+	unsigned int depth = to_le16(node->header->eh_depth);
+	unsigned int count = node_count(node);
+
+	for (unsigned int i = 0; i < count; i++) {
+		if (depth) {
+			struct ext4_extent_index *indices = node_indexes(node);
+			uint64_t lower = to_le32(indices[i].ei_blk);
+			uint64_t upper = i + 1 < count
+					     ? to_le32(indices[i + 1].ei_blk)
+					     : UINT64_MAX;
+			struct extent_node child;
+			int rc, released;
+
+			if (lower >= limit || upper <= first)
+				continue;
+			rc = node_read(inode, index_block(&indices[i]),
+				       depth - 1, &child);
+			if (rc)
+				return rc;
+			rc = extent_flush_node(inode, &child, first, limit);
+			released = node_close(inode, &child);
+			if (rc || released)
+				return rc ? rc : released;
+		} else {
+			struct ext4_extent *extent = node_extents(node) + i;
+			uint64_t start = to_le32(extent->e_blk);
+			uint64_t end = start + extent_length(extent);
+			uint64_t physical = extent_block(extent);
+			struct ext4_buf *buf;
+			int rc;
+
+			if (start >= limit || end <= first ||
+			    extent_unwritten(extent))
+				continue;
+			if (end > limit)
+				end = limit;
+			if (start < first) {
+				physical += first - start;
+				start = first;
+			}
+			for (;;) {
+				SLIST_FOREACH(buf,
+					      &inode->fs->bdev->bc->dirty_list,
+					      dirty_node)
+				if (buf->lba >= physical &&
+				    buf->lba - physical < end - start)
+					break;
+				if (!buf)
+					break;
+				rc = ext4_block_flush_lba(inode->fs->bdev,
+							  buf->lba);
+				if (rc)
+					return rc;
+			}
+		}
+	}
+	return 0;
+}
+
+int ext4_extent_flush_range(struct ext4_inode_ref *inode, uint64_t first,
+			    uint64_t limit)
+{
+	struct extent_node root;
+	int rc;
+
+	if (first >= limit)
+		return 0;
+	if (!ext4_inode_has_flag(inode->inode, EXT4_INODE_FLAG_EXTENTS))
+		return EOPNOTSUPP;
+	memset(&root, 0, sizeof(root));
+	root.root = true;
+	root.header = ext4_inode_get_extent_header(inode->inode);
+	rc = node_validate(inode, &root, to_le16(root.header->eh_depth));
+	return rc ? rc : extent_flush_node(inode, &root, first, limit);
+}

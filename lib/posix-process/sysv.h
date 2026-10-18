@@ -50,12 +50,13 @@ struct sysv_object *sysv_find_id(enum sysv_kind kind, int id);
 struct sysv_object *sysv_find_index(enum sysv_kind kind, int index);
 int sysv_insert(struct sysv_object *object, enum sysv_kind kind,
 		int key, int flags);
+int sysv_table_info_locked(enum sysv_kind kind, unsigned int *count);
 void sysv_remove(struct sysv_object *object);
 void sysv_put(struct sysv_object *object);
 int sysv_access(const struct sysv_object *object, unsigned int mode);
 int sysv_owner(const struct sysv_object *object);
 int sysv_set_perm(struct sysv_object *object, const struct sysv_perm *perm);
 long sysv_now(void);
-void pprocess_shm_release(struct posix_vm_context *state, pid_t pid);
+void pprocess_shm_retire_locked(struct posix_vm_context *state, pid_t pid);
 
 #endif

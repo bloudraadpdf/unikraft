@@ -36,12 +36,66 @@
 
 #include <uk/assert.h>
 #include <uk/config.h>
+#include <uk/credentials.h>
 
 #define UK_DEFAULT_UID		CONFIG_LIBPOSIX_USER_UID
 #define UK_DEFAULT_GID		CONFIG_LIBPOSIX_USER_GID
 #define UK_DEFAULT_USER		CONFIG_LIBPOSIX_USER_USERNAME
 #define UK_DEFAULT_GROUP	CONFIG_LIBPOSIX_USER_GROUPNAME
 #define UK_DEFAULT_PASS		""
+
+#define PU_GROUPS_MAX 65536
+
+enum pu_privilege_operation {
+	PU_PRIV_SECUREBITS,
+	PU_PRIV_KEEPCAPS,
+	PU_PRIV_BOUNDING_DROP,
+	PU_PRIV_AMBIENT_RAISE,
+	PU_PRIV_AMBIENT_LOWER,
+	PU_PRIV_AMBIENT_CLEAR
+};
+
+struct pu_privilege_change {
+	enum pu_privilege_operation operation;
+	__u64 value;
+};
+
+int pu_credentials_with_privileges(struct uk_alloc *allocator,
+				   const struct pu_credentials *credentials,
+				   const struct pu_privilege_change *change,
+				   struct pu_credentials **replacement);
+
+enum pu_id_kind {
+	PU_ID_USER,
+	PU_ID_GROUP
+};
+
+enum pu_id_operation {
+	PU_ID_SET,
+	PU_ID_RE,
+	PU_ID_RES,
+	PU_ID_FS
+};
+
+struct pu_id_change {
+	enum pu_id_operation operation;
+	union {
+		__u32 id;
+		struct { __u32 real, effective; } re;
+		struct { __u32 real, effective, saved; } res;
+	} value;
+};
+
+int pu_credentials_with_ids(struct uk_alloc *allocator,
+			    struct pu_credentials *credentials,
+			    enum pu_id_kind kind,
+			    const struct pu_id_change *change,
+			    struct pu_credentials **replacement);
+
+int pu_credentials_with_groups(struct uk_alloc *allocator,
+			       const struct pu_credentials *credentials,
+			       const __u32 *groups, size_t count,
+			       struct pu_credentials **replacement);
 
 /**
  * Initializes the `passwds` list and inserts in it the first entry.

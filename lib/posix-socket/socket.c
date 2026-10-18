@@ -40,13 +40,19 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 #include <limits.h>
 
 #include <uk/socket.h>
+#include <uk/alloc.h>
+#include <uk/arch/limits.h>
 #include <uk/file.h>
 #include <uk/file/nops.h>
 #include <uk/posix-fd.h>
 #include <uk/posix-fdio.h>
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+#include <uk/posix-signal-wait.h>
+#endif
 #include <uk/nofault.h>
 #include <uk/errptr.h>
 #include <uk/print.h>
@@ -103,12 +109,11 @@ static struct uk_ofile *socketfd_get(int fd)
 }
 #endif /* CONFIG_LIBPOSIX_FDTAB */
 
-static ssize_t
-socket_read(const struct uk_file *sock,
-	    const struct iovec *iov, size_t iovcnt,
-	    size_t off, long flags __unused)
+static ssize_t socket_read(const struct uk_file *sock, const struct iovec *iov,
+			   size_t iovcnt, size_t off, long flags)
 {
 	ssize_t ret;
+	int receive_flags = flags & O_NONBLOCK ? MSG_DONTWAIT : 0;
 	struct posix_socket_driver *d;
 
 	if (unlikely(sock->vol != POSIX_SOCKET_VOLID))
@@ -119,7 +124,7 @@ socket_read(const struct uk_file *sock,
 	d = posix_sock_get_driver(sock);
 	uk_file_rlock(sock);
 	if (d->ops->read) {
-		ret = posix_socket_read(sock, iov, iovcnt);
+		ret = posix_socket_read(sock, iov, iovcnt, receive_flags);
 	} else {
 		struct msghdr msg = {
 			.msg_name = NULL,
@@ -129,24 +134,24 @@ socket_read(const struct uk_file *sock,
 			.msg_control = NULL,
 			.msg_controllen = 0
 		};
-		ret = posix_socket_recvmsg(sock, &msg, 0);
+		ret = posix_socket_recvmsg(sock, &msg, receive_flags);
 	}
 	uk_file_runlock(sock);
 	return ret;
 }
 
-static ssize_t
-socket_write(const struct uk_file *sock,
-	     const struct iovec *iov, size_t iovcnt,
-	     size_t off, long flags __unused)
+static struct uk_file_io_result
+socket_write(const struct uk_file *sock, const struct iovec *iov, size_t iovcnt,
+	     size_t off, long flags __unused,
+	     enum uk_file_write_kind kind __unused)
 {
 	ssize_t ret;
 	struct posix_socket_driver *d;
 
 	if (unlikely(sock->vol != POSIX_SOCKET_VOLID))
-		return -EINVAL;
+		return uk_file_io_status(-EINVAL);
 	if (unlikely(off))
-		return -ESPIPE;
+		return uk_file_io_status(-ESPIPE);
 
 	d = posix_sock_get_driver(sock);
 	uk_file_rlock(sock);
@@ -164,7 +169,22 @@ socket_write(const struct uk_file *sock,
 		ret = posix_socket_sendmsg(sock, &msg, 0);
 	}
 	uk_file_runlock(sock);
-	return ret;
+	return uk_file_io_status(ret);
+}
+
+static __nsec socket_io_timeout(const struct uk_file *sock, uk_pollevent events)
+{
+	struct posix_socket_node *node = posix_sock_get_node(sock);
+	__u64 milliseconds;
+
+	uk_file_rlock(sock);
+	milliseconds = events & UKFD_POLLIN ? node->receive_timeout_ms
+					    : node->send_timeout_ms;
+	uk_file_runlock(sock);
+	if (milliseconds == __U64_MAX)
+		return __NSEC_MAX;
+	return milliseconds > __SNSEC_MAX / 1000000 ? __SNSEC_MAX
+						    : milliseconds * 1000000;
 }
 
 static int
@@ -174,8 +194,17 @@ socket_ctl(const struct uk_file *sock, int fam, int req,
 	switch (fam) {
 	case UKFILE_CTL_IOCTL:
 	{
+		struct posix_socket_driver *driver;
 		int ret;
 
+		if (req == SIOCGIFNAME || req == SIOCGIFINDEX) {
+			driver = posix_socket_driver_get(AF_INET);
+			if (!driver || !driver->ops->interface_ioctl)
+				driver = posix_socket_driver_get(AF_INET6);
+			return driver && driver->ops->interface_ioctl
+				       ? driver->ops->interface_ioctl(req, (void *)arg1)
+				       : -ENOTTY;
+		}
 		uk_file_rlock(sock);
 		ret = posix_socket_ioctl(sock, req, (void *)arg1);
 		uk_file_runlock(sock);
@@ -215,6 +244,7 @@ static const struct uk_file_ops socket_file_ops = {
 	.mem = uk_file_nop_mem,
 	.getstat = socket_getstat,
 	.setstat = uk_file_nop_setstat,
+	.io_timeout = socket_io_timeout,
 	.ctl = socket_ctl
 };
 
@@ -239,11 +269,14 @@ static void socket_release(const struct uk_file *sock, int what)
 
 
 static void _socket_init(struct socket_alloc *al,
-			 struct posix_socket_driver *d, void *sock_data)
+			 struct posix_socket_driver *d, void *sock_data,
+			 bool write_sigpipe)
 {
 	al->node = (struct posix_socket_node){
 		.sock_data = sock_data,
-		.driver = d
+		.driver = d,
+		.receive_timeout_ms = __U64_MAX,
+		.send_timeout_ms = __U64_MAX
 	};
 #if CONFIG_LIBPOSIX_SOCKET_POLLED
 	if (d->ops->poll)
@@ -257,6 +290,8 @@ static void _socket_init(struct socket_alloc *al,
 		.vol = POSIX_SOCKET_VOLID,
 		.node = &al->node,
 		.ops = &socket_file_ops,
+		.write_sigpipe = write_sigpipe,
+		.nofault_io = d->ops->nofault_io,
 		.refcnt = &al->fref,
 		.state = &al->fstate,
 		._release = socket_release
@@ -285,7 +320,8 @@ struct uk_file *uk_socket_create(int family, int type, int protocol)
 		return sock_data;
 	}
 
-	_socket_init(al, d, sock_data);
+	_socket_init(al, d, sock_data,
+		     (type & ~(SOCK_NONBLOCK | SOCK_CLOEXEC)) == SOCK_STREAM);
 	uk_socket_evd_init(&al->evd, family, type, protocol);
 	uk_socket_event_raise(&al->evd, CREATE);
 	return &al->f;
@@ -339,6 +375,7 @@ const struct uk_file *uk_socket_accept(const struct uk_file *sock, int blocking,
 				       socklen_t *addr_len, int flags)
 {
 	void *new_data;
+	struct uk_fdio_wait_context wait;
 	struct socket_alloc *al;
 	struct socket_alloc *al_listener __maybe_unused;
 	struct posix_socket_node *n = (struct posix_socket_node *)sock->node;
@@ -347,14 +384,17 @@ const struct uk_file *uk_socket_accept(const struct uk_file *sock, int blocking,
 	if (unlikely(!al))
 		return ERR2PTR(-ENOMEM);
 
+	wait = uk_fdio_wait_init(sock, UKFD_POLLIN);
+
 	for (;;) {
+		uk_fdio_wait_snapshot(&wait);
 		uk_file_rlock(sock);
 		new_data = posix_socket_accept4(sock, addr, addr_len, flags);
 		uk_file_runlock(sock);
 		if (!blocking ||
 		    !PTRISERR(new_data) || !_ERR_BLOCK(PTR2ERR(new_data)))
 			break;
-		int rc = uk_fdio_wait(sock, UKFD_POLLIN | UKFD_POLL_ALWAYS);
+		int rc = uk_fdio_wait(&wait);
 
 		if (rc < 0) {
 			new_data = ERR2PTR(rc);
@@ -366,7 +406,7 @@ const struct uk_file *uk_socket_accept(const struct uk_file *sock, int blocking,
 		return new_data;
 	}
 
-	_socket_init(al, n->driver, new_data);
+	_socket_init(al, n->driver, new_data, sock->write_sigpipe);
 
 	al_listener = __containerof(sock, struct socket_alloc, f);
 #if CONFIG_LIBPOSIX_SOCKET_EVENTS
@@ -379,40 +419,78 @@ const struct uk_file *uk_socket_accept(const struct uk_file *sock, int blocking,
 }
 
 #if CONFIG_LIBPOSIX_FDTAB
+static int socket_address_copy(const struct sockaddr_storage *address,
+			       socklen_t length, struct sockaddr *user,
+			       socklen_t *user_length);
+
 int uk_sys_accept(const struct uk_file *sock, int blocking,
 		  struct sockaddr *addr, socklen_t *addr_len, int flags)
 {
-	int fd;
+	struct uk_fdtab_reservation *reservation;
+	struct sockaddr_storage address = {0};
+	socklen_t length = sizeof(address);
 	const struct uk_file *sockfile;
+	struct uk_ofile *opened;
 	unsigned int mode = SOCKET_MODE;
-	struct socket_alloc *al __maybe_unused;
+	int result;
 
-	al = __containerof(sock, struct socket_alloc, f);
-
-	sockfile = uk_socket_accept(sock, blocking, addr, addr_len, flags);
-	if (unlikely(PTRISERR(sockfile)))
-		return PTR2ERR(sockfile);
-
+	if (flags & ~(SOCK_NONBLOCK | SOCK_CLOEXEC))
+		return -EINVAL;
 	if (flags & SOCK_NONBLOCK)
 		mode |= O_NONBLOCK;
 	if (flags & SOCK_CLOEXEC)
 		mode |= O_CLOEXEC;
-	fd = uk_fdtab_open_named(sockfile, mode, POSIX_SOCKET_ACCT_FNAME,
-				 POSIX_SOCKET_ACCT_FNAME_LEN);
-	uk_file_release(sockfile);
-	if (fd >= 0)
+	reservation = uk_fdtab_reserve(mode);
+	if (PTRISERR(reservation))
+		return PTR2ERR(reservation);
+	if (sock->vol != POSIX_SOCKET_VOLID) {
+		result = -ENOTSOCK;
+		goto cancel;
+	}
+	opened = uk_malloc(uk_alloc_get_default(),
+			   UKFD_OFILE_SIZE(POSIX_SOCKET_ACCT_FNAME_LEN));
+	if (!opened) {
+		result = -ENOMEM;
+		goto cancel;
+	}
+	sockfile = uk_socket_accept(sock, blocking, (struct sockaddr *)&address,
+				    &length, flags);
+	if (PTRISERR(sockfile)) {
+		result = PTR2ERR(sockfile);
+		uk_free(uk_alloc_get_default(), opened);
+		goto cancel;
+	}
+	uk_ofile_init(opened, sockfile, mode | UKFD_O_NAMED);
+	memcpy(opened->name, POSIX_SOCKET_ACCT_FNAME,
+	       sizeof(POSIX_SOCKET_ACCT_FNAME));
+	if (addr) {
+		result = socket_address_copy(&address, length, addr, addr_len);
+		if (result) {
+			uk_ofile_release(opened);
+			goto cancel;
+		}
+	}
+	result = uk_fdtab_install(reservation, opened, NULL);
+	reservation = NULL;
+	if (result < 0) {
+		uk_ofile_release(opened);
+	} else {
+		struct socket_alloc *al __maybe_unused;
+
+		al = __containerof(sock, struct socket_alloc, f);
 		uk_socket_event_raise(&al->evd, ACCEPT);
-	return fd;
+	}
+cancel:
+	uk_fdtab_cancel(reservation);
+	return result;
 }
 
-
 UK_TRACEPOINT(trace_posix_socket_accept, "%d %p %p", int,
-		struct sockaddr *restrict, socklen_t *restrict);
+	      struct sockaddr *restrict, socklen_t *restrict);
 UK_TRACEPOINT(trace_posix_socket_accept_ret, "%d", int);
 UK_TRACEPOINT(trace_posix_socket_accept_err, "%d", int);
 
-int do_accept4(int sock, struct sockaddr *addr, socklen_t *addr_len,
-	       int flags)
+int do_accept4(int sock, struct sockaddr *addr, socklen_t *addr_len, int flags)
 {
 	int ret;
 	unsigned int mode;
@@ -420,15 +498,20 @@ int do_accept4(int sock, struct sockaddr *addr, socklen_t *addr_len,
 
 	trace_posix_socket_accept(sock, addr, addr_len);
 
-	of = socketfd_get(sock);
-	if (unlikely(PTRISERR(of))) {
-		ret = PTR2ERR(of);
+	of = uk_fdtab_get(sock);
+	if (!of) {
+		ret = -EBADF;
 		goto out;
 	}
 
+	if (of->mode & O_PATH) {
+		ret = -EBADF;
+		uk_ofile_release(of);
+		goto out;
+	}
 	mode = of->mode;
-	ret = uk_sys_accept(of->file, _SHOULD_BLOCK(mode),
-			    addr, addr_len, flags);
+	ret =
+	    uk_sys_accept(of->file, _SHOULD_BLOCK(mode), addr, addr_len, flags);
 	uk_ofile_release(of);
 
 out:
@@ -451,6 +534,49 @@ UK_SYSCALL_R_DEFINE(int, accept4, int, sock, struct sockaddr *, addr,
 	return do_accept4(sock, addr, addr_len, flags);
 }
 
+static struct uk_ofile *socket_address_get(int fd,
+					   struct sockaddr_storage *address,
+					   const struct sockaddr *user,
+					   socklen_t length)
+{
+	struct uk_ofile *of = socketfd_get(fd);
+	int error = 0;
+
+	if (PTRISERR(of))
+		return of;
+	if (length > sizeof(*address))
+		error = -EINVAL;
+	else if (uk_nofault_memcpy((char *)address, (const char *)user, length,
+				   0) != length)
+		error = -EFAULT;
+	if (error) {
+		uk_ofile_release(of);
+		return ERR2PTR(error);
+	}
+	return of;
+}
+
+static int socket_address_copy(const struct sockaddr_storage *address,
+			       socklen_t length, struct sockaddr *user,
+			       socklen_t *user_length)
+{
+	socklen_t capacity;
+
+	UK_ASSERT(length <= sizeof(*address));
+	if (uk_nofault_memcpy((char *)&capacity, (const char *)user_length,
+			      sizeof(capacity), 0) != sizeof(capacity))
+		return -EFAULT;
+	if (capacity > INT_MAX)
+		return -EINVAL;
+	if (uk_nofault_memcpy((char *)user_length, (const char *)&length,
+			      sizeof(length), 0) != sizeof(length))
+		return -EFAULT;
+	length = MIN(capacity, length);
+	if (uk_nofault_memcpy((char *)user, (const char *)address, length, 0)
+	    != length)
+		return -EFAULT;
+	return 0;
+}
 
 UK_TRACEPOINT(trace_posix_socket_bind, "%d %p %d",
 	      int, const struct sockaddr *, socklen_t);
@@ -462,20 +588,19 @@ UK_SYSCALL_R_DEFINE(int, bind, int, sock, const struct sockaddr *, addr,
 {
 	int ret;
 	struct uk_ofile *of;
+	struct sockaddr_storage address = {0};
 
 	trace_posix_socket_bind(sock, addr, addr_len);
 
-	if (unlikely(!addr))
-		return -EFAULT;
-
-	of = socketfd_get(sock);
+	of = socket_address_get(sock, &address, addr, addr_len);
 	if (unlikely(PTRISERR(of))) {
 		ret = PTR2ERR(of);
 		goto out;
 	}
 
 	uk_file_wlock(of->file);
-	ret = posix_socket_bind(of->file, addr, addr_len);
+	ret = posix_socket_bind(of->file,
+				(const struct sockaddr *)&address, addr_len);
 	uk_file_wunlock(of->file);
 
 out:
@@ -485,7 +610,9 @@ out:
 		struct socket_alloc *al __maybe_unused;
 
 		al = __containerof(of->file, struct socket_alloc, f);
-		uk_socket_evd_laddr_set(&al->evd, addr, addr_len);
+		uk_socket_evd_laddr_set(&al->evd,
+					(const struct sockaddr *)&address,
+					addr_len);
 		uk_socket_event_raise(&al->evd, BIND);
 		trace_posix_socket_bind_ret(ret);
 	}
@@ -507,14 +634,15 @@ UK_SYSCALL_R_DEFINE(int, shutdown, int, sock, int, how)
 
 	trace_posix_socket_shutdown(sock, how);
 
-	if (unlikely(!(how == SHUT_RD || how == SHUT_WR || how == SHUT_RDWR))) {
-		ret = -EINVAL;
-		goto out;
-	}
-
 	of = socketfd_get(sock);
 	if (unlikely(PTRISERR(of))) {
 		ret = PTR2ERR(of);
+		goto out;
+	}
+
+	if (unlikely(!(how == SHUT_RD || how == SHUT_WR || how == SHUT_RDWR))) {
+		uk_ofile_release(of);
+		ret = -EINVAL;
 		goto out;
 	}
 
@@ -531,8 +659,28 @@ out:
 	return ret;
 }
 
-UK_TRACEPOINT(trace_posix_socket_getpeername, "%d %p %d", int,
-		struct sockaddr *restrict, socklen_t *restrict);
+static int socket_name(int fd, struct sockaddr *user, socklen_t *user_length,
+		       bool peer)
+{
+	struct uk_ofile *of = socketfd_get(fd);
+	struct sockaddr_storage address = {0};
+	struct sockaddr *output = (struct sockaddr *)&address;
+	socklen_t length = sizeof(address);
+	int ret;
+
+	if (PTRISERR(of))
+		return PTR2ERR(of);
+	uk_file_rlock(of->file);
+	ret = peer ? posix_socket_getpeername(of->file, output, &length) :
+		     posix_socket_getsockname(of->file, output, &length);
+	uk_file_runlock(of->file);
+	uk_ofile_release(of);
+	return ret ? ret : socket_address_copy(&address, length,
+					      user, user_length);
+}
+
+UK_TRACEPOINT(trace_posix_socket_getpeername, "%d %p %p", int,
+	      struct sockaddr *restrict, socklen_t *restrict);
 UK_TRACEPOINT(trace_posix_socket_getpeername_ret, "%d", int);
 UK_TRACEPOINT(trace_posix_socket_getpeername_err, "%d", int);
 
@@ -541,22 +689,10 @@ UK_SYSCALL_R_DEFINE(int, getpeername, int, sock,
 		    socklen_t *restrict, addr_len)
 {
 	int ret;
-	struct uk_ofile *of;
 
 	trace_posix_socket_getpeername(sock, addr, addr_len);
+	ret = socket_name(sock, addr, addr_len, true);
 
-	of = socketfd_get(sock);
-	if (unlikely(PTRISERR(of))) {
-		ret = PTR2ERR(of);
-		goto out;
-	}
-
-	uk_file_rlock(of->file);
-	ret = posix_socket_getpeername(of->file, addr, addr_len);
-	uk_file_runlock(of->file);
-	uk_ofile_release(of);
-
-out:
 	if (ret)
 		trace_posix_socket_getpeername_err(ret);
 	else
@@ -574,27 +710,93 @@ UK_SYSCALL_R_DEFINE(int, getsockname, int, sock,
 		    socklen_t *restrict, addr_len)
 {
 	int ret;
-	struct uk_ofile *of;
 
 	trace_posix_socket_getsockname(sock, addr, addr_len);
+	ret = socket_name(sock, addr, addr_len, false);
 
-	of = socketfd_get(sock);
-	if (unlikely(PTRISERR(of))) {
-		ret = PTR2ERR(of);
-		goto out;
-	}
-
-	uk_file_rlock(of->file);
-	ret = posix_socket_getsockname(of->file, addr, addr_len);
-	uk_file_runlock(of->file);
-	uk_ofile_release(of);
-
-out:
 	if (ret)
 		trace_posix_socket_getsockname_err(ret);
 	else
 		trace_posix_socket_getsockname_ret(ret);
 	return ret;
+}
+
+#define LINUX_SO_RCVTIMEO_NEW 66
+#define LINUX_SO_SNDTIMEO_NEW 67
+
+static bool socket_timeout_option(int level, int name)
+{
+	return level == SOL_SOCKET &&
+	       (name == SO_RCVTIMEO || name == SO_SNDTIMEO ||
+		name == LINUX_SO_RCVTIMEO_NEW || name == LINUX_SO_SNDTIMEO_NEW);
+}
+
+static __u64 *socket_timeout_value(posix_sock *sock, int name)
+{
+	struct posix_socket_node *node = posix_sock_get_node(sock);
+
+	return name == SO_RCVTIMEO || name == LINUX_SO_RCVTIMEO_NEW
+		   ? &node->receive_timeout_ms
+		   : &node->send_timeout_ms;
+}
+
+static int socket_timeout_get(posix_sock *sock, int name, void *value,
+			      socklen_t *length)
+{
+	__u64 milliseconds = *socket_timeout_value(sock, name);
+	struct timeval timeout = {0};
+	size_t size = MIN(*length, sizeof(timeout));
+
+	if (milliseconds != __U64_MAX) {
+		timeout.tv_sec = milliseconds / 1000;
+		timeout.tv_usec = (milliseconds % 1000) * 1000;
+	}
+	if (uk_nofault_memcpy(value, (const char *)&timeout, size, 0) != size)
+		return -EFAULT;
+	*length = size;
+	return 0;
+}
+
+static int socket_timeout_set(posix_sock *sock, int name, const void *value,
+			      socklen_t length)
+{
+	struct timeval timeout;
+	__u64 milliseconds;
+	int initial;
+
+	if (length < sizeof(initial))
+		return -EINVAL;
+	if (!uk_nofault_try_read(initial, value))
+		return -EFAULT;
+	if (length < sizeof(timeout))
+		return -EINVAL;
+	if (!uk_nofault_try_read(timeout, value))
+		return -EFAULT;
+	if (timeout.tv_usec < 0 || timeout.tv_usec >= 1000000)
+		return -EDOM;
+	if (timeout.tv_sec < 0)
+		milliseconds = 0;
+	else if ((!timeout.tv_sec && !timeout.tv_usec) ||
+		 (__u64)timeout.tv_sec >= __S64_MAX / 1000 - 1)
+		milliseconds = __U64_MAX;
+	else
+		milliseconds = (__u64)timeout.tv_sec * 1000 +
+			       (timeout.tv_usec + 999) / 1000;
+	struct posix_socket_node *node = posix_sock_get_node(sock);
+	const struct posix_socket_ops *ops = node->driver->ops;
+
+	if (ops->timeout_update) {
+		enum posix_socket_timeout direction =
+		    name == SO_RCVTIMEO || name == LINUX_SO_RCVTIMEO_NEW
+			? POSIX_SOCKET_TIMEOUT_RECEIVE
+			: POSIX_SOCKET_TIMEOUT_SEND;
+		int rc = ops->timeout_update(sock, direction, milliseconds);
+
+		if (rc)
+			return rc;
+	}
+	*socket_timeout_value(sock, name) = milliseconds;
+	return 0;
 }
 
 UK_TRACEPOINT(trace_posix_socket_getsockopt, "%d %d %d %p %d",
@@ -626,8 +828,10 @@ UK_SYSCALL_R_DEFINE(int, getsockopt, int, sock, int, level, int, optname,
 		goto release;
 	}
 	uk_file_rlock(of->file);
-	ret = posix_socket_getsockopt(of->file, level, optname,
-				      optval, &length);
+	ret = socket_timeout_option(level, optname) ?
+		socket_timeout_get(of->file, optname, optval, &length) :
+		posix_socket_getsockopt(of->file, level, optname,
+					optval, &length);
 	uk_file_runlock(of->file);
 	if (!ret && !uk_nofault_try_write(length, optlen))
 		ret = -EFAULT;
@@ -667,7 +871,10 @@ UK_SYSCALL_R_DEFINE(int, setsockopt, int, sock, int, level, int, optname,
 		goto out;
 	}
 	uk_file_wlock(of->file);
-	ret = posix_socket_setsockopt(of->file, level, optname, optval, optlen);
+	ret = socket_timeout_option(level, optname) ?
+		socket_timeout_set(of->file, optname, optval, optlen) :
+		posix_socket_setsockopt(of->file, level, optname,
+					optval, optlen);
 	uk_file_wunlock(of->file);
 	uk_ofile_release(of);
 
@@ -689,27 +896,31 @@ UK_SYSCALL_R_DEFINE(int, connect, int, sock, const struct sockaddr *, addr,
 {
 	int ret;
 	unsigned int mode;
+	struct uk_fdio_wait_context wait;
 	struct uk_ofile *of;
+	struct sockaddr_storage address = {0};
 
 	trace_posix_socket_connect(sock, addr, addr_len);
 
-	if (unlikely(!addr))
-		return -EFAULT;
-
-	of = socketfd_get(sock);
+	of = socket_address_get(sock, &address, addr, addr_len);
 	if (unlikely(PTRISERR(of))) {
 		ret = PTR2ERR(of);
 		goto out;
 	}
 
 	mode = of->mode;
+	wait = uk_fdio_wait_init(of->file, UKFD_POLLOUT);
+	uk_fdio_wait_snapshot(&wait);
 	uk_file_wlock(of->file);
-	ret = posix_socket_connect(of->file, addr, addr_len);
+	ret = posix_socket_connect(of->file,
+				   (const struct sockaddr *)&address, addr_len);
 	uk_file_wunlock(of->file);
 	if (ret == -EINPROGRESS && _SHOULD_BLOCK(mode)) {
 		socklen_t _opsz = sizeof(ret);
 
-		ret = uk_fdio_wait(of->file, UKFD_POLLOUT | UKFD_POLL_ALWAYS);
+		ret = uk_fdio_wait(&wait);
+		if (ret == -EAGAIN)
+			ret = -EINPROGRESS;
 		if (!ret) {
 			int error;
 
@@ -729,7 +940,9 @@ out:
 		struct socket_alloc *al __maybe_unused;
 
 		al = __containerof(of->file, struct socket_alloc, f);
-		uk_socket_evd_raddr_set(&al->evd, addr, addr_len);
+		uk_socket_evd_raddr_set(&al->evd,
+					(const struct sockaddr *)&address,
+					addr_len);
 		uk_socket_event_raise(&al->evd, CONNECT);
 		trace_posix_socket_connect_ret(ret);
 	}
@@ -778,6 +991,22 @@ out:
 }
 
 
+static bool socket_io_retry(const struct uk_fdio_wait_context *wait,
+			    unsigned int mode, int flags, ssize_t *result)
+{
+	int rc;
+
+	if (!_SHOULD_BLOCK(mode) || (flags & MSG_DONTWAIT) ||
+	    !_ERR_BLOCK(*result))
+		return false;
+	rc = uk_fdio_wait(wait);
+	if (rc < 0) {
+		*result = rc;
+		return false;
+	}
+	return true;
+}
+
 UK_TRACEPOINT(trace_posix_socket_recvfrom, "%d %p %d %d %p %p",
 	      int, struct sockaddr *, size_t, int, void *, socklen_t *);
 UK_TRACEPOINT(trace_posix_socket_recvfrom_ret, "%d", int);
@@ -788,12 +1017,12 @@ UK_SYSCALL_R_DEFINE(ssize_t, recvfrom, int, sock, void *, buf, size_t, len,
 {
 	ssize_t ret;
 	unsigned int mode;
+	struct uk_fdio_wait_context wait;
 	struct uk_ofile *of;
+	struct sockaddr_storage address = {0};
+	socklen_t address_length;
 
 	trace_posix_socket_recvfrom(sock, buf, len, flags, from, fromlen);
-
-	if (unlikely(!buf))
-		return -EFAULT;
 
 	of = socketfd_get(sock);
 	if (unlikely(PTRISERR(of))) {
@@ -802,21 +1031,26 @@ UK_SYSCALL_R_DEFINE(ssize_t, recvfrom, int, sock, void *, buf, size_t, len,
 	}
 
 	mode = of->mode;
+	if (mode & O_NONBLOCK)
+		flags |= MSG_DONTWAIT;
+	wait = uk_fdio_wait_init(of->file, UKFD_POLLIN);
 	for (;;) {
+		address_length = sizeof(address);
+		uk_fdio_wait_snapshot(&wait);
 		uk_file_rlock(of->file);
 		ret = posix_socket_recvfrom(of->file, buf, len, flags,
-					    from, fromlen);
+			from ? (struct sockaddr *)&address : NULL,
+			from ? &address_length : NULL);
 		uk_file_runlock(of->file);
-		if (!_SHOULD_BLOCK(mode) ||
-		    (flags & MSG_DONTWAIT) ||
-		    !_ERR_BLOCK(ret))
+		if (!socket_io_retry(&wait, mode, flags, &ret))
 			break;
-		int rc = uk_fdio_wait(of->file, UKFD_POLLIN | UKFD_POLL_ALWAYS);
+	}
+	if (ret >= 0 && from) {
+		int error = socket_address_copy(&address, address_length,
+						from, fromlen);
 
-		if (rc < 0) {
-			ret = rc;
-			break;
-		}
+		if (error)
+			ret = error;
 	}
 	uk_ofile_release(of);
 
@@ -836,6 +1070,139 @@ ssize_t recv(int sock, void *buf, size_t len, int flags)
 }
 #endif /* UK_LIBC_SYSCALLS */
 
+struct socket_message {
+	struct msghdr header;
+	void *address_user;
+	socklen_t address_capacity;
+	struct sockaddr_storage address;
+	struct iovec empty;
+	struct iovec *vectors;
+	void *control;
+};
+
+static struct uk_ofile *socket_message_get(int fd, const struct msghdr *user,
+					   struct socket_message *message,
+					   bool send)
+{
+	struct uk_ofile *of = socketfd_get(fd);
+	struct msghdr *header = &message->header;
+	size_t metadata, total = 0;
+	int error = -EFAULT;
+
+	memset(message, 0, sizeof(*message));
+	if (PTRISERR(of))
+		return of;
+	if (uk_nofault_memcpy((char *)header, (const char *)user,
+			      sizeof(*header), 0) != sizeof(*header))
+		goto fail;
+	if (!send) {
+		message->address_user = header->msg_name;
+		message->address_capacity = header->msg_namelen;
+		header->msg_name =
+			message->address_user ? &message->address : NULL;
+		header->msg_namelen =
+			message->address_user ? sizeof(message->address) : 0;
+		header->msg_flags = 0;
+	} else {
+		if (header->msg_name && header->msg_namelen) {
+			if (header->msg_namelen > INT_MAX) {
+				error = -EINVAL;
+				goto fail;
+			}
+			header->msg_namelen =
+			    MIN(header->msg_namelen, sizeof(message->address));
+			if (uk_nofault_memcpy((char *)&message->address,
+					      (const char *)header->msg_name,
+					      header->msg_namelen,
+					      0) != header->msg_namelen)
+				goto fail;
+			header->msg_name = &message->address;
+		} else {
+			header->msg_name = NULL;
+			header->msg_namelen = 0;
+		}
+	}
+	if (header->msg_iovlen > 1024) {
+		error = -EMSGSIZE;
+		goto fail;
+	}
+	if (header->msg_iovlen) {
+		metadata = header->msg_iovlen * sizeof(struct iovec);
+		message->vectors = uk_malloc(uk_alloc_get_default(), metadata);
+		if (!message->vectors) {
+			error = -ENOMEM;
+			goto fail;
+		}
+		if (uk_nofault_memcpy((char *)message->vectors,
+				      (const char *)header->msg_iov, metadata,
+				      0) != metadata)
+			goto fail;
+		for (size_t index = 0; index < header->msg_iovlen; index++) {
+			if (message->vectors[index].iov_len >
+			    __SSZ_MAX - total) {
+				error = -EINVAL;
+				goto fail;
+			}
+			total += message->vectors[index].iov_len;
+		}
+		header->msg_iov = message->vectors;
+	} else {
+		header->msg_iov = &message->empty;
+	}
+	if (send && header->msg_controllen) {
+		if (header->msg_controllen > INT_MAX) {
+			error = -ENOBUFS;
+			goto fail;
+		}
+		message->control = uk_malloc(uk_alloc_get_default(),
+					     header->msg_controllen);
+		if (!message->control) {
+			error = -ENOBUFS;
+			goto fail;
+		}
+		if (uk_nofault_memcpy(message->control, header->msg_control,
+				      header->msg_controllen,
+				      0) != header->msg_controllen)
+			goto fail;
+		header->msg_control = message->control;
+	}
+	return of;
+fail:
+	uk_free(uk_alloc_get_default(), message->control);
+	uk_free(uk_alloc_get_default(), message->vectors);
+	uk_ofile_release(of);
+	return ERR2PTR(error);
+}
+
+static void socket_message_put(struct uk_ofile *of,
+			       struct socket_message *message)
+{
+	uk_free(uk_alloc_get_default(), message->control);
+	uk_free(uk_alloc_get_default(), message->vectors);
+	uk_ofile_release(of);
+}
+
+static ssize_t socket_message_io(struct uk_ofile *of, struct msghdr *header,
+				 int flags, bool send)
+{
+	struct uk_fdio_wait_context wait = uk_fdio_wait_init(of->file,
+					send ? UKFD_POLLOUT : UKFD_POLLIN);
+	ssize_t ret;
+
+	if (!send && (of->mode & O_NONBLOCK))
+		flags |= MSG_DONTWAIT;
+	for (;;) {
+		uk_fdio_wait_snapshot(&wait);
+		uk_file_rlock(of->file);
+		ret = send ? posix_socket_sendmsg(of->file, header, flags) :
+			posix_socket_recvmsg(of->file, header, flags);
+		uk_file_runlock(of->file);
+		if (!socket_io_retry(&wait, of->mode, flags, &ret))
+			break;
+	}
+	return ret;
+}
+
 UK_TRACEPOINT(trace_posix_socket_recvmsg, "%d %p %d", int, struct msghdr*, int);
 UK_TRACEPOINT(trace_posix_socket_recvmsg_ret, "%d", int);
 UK_TRACEPOINT(trace_posix_socket_recvmsg_err, "%d", int);
@@ -843,44 +1210,55 @@ UK_TRACEPOINT(trace_posix_socket_recvmsg_err, "%d", int);
 UK_SYSCALL_R_DEFINE(ssize_t, recvmsg, int, sock, struct msghdr *, msg,
 		    int, flags)
 {
+	struct socket_message message;
+	struct msghdr *header = &message.header;
 	ssize_t ret;
-	unsigned int mode;
 	struct uk_ofile *of;
 
 	trace_posix_socket_recvmsg(sock, msg, flags);
 
-	if (unlikely(!msg || !msg->msg_iov))
-		return -EFAULT;
-
-	of = socketfd_get(sock);
+	of = socket_message_get(sock, msg, &message, false);
 	if (unlikely(PTRISERR(of))) {
 		ret = PTR2ERR(of);
 		goto out;
 	}
 
-	mode = of->mode;
-	for (;;) {
-		uk_file_rlock(of->file);
-		ret = posix_socket_recvmsg(of->file, msg, flags);
-		uk_file_runlock(of->file);
-		if (!_SHOULD_BLOCK(mode) ||
-		    (flags & MSG_DONTWAIT) ||
-		    !_ERR_BLOCK(ret))
-			break;
-		int rc = uk_fdio_wait(of->file, UKFD_POLLIN | UKFD_POLL_ALWAYS);
+	ret = socket_message_io(of, header, flags, false);
+	if (ret >= 0 && message.address_user) {
+		size_t length =
+			MIN(message.address_capacity,
+			    MIN(header->msg_namelen, sizeof(message.address)));
 
-		if (rc < 0) {
-			ret = rc;
-			break;
-		}
+		if (uk_nofault_memcpy(message.address_user,
+				      (const char *)&message.address, length,
+				      0) != length)
+			ret = -EFAULT;
 	}
-	uk_ofile_release(of);
+	if (ret >= 0 &&
+	    (!uk_nofault_try_write(header->msg_namelen, &msg->msg_namelen) ||
+	     !uk_nofault_try_write(header->msg_controllen,
+				   &msg->msg_controllen) ||
+	     !uk_nofault_try_write(header->msg_flags, &msg->msg_flags)))
+		ret = -EFAULT;
+	socket_message_put(of, &message);
 
 out:
 	if (ret < 0 && ret != -EAGAIN)
 		trace_posix_socket_recvmsg_err(ret);
 	else
 		trace_posix_socket_recvmsg_ret(ret);
+	return ret;
+}
+
+static ssize_t socket_send_result(ssize_t ret, bool write_sigpipe, int flags)
+{
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+	if (ret == -EPIPE && write_sigpipe && !(flags & MSG_NOSIGNAL))
+		(void)uk_posix_signal_current(SIGPIPE);
+#else
+	(void)write_sigpipe;
+	(void)flags;
+#endif
 	return ret;
 }
 
@@ -892,39 +1270,23 @@ UK_TRACEPOINT(trace_posix_socket_sendmsg_err, "%d", int);
 UK_SYSCALL_R_DEFINE(ssize_t, sendmsg, int, sock, const struct msghdr *, msg,
 		    int, flags)
 {
+	struct socket_message message;
 	ssize_t ret;
-	unsigned int mode;
+	bool write_sigpipe;
 	struct uk_ofile *of;
 
 	trace_posix_socket_sendmsg(sock, msg, flags);
 
-	if (unlikely(!msg || !msg->msg_iov))
-		return -EFAULT;
-
-	of = socketfd_get(sock);
+	of = socket_message_get(sock, msg, &message, true);
 	if (unlikely(PTRISERR(of))) {
 		ret = PTR2ERR(of);
 		goto out;
 	}
 
-	mode = of->mode;
-	for (;;) {
-		uk_file_rlock(of->file);
-		ret = posix_socket_sendmsg(of->file, msg, flags);
-		uk_file_runlock(of->file);
-		if (!_SHOULD_BLOCK(mode) ||
-		    (flags & MSG_DONTWAIT) ||
-		    !_ERR_BLOCK(ret))
-			break;
-		int rc = uk_fdio_wait(of->file,
-				      UKFD_POLLOUT | UKFD_POLL_ALWAYS);
-
-		if (rc < 0) {
-			ret = rc;
-			break;
-		}
-	}
-	uk_ofile_release(of);
+	ret = socket_message_io(of, &message.header, flags, true);
+	write_sigpipe = of->file->write_sigpipe;
+	socket_message_put(of, &message);
+	ret = socket_send_result(ret, write_sigpipe, flags);
 
 out:
 	if (ret < 0 && ret != -EAGAIN)
@@ -941,43 +1303,40 @@ UK_TRACEPOINT(trace_posix_socket_sendto_ret, "%d", int);
 UK_TRACEPOINT(trace_posix_socket_sendto_err, "%d", int);
 
 UK_SYSCALL_R_DEFINE(ssize_t, sendto, int, sock, const void *, buf, size_t, len,
-		    int, flags, const struct sockaddr *, dest_addr,
-		    socklen_t, addrlen)
+		    int, flags, const struct sockaddr *, dest_addr, socklen_t,
+		    addrlen)
 {
 	ssize_t ret;
 	unsigned int mode;
+	bool write_sigpipe;
+	struct uk_fdio_wait_context wait;
 	struct uk_ofile *of;
+	struct sockaddr_storage address = {0};
 
 	trace_posix_socket_sendto(sock, buf, len, flags, dest_addr, addrlen);
 
-	if (unlikely(!buf))
-		return -EFAULT;
-
-	of = socketfd_get(sock);
+	of = dest_addr ? socket_address_get(sock, &address, dest_addr, addrlen)
+		       : socketfd_get(sock);
 	if (unlikely(PTRISERR(of))) {
 		ret = PTR2ERR(of);
 		goto out;
 	}
 
 	mode = of->mode;
+	wait = uk_fdio_wait_init(of->file, UKFD_POLLOUT);
 	for (;;) {
+		uk_fdio_wait_snapshot(&wait);
 		uk_file_rlock(of->file);
 		ret = posix_socket_sendto(of->file, buf, len, flags,
-					  dest_addr, addrlen);
+		    dest_addr ? (const struct sockaddr *)&address : NULL,
+		    dest_addr ? addrlen : 0);
 		uk_file_runlock(of->file);
-		if (!_SHOULD_BLOCK(mode) ||
-		    (flags & MSG_DONTWAIT) ||
-		    !_ERR_BLOCK(ret))
+		if (!socket_io_retry(&wait, mode, flags, &ret))
 			break;
-		int rc = uk_fdio_wait(of->file,
-				      UKFD_POLLOUT | UKFD_POLL_ALWAYS);
-
-		if (rc < 0) {
-			ret = rc;
-			break;
-		}
 	}
+	write_sigpipe = of->file->write_sigpipe;
 	uk_ofile_release(of);
+	ret = socket_send_result(ret, write_sigpipe, flags);
 
 out:
 	if (ret < 0 && ret != -EAGAIN)
@@ -991,7 +1350,7 @@ out:
 /* Provide wrapper (if not provided by Musl) or some other libc. */
 ssize_t send(int sock, const void *buf, size_t len, int flags)
 {
-	return uk_syscall_e_sendto(sock, (long) buf, len, flags, (long) NULL, 0);
+	return uk_syscall_e_sendto(sock, (long)buf, len, flags, (long)NULL, 0);
 }
 #endif /* UK_LIBC_SYSCALLS */
 
@@ -1020,9 +1379,11 @@ int uk_socketpair_create(int family, int type, int protocol,
 	if (unlikely(ret))
 		goto err_free;
 
-	_socket_init(al[0], d, sock_data[0]);
+	_socket_init(al[0], d, sock_data[0],
+		     (type & ~(SOCK_NONBLOCK | SOCK_CLOEXEC)) == SOCK_STREAM);
 	uk_socket_evd_init(&al[0]->evd, family, type, protocol);
-	_socket_init(al[1], d, sock_data[1]);
+	_socket_init(al[1], d, sock_data[1],
+		     (type & ~(SOCK_NONBLOCK | SOCK_CLOEXEC)) == SOCK_STREAM);
 	uk_socket_evd_init(&al[1]->evd, family, type, protocol);
 	sv[0] = &al[0]->f;
 	sv[1] = &al[1]->f;

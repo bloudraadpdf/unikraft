@@ -15,6 +15,7 @@ static int init_ukfile_pseudo_devfs(struct uk_init_ctx *ictx __unused)
 {
 	const union uk_fs_create_target null_target = { .file = &uk_file_null };
 	const union uk_fs_create_target zero_target = { .file = &uk_file_zero };
+	const union uk_fs_create_target full_target = { .file = &uk_file_full };
 	const void *r;
 
 	/* We borrow the singleton static reference, no refcounting needed */
@@ -33,6 +34,12 @@ static int init_ukfile_pseudo_devfs(struct uk_init_ctx *ictx __unused)
 			   0666, O_EXCL, zero_target);
 	if (unlikely(PTRISERR(r))) {
 		uk_pr_err("Failed to create /dev/zero: %d\n", PTR2ERR(r));
+		return PTR2ERR(r);
+	}
+	r = uk_fs_createat(uk_fs_devfs_root, "full", 4,
+			   0666, O_EXCL, full_target);
+	if (unlikely(PTRISERR(r))) {
+		uk_pr_err("Failed to create /dev/full: %d\n", PTR2ERR(r));
 		return PTR2ERR(r);
 	}
 	return 0;

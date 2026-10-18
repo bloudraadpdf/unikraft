@@ -1,6 +1,8 @@
 menuconfig LIBPOSIX_FUTEX
 	bool "posix-futex: Futex"
 	select LIBNOLIBC if !HAVE_LIBC
+	select LIBUKALLOC
+	select LIBUKNOFAULT
 	select LIBUKSCHED
 	select LIBUKLOCK
 	select LIBUKDEBUG
@@ -14,6 +16,11 @@ if LIBPOSIX_FUTEX
 config LIBPOSIX_FUTEX_DEBUG
 	bool "Enable debug messages"
 	default n
+
+config LIBPOSIX_FUTEX_CONTEXT_TEST
+	bool "Test futex queue and call ownership"
+	default n
+	select LIBUKTEST
 
 config LIBPOSIX_FUTEX_TEST
 	bool "Enable tests"

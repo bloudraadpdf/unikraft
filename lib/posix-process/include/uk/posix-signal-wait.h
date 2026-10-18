@@ -23,6 +23,8 @@ struct uk_posix_signal_wait {
 	bool masked;
 };
 
+int uk_posix_signal_current(int signum);
+
 int uk_posix_signal_wait_init(struct uk_posix_signal_wait *wait,
 			      struct uk_waitq *queue,
 			      const sigset_t *mask, size_t size);

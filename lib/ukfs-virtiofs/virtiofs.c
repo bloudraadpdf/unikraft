@@ -1429,7 +1429,7 @@ int virtiofs_nodecmp(struct viofs_node *a, struct viofs_node *b)
 }
 
 UK_FS_TMPL_LIVE_GENERATE_STATIC(virtiofs, struct viofs_node *, virtiofs_nodecmp,
-				virtiofs_liveops, 0, NULL);
+				virtiofs_liveops, 0, NULL, false);
 
 UK_FS_DRIVER_REGISTER(virtiofs, UK_FS_TMPL_LIVE_OP_VOPEN(virtiofs),
 		      UK_FS_VOPEN_VOL_RAW | UK_FS_VOPEN_DATA_IGNORE);

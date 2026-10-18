@@ -37,6 +37,9 @@
 #include <uk/lcpu.h>
 #include <uk/bitops.h>
 #include <arm/time.h>
+#if CONFIG_LIBUKRTC_PL031
+#include <uk/pl031.h>
+#endif
 
 static __u64 boot_ticks;
 static __u32 counter_freq;
@@ -205,7 +208,11 @@ static inline __nsec generic_timer_monotonic(void)
  */
 static inline __u64 generic_timer_epochoffset(void)
 {
+#if CONFIG_LIBUKRTC_PL031
+	return pl031_wall_clock_offset();
+#else
 	return 0;
+#endif
 }
 
 static inline __nsec generic_timer_monotonic_ticks(__u64 *ticks)

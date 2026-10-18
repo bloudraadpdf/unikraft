@@ -4,11 +4,21 @@
 
 #include <uk/list.h>
 #include <uk/mutex.h>
+#include <uk/refcount.h>
 #include <uk/vfs-path.h>
+
+struct vfs_mount {
+	const struct uk_file *root;
+	const struct uk_file *point;
+	struct vfs_mount *parent;
+	__atomic references;
+	bool attached;
+};
 
 struct uk_vfs_path {
 	struct uk_list_head link;
 	struct uk_vfs_path *parent;
+	struct vfs_mount *mount;
 	const struct uk_file *file;
 	char *name;
 	size_t length;
@@ -18,12 +28,14 @@ struct uk_vfs_path {
 
 extern struct uk_mutex vfs_namespace_lock;
 
+void vfs_mount_acquire(struct vfs_mount *mount);
+void vfs_mount_release(struct vfs_mount *mount);
 struct uk_vfs_path *vfs_path_get(struct uk_vfs_path *parent,
-				 const struct uk_file *file, const char *name, size_t length);
+				 struct vfs_mount *mount,
+				 const struct uk_file *file, const char *name,
+				 size_t length);
 struct uk_fs_path vfs_path_cwd_name(struct uk_vfs_path *path);
 struct uk_vfs_path *vfs_path_parent(struct uk_vfs_path *path);
-struct uk_vfs_path *vfs_path_find(const struct uk_file *file,
-				  const struct uk_fs_path *name);
 void vfs_path_unlinked(const struct uk_file *parent,
 		       const char *name, size_t length);
 struct vfs_path_move;

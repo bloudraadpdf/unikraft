@@ -32,7 +32,22 @@ int uk_fdio_poll(const struct uk_file *file, uk_pollevent events,
 		 __nsec deadline, struct uk_posix_signal_wait *wait);
 #endif
 
-int uk_fdio_wait(const struct uk_file *file, uk_pollevent events);
+struct uk_fdio_wait_context {
+	const struct uk_file *file;
+	uk_pollevent events;
+	__nsec deadline;
+	unsigned long generation;
+};
+
+struct uk_fdio_wait_context uk_fdio_wait_init(const struct uk_file *file,
+					      uk_pollevent events);
+
+static inline void uk_fdio_wait_snapshot(struct uk_fdio_wait_context *wait)
+{
+	wait->generation = uk_pollq_io_generation(&wait->file->state->pollq);
+}
+
+int uk_fdio_wait(const struct uk_fdio_wait_context *context);
 
 /* Internal syscalls */
 /* I/O */
@@ -91,6 +106,8 @@ int uk_sys_fcntl(struct uk_ofile *of, int cmd, unsigned long arg);
 
 int uk_sys_flock(struct uk_ofile *of, int cmd);
 
+int uk_sys_sync_file_range(struct uk_ofile *of, off_t offset, off_t length,
+			   unsigned int flags);
 int uk_sys_fsync(struct uk_ofile *of);
 
 int uk_sys_fdatasync(struct uk_ofile *of);

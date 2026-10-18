@@ -11,6 +11,7 @@
 #include <limits.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <time.h>
 
 #include <arch/signal.h>
 #include <uk/alloc.h>
@@ -67,14 +68,6 @@
 	 (KERN_SIGACTION(_pproc, _signum)->ks_handler == SIG_DFL &&	\
 	  UK_BIT(_signum) & SIGACT_IGN_MASK))
 
-/* Allocate and return `struct uk_signal` or NULL */
-#define uk_signal_alloc(_alloc)						\
-	uk_zalloc(_alloc, sizeof(struct uk_signal))
-
-/* Free a previously allocated `struct uk_signal` */
-#define uk_signal_free(_alloc, _sig)					\
-	uk_free(_alloc, _sig)
-
 /* Helper to get pointer to kern_sigaction from process,
  * for a given signal
  */
@@ -120,28 +113,87 @@ struct uk_sigaction {
  * instruction, and more. The individual fields of
  * `siginfo_t` are described in `man siginfo_t`.
  */
+struct uk_signal;
+
+enum uk_signal_dequeue_reason {
+	UK_SIGNAL_CONSUME,
+	UK_SIGNAL_DISCARD,
+};
+
+struct uk_signal_ops {
+	bool coalesce_standard, bypass_limit, reserved_quota;
+	void (*dequeue_locked)(struct uk_signal *signal,
+			       enum uk_signal_dequeue_reason reason);
+	void (*release)(struct uk_signal *signal);
+};
+
 struct uk_signal {
 	siginfo_t siginfo;
 	struct uk_list_head list_head;
+	struct uk_alloc *allocator;
+	const struct uk_signal_ops *ops;
+	struct uk_signal *retired_next;
 };
+
+static inline struct uk_signal *uk_signal_alloc(struct uk_alloc *allocator)
+{
+	struct uk_signal *sig = uk_zalloc(allocator, sizeof(*sig));
+
+	if (sig)
+		sig->allocator = allocator;
+	return sig;
+}
+
+static inline void uk_signal_free(struct uk_signal *sig)
+{
+	if (!sig)
+		return;
+	if (sig->ops) {
+		UK_ASSERT(sig->ops->release);
+		sig->ops->release(sig);
+	} else {
+		uk_free(sig->allocator, sig);
+	}
+}
 
 /* Descriptor of a signal queue.
  *
  * Pending signals are expressed in a signal set, that
  * provides information on which signal numbers are pending.
  *
- * By POSIX, standard signals are queued once regardless of
- * the number of times the signal was issued by the sender.
- * Real-time signals allow in-order delivery of multiple
- * instances of a given signal.
+ * Ordinary standard signals coalesce. Owned notifications retain
+ * separate entries until consumed or discarded.
  *
  * This structure maintains an list of `struct uk_signal` for
- * each signal number. Lists of standard signals can only
- * contain a single item.
+ * each signal number.
  */
 struct uk_signal_queue {
 	uk_sigset_t pending;
 	struct uk_list_head list_head[SIG_ARRAY_COUNT];
+};
+
+struct posix_timer_context;
+
+struct posix_timer {
+	struct uk_list_head link;
+	struct posix_timer_context *context;
+	struct uk_posix_task *target;
+	struct uk_signal signal;
+	clockid_t clock, effective_clock;
+	__u64 deadline, interval;
+	int id, notify, overrun;
+	bool real_interval, armed, deleted;
+	bool loaned, queued, notification_current, notification_settled;
+	bool waiting_signal;
+};
+
+struct posix_timer_context {
+	struct posix_process *process;
+	struct uk_signal_pdesc *signals;
+	struct uk_list_head service_link, active, retired;
+	struct posix_timer real;
+	unsigned int next_id;
+	bool attached, stopping;
 };
 
 /* Signal descriptor of a posix_process.
@@ -165,8 +217,12 @@ struct uk_signal_queue {
  * threads of a given process.
  */
 struct uk_signal_pdesc {
+	struct uk_alloc *allocator;
+	__atomic references;
 	__sz queued_count;
 	__sz queued_max;
+	__sz reserved_count, reserved_pending;
+	struct posix_timer_context timers;
 	struct uk_signal_queue sigqueue;
 	/* We use dynamically allocated memory for sigaction as passing
 	 * CLONE_SIGHAND to clone() requires that the parent and the child
@@ -177,6 +233,15 @@ struct uk_signal_pdesc {
 	struct uk_signal_files_ctx sigfiles_ctx;
 #endif /* CONFIG_LIBPOSIX_PROCESS_SIGNALFD */
 };
+
+static inline bool
+pprocess_signal_quota_full_locked(const struct uk_signal_pdesc *descriptor)
+{
+	UK_ASSERT(uk_mutex_is_locked(&pprocess_mutex));
+	return descriptor->reserved_count + descriptor->queued_count -
+		       descriptor->reserved_pending >=
+	       descriptor->queued_max;
+}
 
 /* Signal descriptor of a posix_thread.
  *
@@ -234,21 +299,28 @@ int pprocess_signal_tdesc_alloc(struct posix_thread *thread);
 int pprocess_signal_pdesc_init(struct posix_process *proc);
 
 /* Initialize signal descriptors of a posix thread */
-int pprocess_signal_tdesc_init(struct posix_thread *thread);
+void pprocess_signal_tdesc_init(struct posix_thread *thread);
+void pprocess_signal_tdesc_reset_locked(struct posix_thread *thread,
+					struct pprocess_retired *retired);
+int pprocess_signal_inherit_locked(struct posix_thread *child,
+				   struct posix_thread *parent, __u64 flags,
+				   struct uk_sigaction **previous);
 
-/* Free signal descritors of a posix process
- *
- * This function is safe to call at thread termination as
- * we reject signals once the process exits.
- */
-void pprocess_signal_pdesc_free(struct posix_process *process);
-
-/* Free signal descritors of a posix thread
- *
- * This function is safe to call at thread termination as
- * we reject signals once the process exits.
- */
-void pprocess_signal_tdesc_free(struct posix_thread *thread);
+void pprocess_signal_pdesc_detach_locked(struct posix_process *process,
+					 struct pprocess_retired *retired);
+void pprocess_signal_tdesc_detach_locked(struct posix_thread *thread,
+					 struct pprocess_retired *retired);
+void pprocess_signal_pdesc_destroy(struct posix_process *process);
+void pprocess_signal_pdesc_acquire(struct uk_signal_pdesc *descriptor);
+void pprocess_signal_pdesc_put(struct uk_signal_pdesc *descriptor);
+int pprocess_signal_enqueue(struct posix_process *process,
+			    struct posix_thread *thread,
+			    struct uk_signal *signal);
+bool pprocess_signal_withdraw_locked(struct posix_process *process,
+				     struct posix_thread *thread,
+				     struct uk_signal *signal,
+				     struct pprocess_retired *retired);
+void pprocess_signal_tdesc_destroy(struct posix_thread *thread);
 
 /* Dequeue a signal from a thread or process
  *
@@ -286,9 +358,13 @@ void pprocess_signal_sigaction_clear(struct kern_sigaction *ks);
  * if signum corresponding an rt-signal it clears all instances from
  * the queue.
  */
-void pprocess_signal_clear_pending(struct posix_process *proc, int signum);
+void pprocess_signal_clear_pending(struct posix_process *proc, int signum,
+				   struct pprocess_retired *retired);
 
 /* Caller holds pprocess_mutex. */
+struct uk_posix_signal_wait;
+int pprocess_signal_wait_check_locked(struct uk_posix_signal_wait *wait);
+
 int pprocess_signal_take_locked(struct posix_thread *thread,
 			        const uk_sigset_t *set, siginfo_t *info);
 

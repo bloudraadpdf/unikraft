@@ -314,6 +314,30 @@ size_t ramfs_file_data_write(struct ramfs_file_data *file_data,
 }
 
 static
+int ramfs_file_data_alloc(struct ramfs_file_data *file_data, size_t off,
+			  size_t len)
+{
+	const size_t end = DIV_ROUND_UP(off + len, UK_PAGING_PAGE_SIZE);
+	size_t start = off / UK_PAGING_PAGE_SIZE;
+
+	UK_SPARSEBUF_EMBED_HEAD(fhead, file_data);
+
+	while (start < end) {
+		const __u32 count = MIN(end - start, __U32_MAX);
+		ssize_t filled = uk_sparsebuf_fill(&ramfs_sb_ctx,
+			UK_SPARSEBUF_EMBED_HEADP(fhead, file_data),
+			start, count, 0);
+
+		if (filled < 0)
+			return filled;
+		if (filled != count)
+			return -ENOMEM;
+		start += filled;
+	}
+	return 0;
+}
+
+static
 int ramfs_file_data_trunc(struct ramfs_file_data *file_data, size_t newsz)
 {
 	UK_SPARSEBUF_EMBED_HEAD(fhead, file_data);

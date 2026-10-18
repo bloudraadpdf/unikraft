@@ -6,6 +6,7 @@ menuconfig LIBPOSIX_PIPE
 if LIBPOSIX_PIPE
 	config LIBPOSIX_PIPE_SIZE_ORDER
 	int "Size order of pipe buffer"
+	range 12 30
 	default 16
 	help
 		Pipe buffer size will be 2^(order) bytes.

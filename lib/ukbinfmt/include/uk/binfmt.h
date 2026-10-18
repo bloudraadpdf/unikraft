@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <uk/alloc.h>
 #include <uk/arch/ctx.h>
+#include <uk/arch/limits.h>
 #include <uk/essentials.h>
 #include <uk/list.h>
 
@@ -28,10 +29,31 @@ enum uk_binfmt_type {
 	UK_BINFMT_LOADER_TYPE_EXEC,
 };
 
+#define UK_BINFMT_ARG_FLOOR (32UL * __PAGE_SIZE)
+#define UK_BINFMT_ARG_CEILING (6UL * 1024 * 1024)
+#define UK_BINFMT_ARG_STRLEN (32UL * __PAGE_SIZE)
+
+static inline __sz uk_binfmt_arg_limit(__sz stack_limit)
+{
+	return MAX(UK_BINFMT_ARG_FLOOR,
+		   MIN(stack_limit / 4, UK_BINFMT_ARG_CEILING));
+}
+
 struct uk_vfs_path;
+struct uk_ofile;
+
+struct uk_binfmt_source {
+#if CONFIG_LIBPOSIX_VFS
+	struct uk_ofile *file;
+	struct uk_vfs_path *path;
+#else
+	int fd;
+#endif
+};
 
 struct uk_binfmt_loader_args {
 	const char *pathname; /* fully qualified */
+	const struct uk_binfmt_source *source;
 	char *progname;
 	const char **argv;
 	const char **envp;

@@ -211,12 +211,21 @@ typedef int (*posix_process_execve_handler_fn)(void *event_data);
 #endif /* CONFIG_LIBPOSIX_PROCESS_EXECVE */
 
 /**
- * Data delivered to the handlers of POSIX_PROCESS_PTEXIT_EVENT.
+ * Data delivered to PTEXIT and PTCLEANUP handlers.
  */
 struct posix_process_ptexit_event_data {
 	struct uk_thread *thread;
 	pid_t tid;
 };
+
+/*
+ * Runs outside the process mutex while the current or unscheduled target still
+ * owns its process/VM attachment and UKTLS. This also runs on clone rollback
+ * and before exec replaces the old VM.
+ * Handlers must continue the chain and cannot return an error.
+ */
+#define POSIX_PROCESS_PTCLEANUP_HANDLER_PRIO(handler_fn, prio) \
+	UK_EVENT_HANDLER_PRIO(POSIX_PROCESS_PTCLEANUP_EVENT, handler_fn, prio)
 
 /**
  * POSIX_PROCESS_PTEXIT_EVENT handler function

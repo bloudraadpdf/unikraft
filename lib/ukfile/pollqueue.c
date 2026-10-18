@@ -7,9 +7,12 @@
 #include <uk/assert.h>
 #include <uk/file/pollqueue.h>
 
-static void pollq_notify_n(struct uk_pollq *q, uk_pollevent set, int one)
+static void pollq_notify_n(struct uk_pollq *q, uk_pollevent set, int one,
+			   int changed)
 {
 	uk_rwlock_wlock(&q->waitlock);
+	if (changed)
+		uk_fetch_add(&q->io_generation, 1);
 	if (q->waitmask & set) {
 		struct uk_waitq_ticket *t;
 		uk_pollevent seen = 0;
@@ -53,13 +56,19 @@ static void pollq_propagate(struct uk_pollq *q,
 					case UK_POLL_CHAINOP_CLEAR:
 						uk_pollq_clear(t->queue, req);
 						break;
+					case UK_POLL_CHAINOP_IO_CHANGE:
+						uk_pollq_notify_io(t->queue,
+								   req);
+						break;
 					case UK_POLL_CHAINOP_SET:
 						uk_pollq_set(t->queue, req);
 						break;
 					}
 					break;
 				case UK_POLL_CHAINTYPE_CALLBACK:
-					t->callback(req, op, t);
+					if (op != UK_POLL_CHAINOP_IO_CHANGE ||
+					    t->io_changes)
+						t->callback(req, op, t);
 					break;
 				}
 			}
@@ -70,6 +79,20 @@ static void pollq_propagate(struct uk_pollq *q,
 	uk_mutex_unlock(&q->proplock);
 }
 #endif /* CONFIG_LIBUKFILE_CHAINUPDATE */
+
+void uk_pollq_notify_io(struct uk_pollq *q, uk_pollevent events)
+{
+	if (!events)
+		return;
+#if CONFIG_LIBUKFILE_CHAINUPDATE
+	if (q->_tag == uk_thread_current())
+		return;
+#endif
+	pollq_notify_n(q, events, 0, 1);
+#if CONFIG_LIBUKFILE_CHAINUPDATE
+	pollq_propagate(q, UK_POLL_CHAINOP_IO_CHANGE, events);
+#endif
+}
 
 uk_pollevent uk_pollq_clear(struct uk_pollq *q, uk_pollevent clr)
 {
@@ -111,7 +134,7 @@ uk_pollevent uk_pollq_set_n(struct uk_pollq *q, uk_pollevent set, int one)
 #endif /* CONFIG_LIBUKFILE_POLLED */
 		prev = uk_or(&q->events, set);
 
-	pollq_notify_n(q, set, one);
+	pollq_notify_n(q, set, one, !!(set & ~prev));
 #if CONFIG_LIBUKFILE_CHAINUPDATE
 	pollq_propagate(q, UK_POLL_CHAINOP_SET, set);
 #endif /* CONFIG_LIBUKFILE_CHAINUPDATE */
@@ -139,7 +162,7 @@ uk_pollevent uk_pollq_assign_n(struct uk_pollq *q, uk_pollevent val, int one)
 	prev = uk_exchange_n(&q->events, val);
 	set = val & ~prev;
 	if (set)
-		pollq_notify_n(q, set, one);
+		pollq_notify_n(q, set, one, !!(set & ~prev));
 #if CONFIG_LIBUKFILE_CHAINUPDATE
 	clr = prev & ~val;
 	if (clr)

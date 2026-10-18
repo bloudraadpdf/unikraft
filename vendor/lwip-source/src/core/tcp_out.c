@@ -318,7 +318,7 @@ tcp_write_checks(struct tcp_pcb *pcb, u16_t len)
   }
 
   /* fail on too much data */
-  if (len > pcb->snd_buf) {
+  if (len > tcp_sndbuf(pcb)) {
     LWIP_DEBUGF(TCP_OUTPUT_DEBUG | LWIP_DBG_LEVEL_SEVERE, ("tcp_write: too much data (len=%"U16_F" > snd_buf=%"TCPWNDSIZE_F")\n",
                 len, pcb->snd_buf));
     tcp_set_flags(pcb, TF_NAGLEMEMERR);
@@ -345,6 +345,24 @@ tcp_write_checks(struct tcp_pcb *pcb, u16_t len)
                 pcb->unacked == NULL && pcb->unsent == NULL);
   }
   return ERR_OK;
+}
+
+err_t
+tcp_write_capacity(struct tcp_pcb *pcb, u16_t requested, u16_t *available)
+{
+  err_t error;
+
+  LWIP_ASSERT_CORE_LOCKED();
+  error = tcp_write_checks(pcb, 0);
+  *available = 0;
+  if (error != ERR_OK || !requested) {
+    return error;
+  }
+  *available = LWIP_MIN(requested, tcp_sndbuf(pcb));
+  if (!*available) {
+    return ERR_MEM;
+  }
+  return tcp_write_checks(pcb, *available);
 }
 
 /**

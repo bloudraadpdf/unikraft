@@ -190,6 +190,7 @@ ssize_t root_listdir(const struct uk_file *f __maybe_unused, size_t *curp,
 }
 
 static const struct uk_fs_ops rootfsops = {
+	.cached_lookup = true,
 	.lookup = root_lookup,
 	.readlink = NULL,
 	.listdir = root_listdir,

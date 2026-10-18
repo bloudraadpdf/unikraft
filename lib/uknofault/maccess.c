@@ -15,29 +15,80 @@
 
 #include "arch/maccess.h"
 
-int uk_nofault_cmpxchg32(__u32 *address, __u32 *expected, __u32 desired)
+int uk_nofault_read32(const __u32 *address, __u32 *value, unsigned long flags)
+{
+	__u32 observed;
+
+	if (flags & ~UK_NOFAULTF_NOPAGING)
+		return -EINVAL;
+#if CONFIG_ARCH_X86_64
+	__asm__ goto("test %2, %2\n"
+		"jnz 2f\n"
+		"1: movl %1, %0\n"
+		"jmp 3f\n"
+		"2: movl %1, %0\n"
+		"3:\n"
+		NF_EXCPTTAB_ENTRY_L(1b, fault, nf_mf_handler, 0)
+		NF_EXCPTTAB_ENTRY_L(2b, fault, nf_mf_handler, NF_EXCPT_NOPAGING)
+		: "=r"(observed) : "m"(*address), "r"(flags)
+		: "memory", "cc" : fault);
+#elif CONFIG_ARCH_ARM_64
+	__asm__ goto("cbnz %2, 2f\n"
+		"1: ldar %w0, [%1]\n"
+		"b 3f\n"
+		"2: ldar %w0, [%1]\n"
+		"3:\n"
+		NF_EXCPTTAB_ENTRY_L(1b, fault, nf_mf_handler, 0)
+		NF_EXCPTTAB_ENTRY_L(2b, fault, nf_mf_handler, NF_EXCPT_NOPAGING)
+		: "=r"(observed) : "r"(address), "r"(flags)
+		: "memory" : fault);
+#endif
+	*value = observed;
+	return 0;
+fault:
+	return -EFAULT;
+}
+
+int uk_nofault_cmpxchg32(__u32 *address, __u32 *expected, __u32 desired,
+			 unsigned long flags)
 {
 	__u32 observed = *expected;
 
+	if (flags & ~UK_NOFAULTF_NOPAGING)
+		return -EINVAL;
 #if CONFIG_ARCH_X86_64
-	__asm__ goto("1: lock cmpxchgl %2, %1\n"
-		NF_EXCPTTAB_ENTRY_L(1b, fault, nf_mf_handler)
+	__asm__ goto("test %3, %3\n"
+		"jnz 2f\n"
+		"1: lock cmpxchgl %2, %1\n"
+		"jmp 3f\n"
+		"2: lock cmpxchgl %2, %1\n"
+		"3:\n"
+		NF_EXCPTTAB_ENTRY_L(1b, fault, nf_mf_handler, 0)
+		NF_EXCPTTAB_ENTRY_L(2b, fault, nf_mf_handler, NF_EXCPT_NOPAGING)
 		: "+a"(observed), "+m"(*address)
-		: "r"(desired)
-		: "memory", "cc" : fault);
+		: "r"(desired), "r"(flags) : "memory", "cc" : fault);
 #elif CONFIG_ARCH_ARM_64
 	__u32 status;
 
-	__asm__ goto("1: ldaxr %w0, [%2]\n"
+	__asm__ goto("cbnz %5, 4f\n"
+		"1: ldaxr %w0, [%2]\n"
 		"cmp %w0, %w3\n"
-		"b.ne 3f\n"
+		"b.ne 7f\n"
 		"2: stlxr %w1, %w4, [%2]\n"
 		"cbnz %w1, 1b\n"
-		"3: clrex\n"
-		NF_EXCPTTAB_ENTRY_L(1b, fault, nf_mf_handler)
-		NF_EXCPTTAB_ENTRY_L(2b, fault, nf_mf_handler)
+		"b 7f\n"
+		"4: ldaxr %w0, [%2]\n"
+		"cmp %w0, %w3\n"
+		"b.ne 7f\n"
+		"5: stlxr %w1, %w4, [%2]\n"
+		"cbnz %w1, 4b\n"
+		"7: clrex\n"
+		NF_EXCPTTAB_ENTRY_L(1b, fault, nf_mf_handler, 0)
+		NF_EXCPTTAB_ENTRY_L(2b, fault, nf_mf_handler, 0)
+		NF_EXCPTTAB_ENTRY_L(4b, fault, nf_mf_handler, NF_EXCPT_NOPAGING)
+		NF_EXCPTTAB_ENTRY_L(5b, fault, nf_mf_handler, NF_EXCPT_NOPAGING)
 		: "=&r"(observed), "=&r"(status)
-		: "r"(address), "r"(*expected), "r"(desired)
+		: "r"(address), "r"(*expected), "r"(desired), "r"(flags)
 		: "memory", "cc" : fault);
 #endif
 	*expected = observed;
@@ -51,6 +102,7 @@ fault:
 
 #ifdef CONFIG_LIBUKVMEM
 #include <uk/vmem.h>
+UK_CTASSERT(CONFIG_LIBUKVMEM_PAGEFAULT_HANDLER_PRIO > UK_PRIO_EARLIEST);
 typedef unsigned long nf_paging_state_t;
 
 static inline void nf_disable_paging(nf_paging_state_t *state)
@@ -80,15 +132,18 @@ typedef int nf_paging_state_t;
 
 /* Must be a library global symbol so that the linker can resolve it */
 int __used nf_mf_handler(const struct nf_excpttab_entry *e,
-			 struct uk_lcpu_except_err_ctx *ctx)
+			 struct uk_lcpu_regs *regs)
 {
-	struct uk_lcpu_regs *regs;
-
 	/* Just continue execution at the fault label */
-	regs = uk_lcpu_except_err_ctx_get_regs(ctx);
 	uk_lcpu_regs_set(regs, PC, nf_excpttab_get_cont_ip(e));
 
 	return UK_EVENT_HANDLED;
+}
+
+int uk_nofault_fixup(struct uk_lcpu_regs *regs)
+{
+	return nf_handle_trap(nf_regs_ip(regs), regs, 0) == UK_EVENT_HANDLED ?
+		0 : -EFAULT;
 }
 
 static int nf_mem_fault_handler(void *data)
@@ -99,8 +154,26 @@ static int nf_mem_fault_handler(void *data)
 		return UK_EVENT_NOT_HANDLED;
 
 	return nf_handle_trap(nf_regs_ip(uk_lcpu_except_err_ctx_get_regs(ctx)),
-			      ctx);
+			      uk_lcpu_except_err_ctx_get_regs(ctx), 0);
 }
+
+static int nf_atomic_fault_handler(void *data)
+{
+	struct uk_lcpu_except_err_ctx *ctx = data;
+
+	return nf_handle_trap(nf_regs_ip(uk_lcpu_except_err_ctx_get_regs(ctx)),
+			      uk_lcpu_except_err_ctx_get_regs(ctx),
+			      NF_EXCPT_NOPAGING);
+}
+
+UK_EVENT_HANDLER_PRIO(UK_LCPU_EXCEPT_EVENT_ERR_PAGE_FAULT,
+		      nf_atomic_fault_handler, UK_PRIO_EARLIEST);
+UK_EVENT_HANDLER_PRIO(UK_LCPU_EXCEPT_EVENT_ERR_BUS_ERROR,
+		      nf_atomic_fault_handler, UK_PRIO_EARLIEST);
+#if CONFIG_ARCH_X86_64
+UK_EVENT_HANDLER_PRIO(UK_LCPU_X86_64_EXCEPT_EVENT_ERR_GP_FAULT,
+		      nf_atomic_fault_handler, UK_PRIO_EARLIEST);
+#endif
 
 UK_EVENT_HANDLER_PRIO(UK_LCPU_EXCEPT_EVENT_ERR_PAGE_FAULT, nf_mem_fault_handler,
 		      CONFIG_LIBUKNOFAULT_FAULT_PRIO);

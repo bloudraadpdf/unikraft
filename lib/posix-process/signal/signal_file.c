@@ -106,6 +106,14 @@ static void si_to_ssi(const siginfo_t *si, struct signalfd_siginfo *ssi)
 	ssi->ssi_errno = si->si_errno;
 	ssi->ssi_code = si->si_code;
 
+	if (si->si_code == SI_TIMER) {
+		ssi->ssi_tid = si->si_timerid;
+		ssi->ssi_overrun = si->si_overrun;
+		ssi->ssi_int = si->si_value.sival_int;
+		ssi->ssi_ptr = (uint64_t)si->si_value.sival_ptr;
+		return;
+	}
+
 	/* Sender identification */
 	ssi->ssi_pid = si->si_pid;
 	ssi->ssi_uid = si->si_uid;
@@ -200,7 +208,7 @@ static ssize_t signal_file_read(const struct uk_file *f,
 
 static const struct uk_file_ops signal_file_ops = {
 	.read = signal_file_read,
-	.write = uk_file_anon_noio,
+	.write = uk_file_anon_write,
 	.mem = uk_file_nop_mem,
 	.getstat = uk_file_anon_getstat,
 	.setstat = uk_file_nop_setstat,
@@ -375,3 +383,34 @@ UK_LLSYSCALL_R_DEFINE(int, signalfd,
 	return uk_sys_signalfd(fd, mask, masksz, 0);
 }
 #endif /* CONFIG_LIBPOSIX_FDTAB */
+
+#if CONFIG_LIBUKTEST &&                                                        \
+	(CONFIG_LIBPOSIX_PROCESS_SIGNAL_LIFETIME_TEST || CONFIG_LIBUKTEST_ALL)
+#include <uk/test.h>
+
+UK_TESTCASE(posix_signalfd_timer, timer_metadata_uses_timer_fields)
+{
+	const int signals[] = {SIGALRM, UK_SIGNAL_RTMIN};
+	siginfo_t info;
+	struct signalfd_siginfo result;
+
+	for (size_t i = 0; i < ARRAY_SIZE(signals); i++) {
+		info = (siginfo_t){.si_signo = signals[i], .si_code = SI_TIMER};
+		info.si_timerid = 17;
+		info.si_overrun = 7;
+		info.si_value.sival_ptr = (void *)(__uptr)0x12345678abcdef01ULL;
+		si_to_ssi(&info, &result);
+		UK_TEST_EXPECT_SNUM_EQ(result.ssi_signo, signals[i]);
+		UK_TEST_EXPECT_SNUM_EQ(result.ssi_code, SI_TIMER);
+		UK_TEST_EXPECT_SNUM_EQ(result.ssi_tid, 17);
+		UK_TEST_EXPECT_SNUM_EQ(result.ssi_overrun, 7);
+		UK_TEST_EXPECT_SNUM_EQ(result.ssi_int, info.si_value.sival_int);
+		UK_TEST_EXPECT_SNUM_EQ(result.ssi_ptr,
+				       (__uptr)info.si_value.sival_ptr);
+		UK_TEST_EXPECT_SNUM_EQ(result.ssi_pid, 0);
+		UK_TEST_EXPECT_SNUM_EQ(result.ssi_uid, 0);
+	}
+}
+
+uk_testsuite_rootfs_prio(posix_signalfd_timer, NULL, UK_PRIO_LATEST);
+#endif

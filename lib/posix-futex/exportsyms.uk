@@ -1,1 +1,16 @@
-uk_futex_has_waiters
+uk_futex_pi_conflict
+uk_futex_queue_add
+uk_futex_queue_remove
+uk_futex_key_get
+uk_futex_key_put
+uk_futex_key_mapping
+uk_futex_key_fault
+uk_futex_key_recheck
+uk_futex_wake
+uk_futex_call_create
+uk_futex_call_get
+uk_futex_call_put
+uk_futex_call_end
+uk_futex_call_abort_all
+uk_futex_waiter_key_set
+uk_futex_retired_release

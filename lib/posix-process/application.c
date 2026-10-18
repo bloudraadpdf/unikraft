@@ -33,6 +33,12 @@ static void prepare_application(struct ukarch_execenv *execenv)
 		return;
 	for (;;) {
 		pprocess_enter_application();
+		if (uk_sched_thread_affinity_pending(uk_thread_current())) {
+			uk_lcpu_enable_irq();
+			uk_sched_yield();
+			uk_lcpu_disable_irq();
+			continue;
+		}
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 		if (uk_load_n(&uk_pthread_current()->signal->notification)) {
 			uk_lcpu_enable_irq();
@@ -84,20 +90,13 @@ uk_syscall_exittab_prio(application_syscall_return, UK_PRIO_LATEST);
 void pprocess_signal_notify(struct posix_thread *thread)
 {
 	uk_store_n(&thread->signal->notification, true);
-#if CONFIG_HAVE_SMP
-	if (thread->thread->sched) {
-		unsigned int count = 1;
-		int rc = uk_lcpu_wakeup(&thread->thread->sched->cpu_index, &count);
-
-		if (rc || count != 1)
-			UK_CRASH("Signal CPU notification failed: %d\n", rc);
-	}
-#endif
+	uk_sched_thread_notify(thread->thread);
 }
 
 #endif
 
-#if CONFIG_LIBPOSIX_PROCESS_SIGNAL || CONFIG_LIBPOSIX_PROCESS_PREEMPT
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL || CONFIG_LIBPOSIX_PROCESS_PREEMPT ||       \
+	CONFIG_HAVE_SMP
 static void application_irq_dispatch(struct ukarch_execenv *execenv, long auxsp)
 {
 	struct ukarch_auxspcb *cb = ukarch_auxsp_get_cb(auxsp);
@@ -150,14 +149,18 @@ static int application_irq(void *data)
 #endif
 		uk_lcpu_regs_set(regs, PC, (__uptr)pprocess_exit_trampoline);
 	}
+#if CONFIG_HAVE_SMP
+	else if (pthread && uk_sched_thread_affinity_pending(thread))
+		prepare_application_irq(regs);
+#endif
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 	else if (pthread && uk_load_n(&pthread->signal->notification)) {
 		prepare_application_irq(regs);
 	}
 #endif
 #if CONFIG_LIBPOSIX_PROCESS_PREEMPT
-	else if (pthread && ukplat_monotonic_clock() >=
-		 pthread->application_deadline) {
+	else if (pthread &&
+		 ukplat_monotonic_clock() >= pthread->application_deadline) {
 		prepare_application_irq(regs);
 	}
 #endif

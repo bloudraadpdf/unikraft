@@ -45,6 +45,9 @@ static struct jbd_journal journal;
 static uint8_t sector[512];
 static uint64_t interrupt_sector = UINT64_MAX;
 static bool interrupt_commit, commit_written, recovered;
+static uint64_t fail_sector = UINT64_MAX;
+static unsigned int counted_writes;
+static bool count_writes;
 
 static int disk_open(struct ext4_blockdev *device)
 {
@@ -68,6 +71,10 @@ static int disk_write(struct ext4_blockdev *device, const void *buffer,
 	(void)device;
 	size_t size = (size_t)count * 512;
 
+	if (count_writes)
+		counted_writes++;
+	if (fail_sector >= block && fail_sector - block < count)
+		return EIO;
 	const struct jbd_bhdr *header = buffer;
 	bool is_commit = jbd_get32(header, magic) == JBD_MAGIC_NUMBER &&
 			 jbd_get32(header, blocktype) == JBD_COMMIT_BLOCK;
@@ -250,6 +257,91 @@ static void verify_file(uint32_t limit)
 	for (uint32_t logical = 0; logical < 3000; logical++)
 		verify_block(&inode, logical,
 			     logical < limit && !(logical % 2));
+	CHECK(ext4_fs_put_inode_ref(&inode));
+}
+
+struct writeback_callback {
+	unsigned int calls;
+	int error;
+};
+
+static void writeback_done(struct ext4_bcache *bc, struct ext4_buf *buf,
+			   int error, void *argument)
+{
+	struct writeback_callback *callback = argument;
+
+	REQUIRE(bc == &cache && buf);
+	callback->calls++;
+	callback->error = error;
+}
+
+static uint32_t disk_word(uint64_t block)
+{
+	uint32_t value;
+
+	REQUIRE(pread(disk_fd, &value, sizeof(value),
+		      block * ext4_sb_get_block_size(&fs.sb)) ==
+		(ssize_t)sizeof(value));
+	return value;
+}
+
+static void range_writeback(void)
+{
+	const uint32_t logical[] = {100, 102, 2998};
+	struct ext4_block blocks[3];
+	uint64_t physical[3];
+	struct ext4_inode_ref inode;
+	struct writeback_callback callback = {0};
+	uint32_t count, value;
+
+	CHECK(ext4_block_cache_flush(&device));
+	CHECK(ext4_fs_get_inode_ref(&fs, lookup(), &inode));
+	REQUIRE(to_le16(ext4_inode_get_extent_header(inode.inode)->eh_depth) >=
+		2);
+	for (unsigned int i = 0; i < 3; i++) {
+		CHECK(ext4_extent_get_blocks(&inode, logical[i], 1,
+					     &physical[i], false, &count));
+		REQUIRE(physical[i] && count == 1);
+		CHECK(ext4_block_get(&device, &blocks[i], physical[i]));
+		value = logical[i] + 10000;
+		memcpy(blocks[i].data, &value, sizeof(value));
+		ext4_bcache_set_dirty(blocks[i].buf);
+		ext4_bcache_insert_dirty_node(&cache, blocks[i].buf);
+	}
+	blocks[0].buf->end_write = writeback_done;
+	blocks[0].buf->end_write_arg = &callback;
+	count_writes = true;
+	counted_writes = 0;
+	CHECK(ext4_extent_flush_range(&inode, 101, 102));
+	CHECK(ext4_extent_flush_range(&inode, 0, 0));
+	REQUIRE(!counted_writes && !callback.calls);
+	fail_sector = physical[0] * (ext4_sb_get_block_size(&fs.sb) / 512);
+	REQUIRE(ext4_extent_flush_range(&inode, 100, 101) == EIO);
+	REQUIRE(counted_writes == 1 && callback.calls == 1 &&
+		callback.error == EIO);
+	REQUIRE(disk_word(physical[0]) == logical[0]);
+	fail_sector = UINT64_MAX;
+	CHECK(ext4_extent_flush_range(&inode, 100, 101));
+	REQUIRE(counted_writes == 2 && callback.calls == 2 && !callback.error);
+	REQUIRE(disk_word(physical[0]) == logical[0] + 10000);
+	REQUIRE(disk_word(physical[1]) == logical[1]);
+	REQUIRE(disk_word(physical[2]) == logical[2]);
+	CHECK(ext4_extent_flush_range(&inode, 2998, (uint64_t)UINT32_MAX + 1));
+	REQUIRE(counted_writes == 3);
+	REQUIRE(disk_word(physical[2]) == logical[2] + 10000);
+	REQUIRE(disk_word(physical[1]) == logical[1]);
+	blocks[0].buf->end_write = NULL;
+	blocks[0].buf->end_write_arg = NULL;
+	for (unsigned int i = 0; i < 3; i++) {
+		memcpy(blocks[i].data, &logical[i], sizeof(logical[i]));
+		ext4_bcache_set_dirty(blocks[i].buf);
+		ext4_bcache_insert_dirty_node(&cache, blocks[i].buf);
+	}
+	CHECK(ext4_extent_flush_range(&inode, 0, (uint64_t)UINT32_MAX + 1));
+	REQUIRE(counted_writes == 6);
+	count_writes = false;
+	for (unsigned int i = 0; i < 3; i++)
+		CHECK(ext4_block_set(&device, &blocks[i]));
 	CHECK(ext4_fs_put_inode_ref(&inode));
 }
 
@@ -496,6 +588,9 @@ int main(int argc, char **argv)
 	open_image(argv[1]);
 	if (!strcmp(argv[2], "create")) {
 		create_file();
+		verify_file(3000);
+	} else if (!strcmp(argv[2], "range-writeback")) {
+		range_writeback();
 		verify_file(3000);
 	} else if (!strcmp(argv[2], "truncate")) {
 		verify_file(3000);

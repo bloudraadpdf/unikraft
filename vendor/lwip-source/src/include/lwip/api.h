@@ -249,6 +249,11 @@ struct netconn {
   /** only used for socket layer */
 #if LWIP_SOCKET
   int socket;
+  u64_t socket_receive_timeout_ms;
+  u64_t socket_send_timeout_ms;
+#if LWIP_UDP
+  u8_t socket_udp_port_locked;
+#endif /* LWIP_UDP */
 #endif /* LWIP_SOCKET */
 #if LWIP_SO_SNDTIMEO
   /** timeout to wait for sending data (which means enqueueing data for sending
@@ -280,6 +285,7 @@ struct netconn {
       this temporarily stores the message.
       Also used during connect and close. */
   struct api_msg *current_msg;
+  u32_t send_bufsize;
 #endif /* LWIP_TCP */
   /** A callback function that is informed about events for this netconn */
   netconn_callback callback;

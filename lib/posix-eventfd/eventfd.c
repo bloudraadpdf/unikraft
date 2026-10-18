@@ -76,10 +76,10 @@ static ssize_t evfd_read(const struct uk_file *f,
 	return sizeof(ret);
 }
 
-
-static ssize_t evfd_write(const struct uk_file *f,
-			  const struct iovec *iov, size_t iovcnt,
-			  size_t off, long flags __unused)
+static struct uk_file_io_result
+evfd_write(const struct uk_file *f, const struct iovec *iov, size_t iovcnt,
+	   size_t off, long flags __unused,
+	   enum uk_file_write_kind kind __unused)
 {
 	uint64_t add;
 	evfd_node n;
@@ -87,26 +87,26 @@ static ssize_t evfd_write(const struct uk_file *f,
 
 	UK_ASSERT(_IS_EVFVOL(f->vol));
 	if (unlikely(off))
-		return -ESPIPE;
+		return uk_file_io_status(-ESPIPE);
 	if (unlikely(!iovcnt || iov[0].iov_len < sizeof(uint64_t)))
-		return -EINVAL;
+		return uk_file_io_status(-EINVAL);
 
 	add = *(uint64_t *)iov[0].iov_base;
 	if (unlikely(add == UINT64_MAX))
-		return -EINVAL;
+		return uk_file_io_status(-EINVAL);
 
 	n = (evfd_node)f->node;
 	val = *n;
 	do {
 		if (add > UINT64_MAX - 1 - val)
-			return -EAGAIN;
+			return uk_file_io_status(-EAGAIN);
 	} while (!uk_compare_exchange_n(n, &val, val + add));
 
 	if (val + add == UINT64_MAX - 1)
 		uk_file_event_clear(f, UKFD_POLLOUT);
 	uk_file_event_set(f, UKFD_POLLIN);
 
-	return sizeof(val);
+	return uk_file_io_status(sizeof(val));
 }
 
 static const struct uk_file_ops evfd_ops = {

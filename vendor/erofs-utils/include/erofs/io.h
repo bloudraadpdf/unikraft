@@ -97,7 +97,7 @@ static inline int erofs_pread(struct erofs_vfile *vf, void *buf,
 	read = erofs_io_pread(vf, buf, len, offset);
 	if (read < 0)
 		return read;
-	return read != len ? -EIO : 0;
+	return (size_t)read != len ? -EIO : 0;
 }
 
 void erofs_io_close(struct erofs_vfile *vf);

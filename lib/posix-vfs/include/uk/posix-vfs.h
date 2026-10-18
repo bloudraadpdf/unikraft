@@ -15,6 +15,7 @@
 #include <sys/stat.h>
 
 #include <uk/fs.h>
+#include <uk/vfs-open.h>
 #include <uk/posix-fd.h>
 
 /*
@@ -91,8 +92,11 @@ int uk_sys_mount(const char *source, const char *target, const char *fstype,
 int uk_sys_umount(const char *target, int flags);
 
 /* Open */
+int uk_posix_vfs_open_how(int flags, mode_t mode, struct uk_vfs_open_how *how);
 struct uk_ofile *uk_sys_openat(struct uk_ofile *of, const char *path,
 			       int flags, mode_t mode);
+struct uk_ofile *uk_sys_openat2(struct uk_ofile *of, const char *path,
+				const struct uk_vfs_open_how *how);
 
 /*
  * Inlines implemented as calls to above

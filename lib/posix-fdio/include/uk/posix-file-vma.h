@@ -18,6 +18,9 @@ struct uk_vma;
 /* Caller holds the VAS mutation lock and releases the returned ofile. */
 struct uk_ofile *uk_fdio_vma_file(const struct uk_vma *vma, __off *offset);
 
+/* Caller holds the VAS mutation lock. */
+bool uk_fdio_vma_page_written(const struct uk_vma *vma, __vaddr_t address);
+
 struct uk_fdio_vma_lifetime {
 	void (*acquire)(struct uk_fdio_vma_lifetime *lifetime);
 	void (*release)(struct uk_fdio_vma_lifetime *lifetime);

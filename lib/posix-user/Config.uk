@@ -1,15 +1,20 @@
 menuconfig LIBPOSIX_USER
 	bool "posix-user: User-related functions"
+	select LIBUKSCHED
+	select LIBUKATOMIC
+	select LIBUKLOCK
 	default n
 
 if LIBPOSIX_USER
 
 config LIBPOSIX_USER_UID
 	int "User ID (uid)"
+	range 0 4294967294
 	default 0
 
 config LIBPOSIX_USER_GID
 	int "Group ID (gid)"
+	range 0 4294967294
 	default 0
 
 config LIBPOSIX_USER_USERNAME
@@ -19,5 +24,9 @@ config LIBPOSIX_USER_USERNAME
 config LIBPOSIX_USER_GROUPNAME
 	string "Group Name"
 	default "root"
+
+config LIBPOSIX_USER_TEST
+	bool "Test credential ownership"
+	depends on LIBUKTEST
 
 endif

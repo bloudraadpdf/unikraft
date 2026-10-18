@@ -352,90 +352,68 @@ static ssize_t serial_read_async(const struct uk_file *f,
 	return total ? total : -EAGAIN;
 }
 
-static ssize_t serial_write(const struct uk_file *f,
-			    const struct iovec *iov, size_t iovcnt,
-			    size_t off, long flags __unused)
+static struct uk_file_io_result serial_output(const struct uk_file *file,
+					      const struct iovec *iov,
+					      size_t count, size_t offset,
+					      bool asynchronous)
 {
-	struct uk_console *cons = f->node;
-	ssize_t total = 0;
+	struct uk_console *console = file->node;
+	struct consolefd_alloc *owner = asynchronous ? to_consf(file) : NULL;
+	struct uk_file_io_result result = {0};
 
-	UK_ASSERT(f->vol == SERIAL_VOLID);
-	UK_ASSERT(f->node);
+	UK_ASSERT(file->vol == SERIAL_VOLID && file->node);
+	if (offset)
+		return uk_file_io_status(-ESPIPE);
+	if (owner)
+		uk_mutex_lock(&owner->mtx);
+	for (size_t i = 0; i < count; i++) {
+		__ssz written;
 
-	if (unlikely(off))
-		return -ESPIPE;
-
-	for (size_t i = 0; i < iovcnt; i++) {
-		char *buf = iov[i].iov_base;
-		size_t len = iov[i].iov_len;
-		int bytes_written;
-
-		if (unlikely(!buf && len))
-			return  -EFAULT;
-
-		bytes_written = _console_out(cons, buf, len);
-		if (unlikely(bytes_written < 0))
-			return bytes_written;
-
-		total += bytes_written;
-	}
-
-	return total;
-}
-
-/*
- * Write to an async-TX console file.
- *
- * Unlike serial_write, this variant does not assume the TX queue is always
- * ready.  UKFD_POLLOUT is not pre-set at file creation time; instead the
- * evmon thread sets it when the driver's TX completion interrupt fires.
- *
- * If the TX queue becomes full mid-write (_console_out_nb returns 0),
- * UKFD_POLLOUT is cleared so the caller blocks until the next TX completion
- * interrupt re-sets it via the async callback.
- */
-static ssize_t serial_write_async(const struct uk_file *f,
-				  const struct iovec *iov, size_t iovcnt,
-				  size_t off, long flags __unused)
-{
-	struct uk_console *cons = f->node;
-	struct consolefd_alloc *consf;
-	ssize_t total = 0;
-	__ssz rc;
-
-	UK_ASSERT(f->node);
-
-	if (unlikely(off))
-		return -ESPIPE;
-
-	consf = to_consf(f);
-
-	uk_mutex_lock(&consf->mtx);
-
-	for (size_t i = 0; i < iovcnt; i++) {
-		char *buf = iov[i].iov_base;
-		size_t len = iov[i].iov_len;
-
-		if (unlikely(!buf && len))
-			return -EFAULT;
-
-		rc = _console_out_nb(cons, buf, len);
-		if (unlikely(rc < 0))
-			return (ssize_t)rc;
-
-		total += rc;
-		if (!rc || (__sz)rc < len) {
-			/* TX queue is full — clear POLLOUT and let the TX
-			 * completion interrupt re-arm it via the async cb.
-			 */
-			uk_file_event_clear(f, UKFD_POLLOUT);
+		if (!iov[i].iov_len)
+			continue;
+		if (!iov[i].iov_base) {
+			result.error = -EFAULT;
+			break;
+		}
+		written = asynchronous
+			      ? _console_out_nb(console, iov[i].iov_base,
+						iov[i].iov_len)
+			      : _console_out(console, iov[i].iov_base,
+					     iov[i].iov_len);
+		if (written < 0) {
+			result.error = written;
+			if (asynchronous && written == -EAGAIN)
+				uk_file_event_clear(file, UKFD_POLLOUT);
+			break;
+		}
+		result.count += written;
+		if ((size_t)written < iov[i].iov_len) {
+			if (asynchronous) {
+				uk_file_event_clear(file, UKFD_POLLOUT);
+				result.error = -EAGAIN;
+			}
 			break;
 		}
 	}
+	if (owner)
+		uk_mutex_unlock(&owner->mtx);
+	return result;
+}
 
-	uk_mutex_unlock(&consf->mtx);
+static struct uk_file_io_result
+serial_write(const struct uk_file *file, const struct iovec *iov, size_t count,
+	     size_t offset, long flags __unused,
+	     enum uk_file_write_kind kind __unused)
+{
+	return serial_output(file, iov, count, offset, false);
+}
 
-	return total ? total : -EAGAIN;
+static struct uk_file_io_result
+serial_write_async(const struct uk_file *file, const struct iovec *iov,
+		   size_t count, size_t offset, long flags __unused,
+		   enum uk_file_write_kind kind __unused)
+{
+	return serial_output(file, iov, count, offset, true);
 }
 
 static int serial_ctl(const struct uk_file *f __maybe_unused,

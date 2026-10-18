@@ -49,6 +49,7 @@
 #include <limits.h>
 #include <string.h>
 #include <uk/assert.h>
+#include <uk/binfmt.h>
 #include <uk/arch/limits.h>
 #include <uk/print.h>
 #include <uk/essentials.h>
@@ -202,9 +203,6 @@ static __u64 elf_arm64_hwcap(void)
 #define UK_AUXV_HWCAP		0x0
 #endif /* !CONFIG_ARCH_ARM_64 */
 
-#define ELF_ARG_FLOOR (32 * __PAGE_SIZE)
-#define ELF_ARG_CEILING (6UL * 1024 * 1024)
-#define ELF_ARG_STRLEN (32 * __PAGE_SIZE)
 
 struct elf_arg_count {
 	int argc;
@@ -214,9 +212,9 @@ struct elf_arg_count {
 
 static int elf_count_string(const char *string, __sz *remaining, __sz *size)
 {
-	__sz length = strnlen(string, ELF_ARG_STRLEN);
+	__sz length = strnlen(string, UK_BINFMT_ARG_STRLEN);
 
-	if (length == ELF_ARG_STRLEN ||
+	if (length == UK_BINFMT_ARG_STRLEN ||
 	    length + 1 + sizeof(__uptr) > *remaining)
 		return -E2BIG;
 	*remaining -= length + 1 + sizeof(__uptr);
@@ -230,8 +228,7 @@ static int elf_arg_env_count(struct elf_arg_count *count, const char *argv0,
 {
 	const char **vectors[] = { argv, envp };
 	int *counts[] = { &count->argc, &count->envc };
-	__sz remaining = MAX(ELF_ARG_FLOOR,
-			    MIN(stack_limit / 4, ELF_ARG_CEILING));
+	__sz remaining = uk_binfmt_arg_limit(stack_limit);
 	int rc;
 
 	memset(count, 0, sizeof(*count));
@@ -269,9 +266,9 @@ static int infoblk_push(__uptr *sp, __uptr bottom, const void *buffer,
 static int infoblk_push_string(__uptr *sp, __uptr bottom, const char *string,
 			       __uptr *pointer)
 {
-	__sz length = strnlen(string, ELF_ARG_STRLEN);
+	__sz length = strnlen(string, UK_BINFMT_ARG_STRLEN);
 
-	if (length == ELF_ARG_STRLEN)
+	if (length == UK_BINFMT_ARG_STRLEN)
 		return -E2BIG;
 	return infoblk_push(sp, bottom, string, length + 1, pointer);
 }

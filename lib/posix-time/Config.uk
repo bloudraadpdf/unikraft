@@ -3,3 +3,9 @@ config LIBPOSIX_TIME
        default n
        select HAVE_TIME
        select LIBUKLCPU
+       select LIBUKNOFAULT
+
+config LIBPOSIX_TIME_TEST
+	bool "Clock sleep tests"
+	depends on LIBPOSIX_TIME && LIBUKTEST && HAVE_SCHED
+	default n

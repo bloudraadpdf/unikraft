@@ -23,6 +23,7 @@ UK_LLSYSCALL_R_DEFINE(int, rt_sigaction, int, signum,
 		      size_t, sigsetsize)
 {
 	struct posix_process *proc;
+	struct pprocess_retired retired = {0};
 
 	if (unlikely(!IS_VALID(signum)))
 		return -EINVAL;
@@ -52,10 +53,11 @@ UK_LLSYSCALL_R_DEFINE(int, rt_sigaction, int, signum,
 
 	/* Clear pending signals if the action has been changed to SIG_IGN */
 	if (IS_IGNORED(proc, signum))
-		pprocess_signal_clear_pending(proc, signum);
+		pprocess_signal_clear_pending(proc, signum, &retired);
 
 out:
 	uk_mutex_unlock(&pprocess_mutex);
+	pprocess_retired_release(&retired);
 	return 0;
 }
 #else /* !CONFIG_LIBPOSIX_PROCESS_SIGNAL */

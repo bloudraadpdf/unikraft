@@ -58,13 +58,24 @@ extern "C" {
 #define SELWAIT_T u8_t
 #endif
 
+struct lwip_socket_packet {
+  struct lwip_socket_packet *next;
+  struct pbuf *buffer;
+};
+
 union lwip_sock_lastdata {
+  void *pointer;
   struct netbuf *netbuf;
-  struct pbuf *pbuf;
+  struct lwip_socket_packet *tcp;
 };
 
 /** Contains all internal pointers and states used for a socket */
+#define LWIP_SOCKET_SHUT_RD 1U
+#define LWIP_SOCKET_SHUT_WR 2U
+
 struct lwip_sock {
+  unsigned int shutdown;
+  unsigned int pending_read;
   /** sockets currently are built on netconns, each socket has one netconn */
   struct netconn *conn;
   /** data that was left from the previous read */

@@ -42,6 +42,7 @@
 #include <sys/sysinfo.h>
 #include <uk/syscall.h>
 #include <uk/pcpuvar.h>
+#include <uk/nofault.h>
 
 #ifdef CONFIG_LIBUKPAGING
 #include <uk/paging.h>
@@ -217,13 +218,14 @@ int gethostname(char *name, size_t len)
 UK_SYSCALL_R_DEFINE(int, getcpu, unsigned int *, cpu, unsigned int *, node,
 		    void *, tcache)
 {
-	/* tcache is ignored since Linux 2.6.24 */
+	unsigned int current = uk_pcpuvar_current_get(uk_pcpuvar_cpu_idx);
+	unsigned int domain = 0;
+	int error = 0;
 
-	if (cpu)
-		*cpu = uk_pcpuvar_current_get(uk_pcpuvar_cpu_idx);
-
-	if (node)
-		*node = 0;
-
-	return 0;
+	(void)tcache;
+	if (cpu && !uk_nofault_try_write(current, cpu))
+		error = -EFAULT;
+	if (node && !uk_nofault_try_write(domain, node))
+		error = -EFAULT;
+	return error;
 }

@@ -16,6 +16,8 @@
 #endif /* UK_LIBC_SYSCALLS */
 
 #include <uk/errptr.h>
+#include <uk/nofault.h>
+#include <uk/arch/limits.h>
 #include <uk/posix-fdio.h>
 #include <uk/posix-fdtab.h>
 #include <uk/posix-vfs.h>
@@ -499,7 +501,7 @@ UK_SYSCALL_R_DEFINE(int, symlinkat, const char *, path, int, dfd,
 		    const char *, linkname)
 {
 	struct uk_ofile *of;
-	int ret = _vfs_atfd(dfd, path, &of);
+	int ret = _vfs_atfd(dfd, linkname, &of);
 
 	if (unlikely(ret))
 		return ret;
@@ -565,10 +567,21 @@ UK_SYSCALL_R_DEFINE(int, rmdir, const char *, path)
 static int _vfs_renameat(int olddfd, const char *oldname,
 			 int newdfd, const char *newname, unsigned int flags)
 {
+	enum {
+		VFS_RENAME_NOREPLACE = 1,
+		VFS_RENAME_EXCHANGE = 2,
+		VFS_RENAME_WHITEOUT = 4
+	};
+	const unsigned int supported = VFS_RENAME_NOREPLACE |
+		VFS_RENAME_EXCHANGE | VFS_RENAME_WHITEOUT;
 	int ret;
 	struct uk_ofile *oldof;
 	struct uk_ofile *newof;
 
+	if (flags & ~supported ||
+	    ((flags & VFS_RENAME_EXCHANGE) &&
+	     (flags & (VFS_RENAME_NOREPLACE | VFS_RENAME_WHITEOUT))))
+		return -EINVAL;
 	if (unlikely((ret = _vfs_atfd(olddfd, oldname, &oldof))))
 		return ret;
 	if (unlikely((ret = _vfs_atfd(newdfd, newname, &newof))))
@@ -621,28 +634,97 @@ int umount(const char *path)
 
 /* Open */
 
+static int vfs_import_open_how(struct uk_vfs_open_how *how,
+			       const struct uk_vfs_open_how *user, size_t size)
+{
+	if (size < sizeof(*how))
+		return -EINVAL;
+	if (size > __PAGE_SIZE)
+		return -E2BIG;
+	for (size_t offset = sizeof(*how); offset < size; offset++) {
+		__uptr address = (__uptr)user + offset;
+		unsigned char byte;
+
+		if (address < (__uptr)user ||
+		    !uk_nofault_try_read(byte, (const unsigned char *)address))
+			return -EFAULT;
+		if (byte)
+			return -E2BIG;
+	}
+	if (uk_nofault_memcpy((char *)how, (const char *)user,
+			      sizeof(*how), 0) != sizeof(*how))
+		return -EFAULT;
+	return uk_posix_vfs_open_validate(how);
+}
+
+static int vfs_open_request(int dfd, const char *path,
+			    const struct uk_vfs_open_how *how)
+{
+	struct uk_fdtab_reservation *reservation = uk_fdtab_reserve(how->flags);
+	struct uk_ofile *base = NULL, *opened;
+	char *name = NULL;
+	int result;
+
+	if (PTRISERR(reservation))
+		return PTR2ERR(reservation);
+	name = uk_malloc(uk_alloc_get_default(), PATH_MAX);
+	if (!name) {
+		result = -ENOMEM;
+		goto out;
+	}
+	result = uk_nofault_copy_string(name, path, PATH_MAX);
+	if (result)
+		goto out;
+	if (!*name) {
+		result = -ENOENT;
+		goto out;
+	}
+	if (dfd != AT_FDCWD &&
+	    (*name != '/' || (how->resolve & UK_VFS_RESOLVE_SCOPED))) {
+		base = uk_fdtab_get(dfd);
+		if (!base) {
+			result = -EBADF;
+			goto out;
+		}
+	}
+	opened = uk_sys_openat2(base, name, how);
+	if (PTRISERR(opened)) {
+		result = PTR2ERR(opened);
+	} else {
+		result = uk_fdtab_install(reservation, opened, NULL);
+		reservation = NULL;
+		if (result < 0)
+			uk_ofile_release(opened);
+	}
+out:
+	if (base)
+		uk_ofile_release(base);
+	uk_free(uk_alloc_get_default(), name);
+	uk_fdtab_cancel(reservation);
+	return result;
+}
+
+UK_SYSCALL_R_DEFINE(int, openat2, int, dfd, const char *, path,
+		    const struct uk_vfs_open_how *, user_how, size_t, size)
+{
+	struct uk_vfs_open_how how;
+	int result = vfs_import_open_how(&how, user_how, size);
+
+	return result ? result : vfs_open_request(dfd, path, &how);
+}
+
+static int vfs_open_arguments(int dfd, const char *path, int flags, mode_t mode)
+{
+	struct uk_vfs_open_how how;
+	int result = uk_posix_vfs_open_how(flags, mode, &how);
+
+	return result ? result : vfs_open_request(dfd, path, &how);
+}
+
 UK_LLSYSCALL_R_DEFINE(int, openat, int, dfd, const char *, path,
 		      int, flags, mode_t, mode)
 {
-	struct uk_ofile *newf;
-	struct uk_ofile *of;
-	int ret;
-
-	ret = _vfs_atfd(dfd, path, &of);
-	if (unlikely(ret))
-		return ret;
-
-	newf = uk_sys_openat(of, path, flags, mode);
-	if (unlikely(PTRISERR(newf))) {
-		ret = PTR2ERR(newf);
-	} else {
-		ret = uk_fdtab_open_desc(newf, flags);
-		if (unlikely(ret < 0))
-			uk_ofile_release(newf);
-	}
-	if (of)
-		uk_ofile_release(of);
-	return ret;
+	return vfs_open_arguments(dfd, path, flags, mode);
 }
 
 #if UK_LIBC_SYSCALLS
@@ -672,15 +754,7 @@ __alias(openat, openat64);
 
 UK_LLSYSCALL_R_DEFINE(int, open, const char *, path, int, flags, mode_t, mode)
 {
-	struct uk_ofile *newf = uk_sys_open(path, flags, mode);
-	int fd;
-
-	if (unlikely(PTRISERR(newf)))
-		return PTR2ERR(newf);
-	fd = uk_fdtab_open_desc(newf, flags);
-	if (unlikely(fd < 0))
-		uk_ofile_release(newf);
-	return fd;
+	return vfs_open_arguments(AT_FDCWD, path, flags, mode);
 }
 
 #if UK_LIBC_SYSCALLS
@@ -708,15 +782,8 @@ __alias(open, open64);
 
 UK_SYSCALL_R_DEFINE(int, creat, const char *, path, mode_t, mode)
 {
-	struct uk_ofile *newf = uk_sys_creat(path, mode);
-	int fd;
-
-	if (unlikely(PTRISERR(newf)))
-		return PTR2ERR(newf);
-	fd = uk_fdtab_open_desc(newf, O_CREAT | O_WRONLY | O_TRUNC);
-	if (unlikely(fd < 0))
-		uk_ofile_release(newf);
-	return fd;
+	return vfs_open_arguments(AT_FDCWD, path, O_CREAT | O_WRONLY | O_TRUNC,
+				  mode);
 }
 
 #if UK_LIBC_SYSCALLS

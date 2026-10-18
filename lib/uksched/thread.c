@@ -59,15 +59,13 @@ extern const struct uk_thread_inittab_entry _uk_thread_inittab_end;
 	     (itr) < &(_uk_thread_inittab_end);				\
 	     (itr)++)
 
-#define uk_thread_inittab_foreach_reverse2(itr, start)			\
-	for ((itr) = (start);						\
-	     (itr) >= _uk_thread_inittab_start;				\
-	     (itr)--)
-
-#define uk_thread_inittab_foreach_reverse(itr)				\
-	uk_thread_inittab_foreach_reverse2((itr),			\
-			(DECONST(struct uk_thread_inittab_entry*,	\
-				 (&_uk_thread_inittab_end))) - 1)
+static bool _uk_thread_inittab_previous(struct uk_thread_inittab_entry **entry)
+{
+	if (*entry <= _uk_thread_inittab_start)
+		return false;
+	--(*entry);
+	return true;
+}
 
 struct _inittab_call_init_args {
 	uk_thread_init_func_t init;
@@ -158,7 +156,7 @@ err:
 	 * one for cleanup
 	 */
 	term_args.child = child;
-	uk_thread_inittab_foreach_reverse2(itr, itr - 2) {
+	while (_uk_thread_inittab_previous(&itr)) {
 		if (unlikely(!itr->term
 			     || (itr->flags & child->flags) != itr->flags))
 			continue;
@@ -184,7 +182,9 @@ static int _uk_thread_call_termtab(struct uk_thread *child)
 	 * child's ECTX and UKTLS feature requirements
 	 */
 	term_args.child = child;
-	uk_thread_inittab_foreach_reverse(itr) {
+	itr = DECONST(struct uk_thread_inittab_entry *,
+		      &_uk_thread_inittab_end);
+	while (_uk_thread_inittab_previous(&itr)) {
 		if (unlikely(!itr->term))
 			continue;
 		if (unlikely((itr->flags & child->flags) != itr->flags)) {
@@ -244,6 +244,7 @@ static void _uk_thread_struct_init(struct uk_thread *t,
 
 	memset(t, 0x0, sizeof(*t));
 	uk_waitq_init(&t->stop_wait);
+	memset(t->allowed_cpus, 0xff, sizeof(t->allowed_cpus));
 
 	t->ectx = ectx;
 	t->tlsp = tlsp;
@@ -398,6 +399,7 @@ static int _uk_thread_struct_init_alloc(struct uk_thread *t,
 	void *auxstack = NULL;
 	void *tls = NULL;
 	uintptr_t tlsp = 0x0;
+	uintptr_t auxsp = 0x0;
 	int rc;
 
 	if (a_auxstack && auxstack_len) {
@@ -407,6 +409,7 @@ static int _uk_thread_struct_init_alloc(struct uk_thread *t,
 			rc = -ENOMEM;
 			goto err_out;
 		}
+		auxsp = ukarch_gen_sp(auxstack, auxstack_len);
 	}
 
 	if (a_stack && stack_len) {
@@ -449,7 +452,7 @@ static int _uk_thread_struct_init_alloc(struct uk_thread *t,
 	}
 
 	_uk_thread_struct_init(t,
-			       ukarch_gen_sp(auxstack, auxstack_len),
+			       auxsp,
 			       tlsp, !(!tlsp), ectx,
 			       name, priv,
 			       dtor);
@@ -1045,19 +1048,14 @@ void uk_thread_block_until(struct uk_thread *thread, __snsec until)
 
 	UK_ASSERT(thread);
 
-	flags = uk_lcpu_save_irqf();
-	scheduler = thread->sched;
-	if (scheduler)
-		ukarch_spin_lock(&scheduler->lock);
+	scheduler = uk_thread_sched_lock(thread, &flags);
 	thread->wakeup_time = until;
 	if (uk_thread_is_runnable(thread)) {
 		uk_thread_set_blocked(thread);
 		if (thread->sched)
 			uk_sched_thread_blocked(thread);
 	}
-	if (scheduler)
-		ukarch_spin_unlock(&scheduler->lock);
-	uk_lcpu_restore_irqf(flags);
+	uk_thread_sched_unlock(scheduler, flags);
 }
 
 void uk_thread_block_timeout(struct uk_thread *thread, __nsec nsec)

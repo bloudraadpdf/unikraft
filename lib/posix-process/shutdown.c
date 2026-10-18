@@ -19,6 +19,32 @@
 #include "process.h"
 
 #if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+static void pprocess_shutdown_caller(struct uk_term_ctx *ctx)
+{
+	struct posix_thread *thread;
+	struct posix_process *process;
+
+	uk_mutex_lock(&pprocess_mutex);
+	thread = uk_pthread_current();
+	if (thread) {
+		process = thread->process;
+		pprocess_acquire(process);
+		pprocess_exit(process, POSIX_PROCESS_EXITED, ctx->exit_code);
+		while (!uk_list_is_singular(&process->threads))
+			uk_waitq_wait_locked(&process->thread_wait,
+					     uk_mutex_lock, uk_mutex_unlock,
+					     &pprocess_mutex);
+		uk_mutex_unlock(&pprocess_mutex);
+		pprocess_thread_fini(uk_thread_current());
+		uk_mutex_lock(&pprocess_mutex);
+		ctx->exit_code = process->exit_status;
+		uk_mutex_unlock(&pprocess_mutex);
+		pprocess_put(process);
+		return;
+	}
+	uk_mutex_unlock(&pprocess_mutex);
+}
+
 static void pprocess_kill_remaining(void)
 {
 	struct posix_process *process;
@@ -35,8 +61,8 @@ static void pprocess_kill_remaining(void)
 			pprocess_exit(process, POSIX_PROCESS_KILLED, SIGKILL);
 			uk_mutex_unlock(&pprocess_mutex);
 			uk_semaphore_down(&process->exit_semaphore);
-			uk_mutex_lock(&pprocess_mutex);
 			pprocess_put(process);
+			uk_mutex_lock(&pprocess_mutex);
 		}
 	} while (found);
 	uk_mutex_unlock(&pprocess_mutex);
@@ -49,6 +75,7 @@ static void pprocess_system_shutdown(struct uk_term_ctx *ctx)
 	int rc;
 #endif
 
+	pprocess_shutdown_caller(ctx);
 	uk_mutex_lock(&pprocess_mutex);
 	process = pid2pprocess(UK_PID_INIT);
 	if (process) {
@@ -67,9 +94,10 @@ static void pprocess_system_shutdown(struct uk_term_ctx *ctx)
 		ctx->exit_code = process->state == POSIX_PROCESS_RUNNING ?
 			0x80 | SIGKILL : process->exit_status;
 #endif
-		pprocess_put(process);
 	}
 	uk_mutex_unlock(&pprocess_mutex);
+	if (process)
+		pprocess_put(process);
 	pprocess_kill_remaining();
 }
 #else /* !CONFIG_LIBPOSIX_PROCESS_MULTITHREADING */

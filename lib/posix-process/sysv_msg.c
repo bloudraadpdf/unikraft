@@ -247,7 +247,7 @@ UK_LLSYSCALL_R_DEFINE(long, msgrcv, int, id, void *, buffer, size_t, size,
 	if (id < 0 || size > LONG_MAX)
 		return -EINVAL;
 	if (flags & MSG_COPY) {
-		size_t length = MIN(size, MSGMAX);
+		size_t length = MIN(size, (size_t)MSGMAX);
 
 		if ((flags & MSG_EXCEPT) || !(flags & SYSV_IPC_NOWAIT))
 			return -EINVAL;

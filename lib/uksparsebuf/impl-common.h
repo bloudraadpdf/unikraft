@@ -337,6 +337,11 @@ int uk_sparsebuf_scoop(const struct uk_sparsebuf_ctx *ctx,
 	if (unlikely(!r))
 		return 0;
 
+	if (uk_sparsebuf_pg_beyond(pgoff, uk_sparsebuf_slice_at(&cur)))
+		uk_sparsebuf_advance(&cur);
+	if (uk_sparsebuf_finished(&cur))
+		return 0;
+
 	r = sparsebuf_separate(headp, pgoff, npages, &cur, ctx->alloc);
 	if (unlikely(r)) {
 		UK_ASSERT(r < 0);

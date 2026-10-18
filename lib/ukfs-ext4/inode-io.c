@@ -8,6 +8,16 @@
 #include <ext4_super.h>
 #include <ext4_trans.h>
 
+__u64 ukext4_inode_max_size(struct ext4_sblock *superblock)
+{
+	const __u32 block_size = ext4_sb_get_block_size(superblock);
+	__u64 blocks = UINT32_MAX;
+
+	if (!ext4_sb_feature_ro_com(superblock, EXT4_FRO_COM_HUGE_FILE))
+		blocks /= block_size / 512;
+	return blocks * block_size;
+}
+
 int ukext4_inode_read(struct ext4_inode_ref *inode, void *output,
                      size_t length, uint64_t offset, size_t *done)
 {
@@ -43,10 +53,13 @@ int ukext4_inode_write(struct ext4_inode_ref *inode, const void *input,
                       size_t length, uint64_t offset, size_t *done)
 {
     const uint32_t block_size = ext4_sb_get_block_size(&inode->fs->sb);
-    const uint64_t maximum = (uint64_t)UINT32_MAX * block_size;
+	const __u64 maximum = ukext4_inode_max_size(&inode->fs->sb);
     *done = 0;
     if (!length) return 0;
-    if (offset > maximum || length > maximum - offset) return EFBIG;
+	if (offset >= maximum)
+		return EFBIG;
+	if (length > maximum - offset)
+		length = maximum - offset;
     if (!ext4_inode_has_flag(inode->inode, EXT4_INODE_FLAG_EXTENTS))
         return EOPNOTSUPP;
     while (*done < length) {
@@ -88,7 +101,8 @@ int ukext4_inode_resize(struct ext4_inode_ref *inode, uint64_t size)
 {
     const uint64_t old_size = ext4_inode_get_size(&inode->fs->sb, inode->inode);
     const uint32_t block_size = ext4_sb_get_block_size(&inode->fs->sb);
-    if (size > (uint64_t)UINT32_MAX * block_size) return EFBIG;
+	if (size > ukext4_inode_max_size(&inode->fs->sb))
+		return EFBIG;
     if (size >= old_size) {
         ext4_inode_set_size(inode->inode, size);
         inode->dirty = true;

@@ -130,8 +130,18 @@ static int disk_transfer(struct ext4_blockdev *device, void *buffer,
 	if (first > device->part_size / 512 ||
 	    blocks > device->part_size / 512 - first)
 		return EIO;
-	result = write ? uk_file_write(volume->source, &vector, 1, first * 512, 0) :
-		uk_file_read(volume->source, &vector, 1, first * 512, 0);
+	if (write) {
+		struct uk_file_io_result written =
+		    uk_file_write(volume->source, &vector, 1, first * 512, 0,
+				  UK_FILE_WRITE_SCALAR);
+
+		if (written.error)
+			return -written.error;
+		result = written.count;
+	} else {
+		result =
+		    uk_file_read(volume->source, &vector, 1, first * 512, 0);
+	}
 	return result < 0 ? -result : (size_t)result == length ? 0 : EIO;
 }
 static int disk_read(struct ext4_blockdev *device, void *buffer,
@@ -222,7 +232,10 @@ static int node_writeback(struct disk_node *node)
 				result = inode_delete(&inode);
 			}
 			else
-				result = ukext4_pages_writeback(&node->pages, &inode, &changed);
+				result = ukext4_pages_writeback(&node->pages,
+								&inode, 0,
+								SIZE_MAX,
+								&changed);
 			if (changed)
 				inode_touch(&inode, 1);
 			result = inode_put(&inode, result);
@@ -276,6 +289,57 @@ static int volume_sync(struct disk_node *node)
 	uk_mutex_unlock(&node->volume->lock);
 	return -result;
 }
+
+static int node_sync_range(struct disk_node *node,
+			   const struct uk_file_sync_range *range)
+{
+	struct disk_volume *volume = node->volume;
+	struct ext4_inode_ref inode;
+	uint64_t first, limit, size;
+	uint32_t block_size;
+	int changed, rc;
+
+	uk_mutex_lock(&volume->lock);
+	rc = volume->error;
+	if (rc || volume->fs.read_only || node->type != S_IFREG ||
+	    !(range->flags & SYNC_FILE_RANGE_WRITE))
+		goto out;
+	size = node->size;
+	first = (uint64_t)range->start & ~(uint64_t)(UK_PAGING_PAGE_SIZE - 1);
+	if (first >= size)
+		goto out;
+	limit = range->end >= (int64_t)size - 1
+			? size
+			: ((uint64_t)range->end + UK_PAGING_PAGE_SIZE) &
+				  ~(uint64_t)(UK_PAGING_PAGE_SIZE - 1);
+	if (limit > size)
+		limit = size;
+	rc = transaction_begin(volume);
+	if (!rc) {
+		rc = ext4_fs_get_inode_ref(&volume->fs, node->inode, &inode);
+		if (!rc) {
+			rc = ukext4_pages_writeback(&node->pages, &inode, first,
+						    limit, &changed);
+			if (changed)
+				inode_touch(&inode, 1);
+			rc = inode_put(&inode, rc);
+		}
+	}
+	rc = transaction_end(volume, rc);
+	if (rc)
+		goto out;
+	rc = ext4_fs_get_inode_ref(&volume->fs, node->inode, &inode);
+	if (!rc) {
+		block_size = ext4_sb_get_block_size(&volume->fs.sb);
+		rc = ext4_extent_flush_range(&inode, first / block_size,
+					     DIV_ROUND_UP(limit, block_size));
+		rc = inode_put(&inode, rc);
+	}
+out:
+	uk_mutex_unlock(&volume->lock);
+	return -rc;
+}
+
 static int volume_finish(struct disk_volume *volume)
 {
 	int result = sync_locked(volume);
@@ -543,13 +607,39 @@ static void inode_touch(struct ext4_inode_ref *inode, int modify)
 	if (ext4_get16(&inode->fs->sb, inode_size) >= sizeof(struct ext4_inode) &&
 	    ext4_inode_get_extra_isize(&inode->fs->sb, inode->inode) >= 16) {
 		ext4_set32(inode->inode, ctime_extra,
-			   ((uint32_t)now.tv_nsec << 2) | ((uint64_t)now.tv_sec >> 32));
+			   ((uint32_t)now.tv_nsec << 2) |
+			   ((uint64_t)now.tv_sec >> 32));
 		if (modify)
 			ext4_set32(inode->inode, mtime_extra,
-				   ((uint32_t)now.tv_nsec << 2) | ((uint64_t)now.tv_sec >> 32));
+				   ((uint32_t)now.tv_nsec << 2) |
+			   ((uint64_t)now.tv_sec >> 32));
 	}
 	inode->dirty = true;
 }
+
+static void inode_stat_times(const struct disk_volume *volume,
+			     struct ext4_inode *inode,
+			     struct uk_statx *stat)
+{
+	stat->stx_atime.tv_sec = (int32_t)ext4_inode_get_access_time(inode);
+	stat->stx_mtime.tv_sec = (int32_t)ext4_inode_get_modif_time(inode);
+	stat->stx_ctime.tv_sec =
+		(int32_t)ext4_inode_get_change_inode_time(inode);
+	if (ext4_get16(&volume->fs.sb, inode_size) >= sizeof(*inode) &&
+	    ext4_inode_get_extra_isize(&volume->fs.sb, inode) >= 16) {
+		__u32 atime = ext4_get32(inode, atime_extra);
+		__u32 mtime = ext4_get32(inode, mtime_extra);
+		__u32 ctime = ext4_get32(inode, ctime_extra);
+
+		stat->stx_atime.tv_sec += (int64_t)(atime & 3) << 32;
+		stat->stx_mtime.tv_sec += (int64_t)(mtime & 3) << 32;
+		stat->stx_ctime.tv_sec += (int64_t)(ctime & 3) << 32;
+		stat->stx_atime.tv_nsec = atime >> 2;
+		stat->stx_mtime.tv_nsec = mtime >> 2;
+		stat->stx_ctime.tv_nsec = ctime >> 2;
+	}
+}
+
 static ssize_t node_io(struct disk_node *node, const struct iovec *iov,
 		size_t count, size_t offset, unsigned long flags, int write)
 {
@@ -653,21 +743,7 @@ static int node_stat(struct disk_node *node, unsigned int mask __unused,
 		stat->stx_ino = node->inode;
 		stat->stx_size = ext4_inode_get_size(&volume->fs.sb, inode);
 		stat->stx_blocks = ext4_inode_get_blocks_count(&volume->fs.sb, inode);
-		stat->stx_atime.tv_sec = (int32_t)ext4_inode_get_access_time(inode);
-		stat->stx_mtime.tv_sec = (int32_t)ext4_inode_get_modif_time(inode);
-		stat->stx_ctime.tv_sec = (int32_t)ext4_inode_get_change_inode_time(inode);
-		if (ext4_get16(&volume->fs.sb, inode_size) >= sizeof(*inode) &&
-		    ext4_inode_get_extra_isize(&volume->fs.sb, inode) >= 16) {
-			uint32_t atime = ext4_get32(inode, atime_extra);
-			uint32_t mtime = ext4_get32(inode, mtime_extra);
-			uint32_t ctime = ext4_get32(inode, ctime_extra);
-			stat->stx_atime.tv_sec += (int64_t)(atime & 3) << 32;
-			stat->stx_mtime.tv_sec += (int64_t)(mtime & 3) << 32;
-			stat->stx_ctime.tv_sec += (int64_t)(ctime & 3) << 32;
-			stat->stx_atime.tv_nsec = atime >> 2;
-			stat->stx_mtime.tv_nsec = mtime >> 2;
-			stat->stx_ctime.tv_nsec = ctime >> 2;
-		}
+		inode_stat_times(volume, inode, stat);
 		result = inode_put(&ref, 0);
 	}
 	uk_mutex_unlock(&volume->lock);
@@ -685,6 +761,8 @@ static int node_setstat(struct disk_node *node, unsigned int mask,
 	if (mask & ~(UK_STATX_MODE | UK_STATX_UID | UK_STATX_GID |
 		     UK_STATX_ATIME | UK_STATX_MTIME | UK_STATX_CTIME))
 		return -EINVAL;
+	if ((mask & UK_STATX_MODE) && S_ISLNK(node->type))
+		return -EOPNOTSUPP;
 	result = node_update_begin(node, &ref);
 	if (result)
 		return -result;
@@ -713,8 +791,51 @@ static int node_setstat(struct disk_node *node, unsigned int mask,
 	}
 	return -node_update_end(node, &ref, result);
 }
+
+static int node_touch(struct disk_node *node, enum uk_file_touch operation,
+		      unsigned int open_flags, unsigned long mount_flags)
+{
+	struct disk_volume *volume = node->volume;
+	struct ext4_inode_ref ref;
+	struct uk_statx stat = {0};
+	struct timespec now;
+	int result;
+
+	if ((mount_flags & MS_RDONLY) || volume->fs.read_only)
+		return 0;
+	if (operation == UK_FILE_TOUCH_READ &&
+	    ((open_flags & O_NOATIME) || (mount_flags & MS_NOATIME) ||
+	     ((mount_flags & MS_NODIRATIME) && node->type == S_IFDIR)))
+		return 0;
+	result = node_update_begin(node, &ref);
+	if (result)
+		return -result;
+	if (operation == UK_FILE_TOUCH_WRITE) {
+		inode_touch(&ref, 1);
+		return -node_update_end(node, &ref, 0);
+	}
+	result = -uk_sys_clock_gettime(CLOCK_REALTIME, &now);
+	if (result)
+		return -node_update_end(node, &ref, result);
+	inode_stat_times(volume, ref.inode, &stat);
+	if ((mount_flags & MS_RELATIME) && !(mount_flags & MS_STRICTATIME) &&
+	    !uk_statx_timestamp_le(stat.stx_atime, stat.stx_mtime) &&
+	    !uk_statx_timestamp_le(stat.stx_atime, stat.stx_ctime) &&
+	    (now.tv_sec < stat.stx_atime.tv_sec ||
+	     (uint64_t)now.tv_sec - (uint64_t)stat.stx_atime.tv_sec < 86400))
+		return -node_update_end(node, &ref, 0);
+	ext4_inode_set_access_time(ref.inode, now.tv_sec);
+	if (ext4_get16(&volume->fs.sb, inode_size) >= sizeof(*ref.inode) &&
+	    ext4_inode_get_extra_isize(&volume->fs.sb, ref.inode) >= 16)
+		ext4_set32(ref.inode, atime_extra,
+			   ((uint32_t)now.tv_nsec << 2) |
+			   ((uint64_t)now.tv_sec >> 32));
+	ref.dirty = true;
+	return -node_update_end(node, &ref, 0);
+}
+
 static int node_control(struct disk_node *node, int family, int request,
-		uintptr_t arg1, uintptr_t arg2 __unused, uintptr_t arg3 __unused,
+		uintptr_t arg1, uintptr_t arg2, uintptr_t arg3 __unused,
 		unsigned long flags)
 {
 	struct disk_volume *volume = node->volume;
@@ -723,6 +844,18 @@ static int node_control(struct disk_node *node, int family, int request,
 
 	if (family != UKFILE_CTL_FILE)
 		return family == UKFILE_CTL_IOCTL ? -ENOTTY : -EOPNOTSUPP;
+	if (request == UKFILE_CTL_FILE_TOUCH) {
+		if (arg1 > UK_FILE_TOUCH_WRITE || (arg2 & ~O_NOATIME))
+			return -EINVAL;
+		return node_touch(node, (enum uk_file_touch)arg1, arg2, flags);
+	}
+	if (request == UKFILE_CTL_FILE_MAXSIZE) {
+		*(__off *)arg1 = ukext4_inode_max_size(&volume->fs.sb);
+		return 0;
+	}
+	if (request == UKFILE_CTL_FILE_SYNC_RANGE)
+		return node_sync_range(node,
+				       (const struct uk_file_sync_range *)arg1);
 	if (request == UKFILE_CTL_FILE_SYNC)
 		return volume_sync(node);
 	if (request == UKFILE_CTL_FILE_FADVISE)
@@ -964,6 +1097,8 @@ static int initialise_child(struct disk_volume *volume,
 		ext4_inode_set_mode(&volume->fs.sb, child->inode, mode | S_ISGID);
 	inode_touch(child, 1);
 	ext4_inode_set_access_time(child->inode, ext4_inode_get_modif_time(child->inode));
+	if (type == S_IFIFO)
+		return 0;
 	if (type == S_IFLNK && strlen(link) < sizeof(child->inode->blocks)) {
 		memcpy(child->inode->blocks, link, strlen(link));
 		ext4_inode_set_size(child->inode, strlen(link));
@@ -1007,7 +1142,8 @@ static struct disk_node *node_create(struct disk_node *node,
 		return ERR2PTR(-EROFS);
 	if (!temporary && (result = valid_name(name, length)))
 		return ERR2PTR(-result);
-	if (type != S_IFREG && type != S_IFDIR && type != S_IFLNK && !hardlink)
+	if (type != S_IFREG && type != S_IFDIR && type != S_IFLNK &&
+	    type != S_IFIFO && !hardlink)
 		return ERR2PTR(-EOPNOTSUPP);
 	if (hardlink && target.livenode->volume != volume)
 		return ERR2PTR(-EXDEV);
@@ -1040,7 +1176,9 @@ static struct disk_node *node_create(struct disk_node *node,
 		result = ext4_fs_get_inode_ref(&volume->fs, target.livenode->inode, &child);
 	} else {
 		int filetype = type == S_IFDIR ? EXT4_DE_DIR :
-			       type == S_IFLNK ? EXT4_DE_SYMLINK : EXT4_DE_REG_FILE;
+			       type == S_IFLNK ? EXT4_DE_SYMLINK :
+			       type == S_IFIFO ? EXT4_DE_FIFO :
+			       EXT4_DE_REG_FILE;
 		result = ext4_fs_alloc_inode(&volume->fs, &child, filetype);
 		allocated = !result;
 	}
@@ -1292,6 +1430,7 @@ static const struct ext4_live_ops ext4_ops = {
 	.live_acquire = node_acquire, .live_release = node_release,
 };
 
-UK_FS_TMPL_LIVE_GENERATE_STATIC(ext4, struct disk_node *, node_compare, ext4_ops, 0, NULL);
+UK_FS_TMPL_LIVE_GENERATE_STATIC(ext4, struct disk_node *, node_compare,
+				ext4_ops, 0, NULL, false);
 UK_FS_DRIVER_REGISTER(ext4, UK_FS_TMPL_LIVE_OP_VOPEN(ext4),
 		      UK_FS_VOPEN_VOL_RAW | UK_FS_VOPEN_DATA_IGNORE);

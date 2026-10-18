@@ -657,7 +657,11 @@ int uk_vma_set_attr(struct uk_vas *vas, __vaddr_t vaddr, __sz len,
 #define UK_VMA_ADV_EXTF_MASK						\
 	((1UL << UK_VMA_ADV_EXTF_BITS) - 1)
 
-int uk_vma_populate_page(struct uk_vas *vas, __vaddr_t vaddr);
+int uk_vma_populate_page(struct uk_vas *vas, __vaddr_t vaddr,
+			 unsigned int access);
+
+struct uk_lcpu_except_err_ctx;
+unsigned int uk_vmem_arch_fault_type(struct uk_lcpu_except_err_ctx *context);
 
 /**
  * Gives the virtual memory system advice about the specified address range.

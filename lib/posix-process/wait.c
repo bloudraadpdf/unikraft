@@ -19,6 +19,10 @@
 
 #include "process.h"
 #include "signal/siginfo.h"
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+#include <uk/posix-signal-wait.h>
+#include "signal/signal.h"
+#endif
 
 #define PPROCESS_STATE_CHANGED(_pp, _state)				  \
 	(((_state) & WEXITED) && ((_pp)->state == POSIX_PROCESS_EXITED || \
@@ -52,10 +56,14 @@ struct posix_process *pprocess_child_state_changed(int state)
  */
 static int pprocess_wait(pid_t pid, siginfo_t *si, int opt)
 {
+	struct pprocess_retired retired = {0};
 	struct posix_process *this_process;
 	struct posix_thread *this_thread;
 	struct posix_process *waitable = NULL;
 	struct posix_process *child = NULL;
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+	struct uk_posix_signal_wait signal;
+#endif
 	int ret;
 
 	UK_ASSERT(pid > 0 || pid == -1);
@@ -67,8 +75,16 @@ static int pprocess_wait(pid_t pid, siginfo_t *si, int opt)
 	this_process = this_thread->process;
 	UK_ASSERT(this_process);
 
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+	ret = uk_posix_signal_wait_init(&signal, &this_process->child_wait,
+					NULL, 0);
+	if (ret)
+		return ret;
+#endif
 	uk_mutex_lock(&pprocess_mutex);
+#if !CONFIG_LIBPOSIX_PROCESS_SIGNAL
 	this_thread->state = POSIX_THREAD_BLOCKED_WAIT;
+#endif
 	for (;;) {
 		if (pprocess_thread_exit_requested(this_thread)) {
 			ret = -EINTR;
@@ -92,7 +108,7 @@ static int pprocess_wait(pid_t pid, siginfo_t *si, int opt)
 			set_siginfo_wait(waitable, si);
 			ret = waitable->pid;
 			if (!(opt & WNOWAIT))
-				pprocess_release(waitable);
+				pprocess_release(waitable, &retired);
 			break;
 		}
 		if (opt & WNOHANG) {
@@ -100,11 +116,22 @@ static int pprocess_wait(pid_t pid, siginfo_t *si, int opt)
 			ret = 0;
 			break;
 		}
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+		ret = pprocess_signal_wait_check_locked(&signal);
+		if (ret)
+			break;
+#endif
 		uk_waitq_wait_locked(&this_process->child_wait,
 			uk_mutex_lock, uk_mutex_unlock, &pprocess_mutex);
 	}
+#if !CONFIG_LIBPOSIX_PROCESS_SIGNAL
 	this_thread->state = POSIX_THREAD_RUNNING;
+#endif
 	uk_mutex_unlock(&pprocess_mutex);
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+	uk_posix_signal_wait_end(&signal, ret, UK_POSIX_SIGNAL_RESTART_HANDLER);
+#endif
+	pprocess_retired_release(&retired);
 	return ret;
 }
 

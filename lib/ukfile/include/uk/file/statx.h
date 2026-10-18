@@ -23,6 +23,14 @@ struct uk_statx_timestamp {
 	int32_t _reserved;
 };
 
+static inline int uk_statx_timestamp_le(struct uk_statx_timestamp first,
+					struct uk_statx_timestamp second)
+{
+	return first.tv_sec < second.tv_sec ||
+		(first.tv_sec == second.tv_sec &&
+		 first.tv_nsec <= second.tv_nsec);
+}
+
 struct uk_statx {
 	uint32_t stx_mask;
 	uint32_t stx_blksize;

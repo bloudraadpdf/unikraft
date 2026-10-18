@@ -12,6 +12,8 @@
 #include <uk/assert.h>
 #include <uk/config.h>
 #include <uk/init.h>
+#include <uk/mutex.h>
+#include <uk/nofault.h>
 #include <uk/syscall.h>
 
 #include <uk/posix-fdtab.h>
@@ -43,17 +45,21 @@
 UK_CTASSERT(UK_FDTAB_SIZE <= UK_FD_MAX);
 
 
+/* Under mutation_lock, a used NULL map entry is an unpublished reservation. */
 struct uk_fdtab {
 	struct uk_alloc *alloc;
+	struct uk_mutex mutation_lock;
 	struct uk_fmap fmap;
 #if CONFIG_LIBPOSIX_FDTAB_MULTITAB
 	__atomic refcnt;
 #endif /* CONFIG_LIBPOSIX_FDTAB_MULTITAB */
 	unsigned long _bmap[UK_BMAP_NELEM(UK_FDTAB_SIZE)];
 	void *_fdmap[UK_FDTAB_SIZE];
+	unsigned long reserved_cloexec[UK_BMAP_NELEM(UK_FDTAB_SIZE)];
 };
 
 static struct uk_fdtab init_fdtab = {
+	.mutation_lock = UK_MUTEX_INITIALIZER(init_fdtab.mutation_lock),
 	.fmap = {
 		.bmap = {
 			.size = UK_FDTAB_SIZE,
@@ -89,6 +95,8 @@ static int init_posix_fdtab(struct uk_init_ctx *ictx __unused)
 	init_fdtab.alloc = uk_alloc_get_default();
 	/* Consider skipping init for .map (static vars are inited to 0) */
 	uk_fmap_init(&init_fdtab.fmap);
+	memset(init_fdtab.reserved_cloexec, 0,
+	       sizeof(init_fdtab.reserved_cloexec));
 #if CONFIG_LIBPOSIX_FDTAB_MULTITAB
 	/* Ensure the init thread has a valid fdtab ref */
 	uk_refcount_acquire(&init_fdtab.refcnt);
@@ -166,10 +174,79 @@ static void file_close(struct uk_fdtab *tab, struct fdval value)
 	file_rel(value.p, value.flags);
 }
 
+static void *fdtab_entry_locked(struct uk_fdtab *table, int fd)
+{
+	return fd >= 0 && fd < UK_FDTAB_SIZE ? table->fmap.map[fd] : NULL;
+}
+
+static struct fdval fdtab_get_locked(struct uk_fdtab *table, int fd)
+{
+	void *entry = fdtab_entry_locked(table, fd);
+	struct fdval value = {0};
+
+	if (entry) {
+		value = fdtab_decode(entry);
+		file_acq(value.p, value.flags);
+	}
+	return value;
+}
+
+static struct fdval _fdtab_get(struct uk_fdtab *table, int fd)
+{
+	struct fdval value;
+
+	uk_mutex_lock(&table->mutation_lock);
+	value = fdtab_get_locked(table, fd);
+	uk_mutex_unlock(&table->mutation_lock);
+	return value;
+}
+
+static int fdtab_close(struct uk_fdtab *tab, int fd, bool cloexec)
+{
+	void *entry;
+
+	uk_mutex_lock(&tab->mutation_lock);
+	entry = fdtab_entry_locked(tab, fd);
+	if (entry && cloexec &&
+	    !(fdtab_decode(entry).flags & UK_FDTAB_CLOEXEC))
+		entry = NULL;
+	if (entry)
+		entry = uk_fmap_take(&tab->fmap, fd);
+	uk_mutex_unlock(&tab->mutation_lock);
+	if (!entry)
+		return -EBADF;
+	file_close(tab, fdtab_decode(entry));
+	return 0;
+}
+
+static int fdtab_setflags_locked(struct uk_fdtab *tab, int fd,
+				 int set, int clear)
+{
+	void *entry = fdtab_entry_locked(tab, fd);
+	struct fdval value;
+
+	if (!entry)
+		return -EBADF;
+	value = fdtab_decode(entry);
+	value.flags = (value.flags & ~clear) | set;
+	uk_fmap_set(&tab->fmap, fd, fdtab_encode(value.p, value.flags));
+	return 0;
+}
+
+static int fdtab_setflags(struct uk_fdtab *tab, int fd, int set, int clear)
+{
+	int result;
+
+	uk_mutex_lock(&tab->mutation_lock);
+	result = fdtab_setflags_locked(tab, fd, set, clear);
+	uk_mutex_unlock(&tab->mutation_lock);
+	return result;
+}
+
 static unsigned int fdtab_limit(void)
 {
 #if CONFIG_LIBPOSIX_PROCESS
-	return uk_posix_nofile_limit();
+	return MIN(uk_posix_nofile_limit(), UK_FDTAB_SIZE);
 #else
 	return UK_FDTAB_SIZE;
 #endif
@@ -181,7 +258,9 @@ static int fdtab_put(const void *entry, int min)
 	int fd;
 
 	map.bmap.size = fdtab_limit();
+	uk_mutex_lock(&active_fdtab->mutation_lock);
 	fd = uk_fmap_put(&map, entry, min);
+	uk_mutex_unlock(&active_fdtab->mutation_lock);
 	return fd < (int)map.bmap.size ? fd : -EMFILE;
 }
 
@@ -229,42 +308,24 @@ int uk_fdtab_open(const struct uk_file *f, unsigned int mode)
 
 int uk_fdtab_setflags(int fd, int flags)
 {
-	struct uk_fmap *fmap;
-	void *p;
-	struct fdval v;
-	const void *newp;
-
 	if (flags & ~O_CLOEXEC)
 		return -EINVAL;
-
-	fmap = &active_fdtab->fmap;
-
-	p = uk_fmap_critical_take(fmap, fd);
-	if (!p)
-		return -EBADF;
-	v = fdtab_decode(p);
-	v.flags &= ~UK_FDTAB_CLOEXEC;
-	v.flags |= flags ? UK_FDTAB_CLOEXEC : 0;
-
-	newp = fdtab_encode(v.p, v.flags);
-	uk_fmap_critical_put(fmap, fd, newp);
-	return 0;
+	return fdtab_setflags(active_fdtab, fd,
+			      flags ? UK_FDTAB_CLOEXEC : 0, UK_FDTAB_CLOEXEC);
 }
 
 int uk_fdtab_getflags(int fd)
 {
-	void *p = uk_fmap_lookup(&active_fdtab->fmap, fd);
-	struct fdval v;
-	int ret;
+	void *entry;
+	int result = -EBADF;
 
-	if (!p)
-		return -EBADF;
-
-	v = fdtab_decode(p);
-	ret = 0;
-	if (v.flags & UK_FDTAB_CLOEXEC)
-		ret |= O_CLOEXEC;
-	return ret;
+	uk_mutex_lock(&active_fdtab->mutation_lock);
+	entry = fdtab_entry_locked(active_fdtab, fd);
+	if (entry)
+		result = (fdtab_decode(entry).flags & UK_FDTAB_CLOEXEC) ?
+			 O_CLOEXEC : 0;
+	uk_mutex_unlock(&active_fdtab->mutation_lock);
+	return result;
 }
 
 #if CONFIG_LIBPOSIX_FDTAB_LEGACY_SHIM
@@ -288,77 +349,35 @@ err_out:
 
 struct vfscore_file *uk_fdtab_legacy_get(int fd)
 {
-	struct uk_fmap *fmap = &active_fdtab->fmap;
-	struct vfscore_file *vf = NULL;
-	void *p = uk_fmap_critical_take(fmap, fd);
+	struct fdval value = _fdtab_get(active_fdtab, fd);
 
-	if (p) {
-		struct fdval v = fdtab_decode(p);
-
-		if (v.flags & UK_FDTAB_VFSCORE) {
-			vf = (struct vfscore_file *)v.p;
-			fhold(vf);
-		}
-		uk_fmap_critical_put(fmap, fd, p);
+	if (value.p && !(value.flags & UK_FDTAB_VFSCORE)) {
+		file_rel(value.p, value.flags);
+		return NULL;
 	}
-	return vf;
+	return value.p;
 }
+
 #endif /* CONFIG_LIBVFSCORE */
 
 int uk_fdtab_shim_get(int fd, union uk_shim_file *out)
 {
-	struct uk_fmap *fmap;
-	void *p;
+	struct fdval value = _fdtab_get(active_fdtab, fd);
 
-	if (fd < 0)
+	if (!value.p)
 		return -1;
-
-	fmap = &active_fdtab->fmap;
-
-	p = uk_fmap_critical_take(fmap, fd);
-	if (p) {
-		struct fdval v = fdtab_decode(p);
-
 #if CONFIG_LIBVFSCORE
-		if (v.flags & UK_FDTAB_VFSCORE) {
-			struct vfscore_file *vf = (struct vfscore_file *)v.p;
-
-			fhold(vf);
-			uk_fmap_critical_put(fmap, fd, p);
-			out->vfile = vf;
-			return UK_SHIM_LEGACY;
-		} else
-#endif /* CONFIG_LIBVFSCORE */
-		{
-			struct uk_ofile *of = (struct uk_ofile *)v.p;
-
-			uk_ofile_acquire(of);
-			uk_fmap_critical_put(fmap, fd, p);
-			out->ofile = of;
-			return UK_SHIM_OFILE;
-		}
+	if (value.flags & UK_FDTAB_VFSCORE) {
+		out->vfile = value.p;
+		return UK_SHIM_LEGACY;
 	}
-	return -1;
+#endif
+	out->ofile = value.p;
+	return UK_SHIM_OFILE;
 }
+
 #endif /* CONFIG_LIBPOSIX_FDTAB_LEGACY_SHIM */
 
-static struct fdval _fdtab_get(struct uk_fdtab *tab, int fd)
-{
-	struct fdval ret = { NULL, 0 };
-
-	if (fd >= 0) {
-		/* Need to refcount atomically => critical take & put */
-		struct uk_fmap *fmap = &tab->fmap;
-		void *p = uk_fmap_critical_take(fmap, fd);
-
-		if (p) {
-			ret = fdtab_decode(p);
-			file_acq(ret.p, ret.flags);
-			uk_fmap_critical_put(fmap, fd, p);
-		}
-	}
-	return ret;
-}
 
 struct uk_ofile *uk_fdtab_get_from(struct uk_fdtab *table, int fd)
 {
@@ -381,11 +400,17 @@ struct uk_ofile *uk_fdtab_get(int fd)
 
 int uk_fdtab_next(struct uk_fdtab *table, int start)
 {
+	int result = -1;
+
+	uk_mutex_lock(&table->mutation_lock);
 	for (int fd = MAX(start, 0); fd < UK_FDTAB_SIZE; fd++) {
-		if (uk_fmap_lookup(&table->fmap, fd))
-			return fd;
+		if (fdtab_entry_locked(table, fd)) {
+			result = fd;
+			break;
+		}
 	}
-	return -1;
+	uk_mutex_unlock(&table->mutation_lock);
+	return result;
 }
 
 #if CONFIG_LIBPOSIX_FDTAB_MULTITAB
@@ -437,25 +462,174 @@ struct uk_fdtab *uk_fdtab_get_thread(struct uk_thread *thread __unused)
 }
 #endif
 
+enum fdtab_reservation_state {
+	FDTAB_RESERVED,
+	FDTAB_INSTALLED
+};
+
+struct uk_fdtab_reservation {
+	struct uk_fdtab_reservation *next;
+	struct uk_fdtab *table;
+	enum fdtab_reservation_state state;
+	int fd;
+};
+
+static __uk_tls struct uk_fdtab_reservation *fdtab_reservations;
+
+static void fdtab_reservation_unlink(struct uk_fdtab_reservation *reservation)
+{
+	struct uk_fdtab_reservation **position = &fdtab_reservations;
+
+	while (*position && *position != reservation)
+		position = &(*position)->next;
+	UK_ASSERT(*position == reservation);
+	*position = reservation->next;
+}
+
+static void fdtab_reservation_release(struct uk_fdtab_reservation *reservation)
+{
+	uk_fdtab_put(reservation->table);
+	uk_free(uk_alloc_get_default(), reservation);
+}
+
+static void fdtab_reservation_cancel(struct uk_fdtab_reservation *reservation)
+{
+	struct uk_fdtab *table = reservation->table;
+	int result __maybe_unused;
+
+	if (reservation->state == FDTAB_RESERVED) {
+		uk_mutex_lock(&table->mutation_lock);
+		UK_ASSERT(!fdtab_entry_locked(table, reservation->fd));
+		uk_clear_bit(reservation->fd, table->reserved_cloexec);
+		result = uk_bmap_free(&table->fmap.bmap, reservation->fd);
+		UK_ASSERT(!result);
+		uk_mutex_unlock(&table->mutation_lock);
+	}
+	fdtab_reservation_release(reservation);
+}
+
+void uk_fdtab_cancel(struct uk_fdtab_reservation *reservation)
+{
+	if (reservation) {
+		fdtab_reservation_unlink(reservation);
+		fdtab_reservation_cancel(reservation);
+	}
+}
+
+struct uk_fdtab_reservation *uk_fdtab_reserve(unsigned int mode)
+{
+	struct uk_fdtab_reservation *reservation;
+	struct uk_fdtab *table = uk_fdtab_get_thread(uk_thread_current());
+	unsigned int limit = fdtab_limit();
+	struct uk_bmap bitmap;
+	size_t available;
+	int fd;
+
+	if (!table)
+		return ERR2PTR(-EBADF);
+	uk_mutex_lock(&table->mutation_lock);
+	available = uk_find_next_bit((unsigned long *)table->fmap.bmap.bitmap,
+				     limit, 0);
+	uk_mutex_unlock(&table->mutation_lock);
+	if (available == limit) {
+		uk_fdtab_put(table);
+		return ERR2PTR(-EMFILE);
+	}
+	reservation = uk_malloc(uk_alloc_get_default(), sizeof(*reservation));
+	if (!reservation) {
+		uk_fdtab_put(table);
+		return ERR2PTR(-ENOMEM);
+	}
+	bitmap = table->fmap.bmap;
+	bitmap.size = limit;
+	uk_mutex_lock(&table->mutation_lock);
+	fd = uk_bmap_request(&bitmap, 0);
+	if (fd < (int)limit) {
+		*reservation = (struct uk_fdtab_reservation){
+			.next = fdtab_reservations,
+			.table = table,
+			.state = FDTAB_RESERVED,
+			.fd = fd
+		};
+		if (mode & O_CLOEXEC)
+			uk_set_bit(fd, table->reserved_cloexec);
+		else
+			uk_clear_bit(fd, table->reserved_cloexec);
+		fdtab_reservations = reservation;
+	}
+	uk_mutex_unlock(&table->mutation_lock);
+	if (fd >= (int)limit) {
+		uk_free(uk_alloc_get_default(), reservation);
+		uk_fdtab_put(table);
+		return ERR2PTR(-EMFILE);
+	}
+	return reservation;
+}
+
+int uk_fdtab_install(struct uk_fdtab_reservation *reservation,
+		     struct uk_ofile *ofile, int *user_fd)
+{
+	struct uk_fdtab *table = reservation->table;
+	unsigned int flags;
+	int result = -EINTR;
+
+	UK_ASSERT(reservation->state == FDTAB_RESERVED);
+	if (user_fd && !uk_nofault_try_write(reservation->fd, user_fd)) {
+		uk_fdtab_cancel(reservation);
+		return -EFAULT;
+	}
+	uk_mutex_lock(&table->mutation_lock);
+	if (table == active_fdtab) {
+		UK_ASSERT(!fdtab_entry_locked(table, reservation->fd));
+		UK_ASSERT(!uk_bmap_isfree(&table->fmap.bmap, reservation->fd));
+		flags = uk_test_bit(reservation->fd, table->reserved_cloexec)
+			    ? UK_FDTAB_CLOEXEC
+			    : 0;
+		uk_fmap_set(&table->fmap, reservation->fd,
+			    fdtab_encode(ofile, flags));
+		uk_clear_bit(reservation->fd, table->reserved_cloexec);
+		reservation->state = FDTAB_INSTALLED;
+		result = reservation->fd;
+	}
+	uk_mutex_unlock(&table->mutation_lock);
+	uk_fdtab_cancel(reservation);
+	return result;
+}
+
+static void fdtab_reservations_cancel_thread(struct uk_thread *thread)
+{
+	struct uk_fdtab_reservation *reservation =
+		uk_thread_uktls_var(thread, fdtab_reservations);
+
+	uk_thread_uktls_var(thread, fdtab_reservations) = NULL;
+	while (reservation) {
+		struct uk_fdtab_reservation *next = reservation->next;
+
+		fdtab_reservation_cancel(reservation);
+		reservation = next;
+	}
+}
+
+void uk_fdtab_execve_commit(struct uk_thread *thread)
+{
+	fdtab_reservations_cancel_thread(thread);
+}
+
+static int fdtab_reservations_init(struct uk_thread *child,
+				   struct uk_thread *parent __unused)
+{
+	uk_thread_uktls_var(child, fdtab_reservations) = NULL;
+	return 0;
+}
+
+UK_THREAD_INIT_PRIO_FLAGS(fdtab_reservations_init,
+			  fdtab_reservations_cancel_thread, UK_PRIO_LATEST,
+			  UK_THREAD_INITF_UKTLS);
+
 static void fdtab_cleanup(struct uk_fdtab *tab, int all)
 {
-	struct uk_fmap *fmap = &tab->fmap;
-
-	for (int i = 0; i < UK_FDTAB_SIZE; i++) {
-		void *p = uk_fmap_lookup(fmap, i);
-
-		if (p) {
-			struct fdval v = fdtab_decode(p);
-
-			if (all || (v.flags & UK_FDTAB_CLOEXEC)) {
-				void **pp __maybe_unused;
-
-				pp = uk_fmap_take(fmap, i);
-				UK_ASSERT(p == pp);
-				file_close(tab, v);
-			}
-		}
-	}
+	for (int fd = 0; fd < UK_FDTAB_SIZE; fd++)
+		fdtab_close(tab, fd, !all);
 }
 
 void uk_fdtab_cloexec(void)
@@ -487,6 +661,7 @@ static int fdtab_handle_execve(void *data)
 #else /* !CONFIG_LIBPOSIX_FDTAB_MULTITAB */
 static int fdtab_handle_execve(void *data)
 {
+	(void)data;
 	uk_fdtab_cloexec();
 	return UK_EVENT_HANDLED_CONT;
 }
@@ -515,10 +690,6 @@ static void term_posix_fdtab(struct uk_term_ctx *tctx __unused)
 /**
  * Duplicate the current fdtab and return a pointer to the copy.
  *
- * NOTE: This is a basic implementation that does not guarantee atomicity of the
- * clone operation; we optimistically assume this will not break anything.
- * Please revisit if this turns out to be false.
- *
  * @param tab fdtab to duplicate
  *
  * @return
@@ -533,6 +704,7 @@ static struct uk_fdtab *fdtab_duplicate(struct uk_fdtab *tab)
 		return NULL;
 
 	ret->alloc = tab->alloc;
+	uk_mutex_init(&ret->mutation_lock);
 	ret->fmap = (struct uk_fmap){
 		.bmap = {
 			.size = UK_FDTAB_SIZE,
@@ -541,14 +713,18 @@ static struct uk_fdtab *fdtab_duplicate(struct uk_fdtab *tab)
 		.map = ret->_fdmap
 	};
 	uk_refcount_init(&ret->refcnt, 1);
+	uk_fmap_init(&ret->fmap);
+	memset(ret->reserved_cloexec, 0, sizeof(ret->reserved_cloexec));
+	uk_mutex_lock(&tab->mutation_lock);
 	for (int i = 0; i < UK_FDTAB_SIZE; i++) {
-		struct fdval v = _fdtab_get(tab, i);
+		struct fdval v = fdtab_get_locked(tab, i);
 		const void *entry = NULL;
 
 		if (v.p)
 			entry = fdtab_encode(v.p, v.flags);
 		uk_fmap_set(&ret->fmap, i, entry);
 	}
+	uk_mutex_unlock(&tab->mutation_lock);
 	return ret;
 }
 
@@ -647,20 +823,52 @@ uk_rootfs_initcall_prio(0x0, term_posix_fdtab, UK_PRIO_LATEST);
 
 int uk_sys_close(int fd)
 {
-	void *p;
-	struct fdval v;
+	return fdtab_close(active_fdtab, fd, false);
+}
 
-	p = uk_fmap_take(&active_fdtab->fmap, fd);
-	if (!p)
-		return -EBADF;
-	v = fdtab_decode(p);
-	file_close(active_fdtab, v);
+int uk_sys_close_range(unsigned int first, unsigned int last,
+		       unsigned int flags)
+{
+	struct uk_fdtab *tab = active_fdtab;
+	struct uk_fdtab *previous = NULL;
+	unsigned int end = MIN(last, UK_FDTAB_SIZE - 1);
+
+	if (first > last || flags & ~(UK_CLOSE_RANGE_UNSHARE |
+				     UK_CLOSE_RANGE_CLOEXEC))
+		return -EINVAL;
+	if ((flags & UK_CLOSE_RANGE_UNSHARE) &&
+	    uk_refcount_read(&tab->refcnt) > 1) {
+		struct uk_fdtab *copy = fdtab_duplicate(tab);
+
+		if (!copy)
+			return -ENOMEM;
+		previous = tab;
+		tab = copy;
+	}
+	if (flags & UK_CLOSE_RANGE_CLOEXEC) {
+		uk_mutex_lock(&tab->mutation_lock);
+		for (unsigned int fd = first; fd <= end; fd++) {
+			if (fdtab_entry_locked(tab, fd))
+				fdtab_setflags_locked(tab, fd, UK_FDTAB_CLOEXEC,
+						      0);
+			else if (!uk_bmap_isfree(&tab->fmap.bmap, fd))
+				uk_set_bit(fd, tab->reserved_cloexec);
+		}
+		uk_mutex_unlock(&tab->mutation_lock);
+	} else {
+		for (unsigned int fd = first; fd <= end; fd++)
+			fdtab_close(tab, fd, false);
+	}
+	if (previous) {
+		fdtab_exchange_thread(uk_thread_current(), tab);
+		uk_fdtab_put(previous);
+	}
 	return 0;
 }
 
 int uk_sys_dup3(int oldfd, int newfd, int flags)
 {
-	int r __maybe_unused;
+	int r;
 	struct fdval dup;
 	void *prevp;
 	const void *newent;
@@ -681,8 +889,17 @@ int uk_sys_dup3(int oldfd, int newfd, int flags)
 
 	prevp = NULL;
 	newent = fdtab_encode(dup.p, dup.flags);
-	r = uk_fmap_xchg(&active_fdtab->fmap, newfd, newent, &prevp);
-	UK_ASSERT(!r); /* newfd should be in range */
+	uk_mutex_lock(&active_fdtab->mutation_lock);
+	if (!fdtab_entry_locked(active_fdtab, newfd) &&
+	    !uk_bmap_isfree(&active_fdtab->fmap.bmap, newfd))
+		r = -EBUSY;
+	else
+		r = uk_fmap_xchg(&active_fdtab->fmap, newfd, newent, &prevp);
+	uk_mutex_unlock(&active_fdtab->mutation_lock);
+	if (r) {
+		file_rel(dup.p, dup.flags);
+		return r;
+	}
 	if (prevp) {
 		struct fdval prevv = fdtab_decode(prevp);
 
@@ -694,7 +911,7 @@ int uk_sys_dup3(int oldfd, int newfd, int flags)
 int uk_sys_dup2(int oldfd, int newfd)
 {
 	if (oldfd == newfd)
-		if (uk_fmap_lookup(&active_fdtab->fmap, oldfd))
+		if (uk_fdtab_getflags(oldfd) >= 0)
 			return newfd;
 		else
 			return -EBADF;
@@ -747,6 +964,12 @@ int uk_sys_dup(int oldfd)
 UK_SYSCALL_R_DEFINE(int, close, int, fd)
 {
 	return uk_sys_close(fd);
+}
+
+UK_SYSCALL_R_DEFINE(int, close_range, unsigned int, first, unsigned int, last,
+		    unsigned int, flags)
+{
+	return uk_sys_close_range(first, last, flags);
 }
 
 UK_SYSCALL_R_DEFINE(int, dup, int, oldfd)

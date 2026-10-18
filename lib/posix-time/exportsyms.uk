@@ -25,3 +25,4 @@ timer_settime
 timer_gettime
 time
 timer_getoverrun
+getitimer

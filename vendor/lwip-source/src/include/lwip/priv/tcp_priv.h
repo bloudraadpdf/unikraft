@@ -55,6 +55,9 @@
 extern "C" {
 #endif
 
+err_t tcp_write_capacity(struct tcp_pcb *pcb, u16_t requested,
+                         u16_t *available);
+
 /* Functions for interfacing with TCP: */
 
 /* Lower layer interface to TCP: */

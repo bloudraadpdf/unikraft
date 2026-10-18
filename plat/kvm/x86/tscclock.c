@@ -98,8 +98,7 @@
 #error Timer tick frequency (CONFIG_HZ) cannot be higher than PIT frequency!
 #endif
 
-/* RTC wall time offset at monotonic time base. */
-static __u64 rtc_epochoffset;
+static __u64 wall_clock_offset;
 
 /*
  * TSC clock specific.
@@ -258,6 +257,7 @@ static int apic_timer_calibrate(void)
 #endif
 
 /* KVM clock ABI: https://docs.kernel.org/virt/kvm/x86/msr.html */
+#define MSR_KVM_WALL_CLOCK_NEW 0x4b564d00
 #define MSR_KVM_SYSTEM_TIME_NEW 0x4b564d01
 
 struct kvm_clock_info {
@@ -271,21 +271,37 @@ struct kvm_clock_info {
 	__u8 pad[2];
 } __packed;
 
-static struct kvm_clock_info kvm_clock __align(32);
+struct kvm_wall_clock {
+	__u32 version;
+	__u32 seconds;
+	__u32 nanoseconds;
+} __packed;
 
-static __u64 kvm_tsc_frequency(void)
+struct kvm_time_sample {
+	__u64 frequency;
+	__u64 timestamp;
+	__u64 epoch;
+};
+
+UK_CTASSERT(sizeof(struct kvm_clock_info) == 32);
+UK_CTASSERT(sizeof(struct kvm_wall_clock) == 12);
+
+static struct kvm_clock_info kvm_clock __align(32);
+static struct kvm_wall_clock kvm_wall __align(4);
+
+static int kvm_read_time(struct kvm_time_sample *sample)
 {
-	__u32 eax, ebx, ecx, edx, version, multiplier;
+	__u32 eax, ebx, ecx, edx, version, multiplier, seconds, nanoseconds;
 	__s8 shift;
-	__u64 frequency, address;
+	__u64 frequency, address, timestamp, system_time, epoch;
 
 	uk_arch_x86_64_cpuid(0x40000000, 0, &eax, &ebx, &ecx, &edx);
 	if (eax < 0x40000001 || ebx != 0x4b4d564b ||
 	    ecx != 0x564b4d56 || edx != 0x4d)
-		return 0;
+		return -ENOTSUP;
 	uk_arch_x86_64_cpuid(0x40000001, 0, &eax, &ebx, &ecx, &edx);
 	if (!(eax & UK_BIT(3)))
-		return 0;
+		return -ENOTSUP;
 
 	address = uk_paging_virt_to_phys((__vaddr_t)&kvm_clock);
 	uk_arch_x86_64_wrmsrl(MSR_KVM_SYSTEM_TIME_NEW, address | 1);
@@ -296,21 +312,47 @@ static __u64 kvm_tsc_frequency(void)
 	uk_arch_x86_64_rmb();
 	multiplier = UK_READ_ONCE(kvm_clock.multiplier);
 	shift = UK_READ_ONCE(kvm_clock.shift);
+	timestamp = UK_READ_ONCE(kvm_clock.tsc_timestamp);
+	system_time = UK_READ_ONCE(kvm_clock.system_time);
 	uk_arch_x86_64_rmb();
 	if (!version || (version & 1) ||
 	    version != UK_READ_ONCE(kvm_clock.version) || !multiplier ||
 	    shift < -32 || shift > 32)
-		return 0;
+		return -EIO;
 
 	frequency = (UKARCH_NSEC_PER_SEC << 32) / multiplier;
 	if (shift < 0) {
 		if (frequency > (UINT64_MAX >> -shift))
-			return 0;
+			return -ERANGE;
 		frequency <<= -shift;
 	} else {
 		frequency >>= shift;
 	}
-	return frequency;
+	if (!frequency)
+		return -ERANGE;
+
+	address = uk_paging_virt_to_phys((__vaddr_t)&kvm_wall);
+	uk_arch_x86_64_wrmsrl(MSR_KVM_WALL_CLOCK_NEW, address);
+	uk_arch_x86_64_wrmsrl(MSR_KVM_WALL_CLOCK_NEW, 0);
+	uk_arch_x86_64_rmb();
+	version = UK_READ_ONCE(kvm_wall.version);
+	uk_arch_x86_64_rmb();
+	seconds = UK_READ_ONCE(kvm_wall.seconds);
+	nanoseconds = UK_READ_ONCE(kvm_wall.nanoseconds);
+	uk_arch_x86_64_rmb();
+	if (!version || (version & 1) ||
+	    version != UK_READ_ONCE(kvm_wall.version) ||
+	    nanoseconds >= UKARCH_NSEC_PER_SEC)
+		return -EIO;
+	epoch = (__u64)seconds * UKARCH_NSEC_PER_SEC + nanoseconds;
+	if (system_time > UINT64_MAX - epoch)
+		return -ERANGE;
+	*sample = (struct kvm_time_sample) {
+		.frequency = frequency,
+		.timestamp = timestamp,
+		.epoch = epoch + system_time
+	};
+	return 0;
 }
 
 /*
@@ -318,8 +360,11 @@ static __u64 kvm_tsc_frequency(void)
  */
 int tscclock_init(void)
 {
-	__u64 tsc_freq = 0, rtc_boot;
+	struct kvm_time_sample sample = { 0 };
+	__u64 tsc_freq = 0;
 	__u32 eax, ebx, ecx, edx;
+	bool have_kvm_clock;
+	int rc;
 
 #if CONFIG_KVM_PIT
 	/* Initialise i8254 timer channel 0 to mode 2 at CONFIG_HZ frequency */
@@ -336,13 +381,15 @@ int tscclock_init(void)
 	}
 #endif
 
-	/*
-	 * Read RTC "time at boot". This must be done just before tsc_base is
-	 * initialised in order to get a correct offset below.
-	 */
-	rtc_boot = rtc_gettimeofday();
 	tsc_base = uk_arch_x86_64_rdtsc();
-	tsc_freq = kvm_tsc_frequency();
+	rc = kvm_read_time(&sample);
+	have_kvm_clock = !rc;
+	if (have_kvm_clock) {
+		tsc_base = sample.timestamp;
+		tsc_freq = sample.frequency;
+	} else if (rc != -ENOTSUP) {
+		return rc;
+	}
 
 	/*
 	 * Attempt to retrieve TSC frequency via the hypervisor generic cpuid
@@ -396,14 +443,13 @@ int tscclock_init(void)
 	uk_pr_info("Clock source: TSC, frequency estimate is %llu Hz\n",
 		   (unsigned long long) tsc_freq);
 
-	/*
-	 * Compute RTC epoch offset by subtracting monotonic time from RTC
-	 * time at boot.
-	 */
-	rtc_epochoffset = rtc_boot - tscclock_monotonic();
+	if (have_kvm_clock)
+		wall_clock_offset = sample.epoch;
+	else
+		wall_clock_offset = rtc_gettimeofday() - tscclock_monotonic();
 
 #if CONFIG_LIBUKINTCTLR_APIC && CONFIG_KVM_PIT
-	int rc = apic_timer_calibrate();
+	rc = apic_timer_calibrate();
 
 	if (rc)
 		return rc;
@@ -427,7 +473,7 @@ int tscclock_init(void)
  */
 __u64 tscclock_epochoffset(void)
 {
-	return rtc_epochoffset;
+	return wall_clock_offset;
 }
 
 #if !CONFIG_KVM_PIT

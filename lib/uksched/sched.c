@@ -40,6 +40,7 @@
 #include <uk/plat/config.h>
 #include <uk/plat/time.h>
 #include <uk/alloc.h>
+#include <uk/errptr.h>
 #include <uk/lcpu.h>
 #include <uk/sched.h>
 #include <uk/sched_impl.h>
@@ -51,6 +52,48 @@
 struct uk_sched *uk_sched_head;
 
 __uk_pcpuvar struct uk_thread *__uk_sched_thread_current;
+
+__nsec uk_sched_current_exec_time(void)
+{
+	struct uk_sched *scheduler = uk_sched_current();
+	unsigned long flags;
+	__nsec time;
+
+	UK_ASSERT(scheduler && scheduler->current_exec_time);
+	ukplat_spin_lock_irqsave(&scheduler->lock, flags);
+	time = scheduler->current_exec_time(scheduler);
+	ukplat_spin_unlock_irqrestore(&scheduler->lock, flags);
+	return time;
+}
+
+struct uk_sched_affinity {
+	UK_TAILQ_ENTRY(struct uk_sched_affinity) link;
+	struct uk_thread *thread;
+	struct uk_alloc *allocator;
+	unsigned int references;
+	struct uk_waitq wait;
+	unsigned long mask[UK_THREAD_CPU_MASK_WORDS];
+	bool complete;
+	bool submitted;
+	int result;
+};
+
+static __spinlock affinity_transfer_lock = UKARCH_SPINLOCK_INITIALIZER();
+
+static bool sched_cpu_allowed(const unsigned long *mask,
+			      const struct uk_sched *s)
+{
+	const size_t bits = sizeof(*mask) * CHAR_BIT;
+
+	UK_ASSERT(s->cpu_index < CONFIG_UKPLAT_CPU_MAXCOUNT);
+	return (mask[s->cpu_index / bits] & (1UL << (s->cpu_index % bits))) !=
+	       0;
+}
+
+static void affinity_cancel_locked(struct uk_thread *thread,
+				   struct uk_sched_affinity_list *cancelled);
+static void affinity_complete_list(struct uk_sched_affinity_list *cancelled);
+static void affinity_abandon(struct uk_thread *thread);
 
 int uk_sched_register(struct uk_sched *s)
 {
@@ -338,6 +381,7 @@ static void sched_stop_complete(struct uk_thread *thread)
 
 	if (uk_thread_in_waitq(thread))
 		uk_waitq_cancel(thread);
+	affinity_abandon(thread);
 	thread->wakeup_time = 0;
 	_uk_waitq_lock(&thread->stop_wait, flags);
 	__atomic_store_n(&thread->stop_complete, true, __ATOMIC_RELEASE);
@@ -372,18 +416,22 @@ void uk_sched_thread_stop(struct uk_thread *thread)
 	struct uk_sched *sched;
 	unsigned long flags;
 	bool local, requested = false;
+	struct uk_sched_affinity_list cancelled;
 
 	UK_ASSERT(thread);
 	UK_ASSERT(thread != uk_thread_current());
-	sched = thread->sched;
-	if (!sched)
+	UK_ASSERT(!uk_lcpu_irqs_disabled());
+
+	sched = uk_thread_sched_lock(thread, &flags);
+	if (!sched) {
+		uk_thread_sched_unlock(sched, flags);
 		return;
+	}
 	UK_ASSERT(thread != sched->idle_thread(sched, 0));
 	local = !sched->is_started ||
 		sched->cpu_index == uk_pcpuvar_current_get(uk_pcpuvar_cpu_idx);
-	UK_ASSERT(!uk_lcpu_irqs_disabled());
-
-	ukplat_spin_lock_irqsave(&sched->lock, flags);
+	UK_TAILQ_INIT(&cancelled);
+	affinity_cancel_locked(thread, &cancelled);
 	if (!uk_thread_is_stopping(thread)) {
 		sched->thread_remove(sched, thread);
 		thread->flags |= UK_THREADF_STOPPING;
@@ -392,7 +440,8 @@ void uk_sched_thread_stop(struct uk_thread *thread)
 			UK_TAILQ_INSERT_TAIL(&sched->stop_requests, thread, queue);
 		requested = true;
 	}
-	ukplat_spin_unlock_irqrestore(&sched->lock, flags);
+	uk_thread_sched_unlock(sched, flags);
+	affinity_complete_list(&cancelled);
 	if (requested) {
 		if (local)
 			sched_stop_complete(thread);
@@ -425,11 +474,14 @@ void uk_sched_thread_terminate(struct uk_thread *thread)
 	uk_pr_debug("%p: thread %p (%s) terminated\n",
 		    sched, thread, thread->name ? thread->name : "<unnamed>");
 
-	if (thread == uk_thread_current() && uk_thread_in_waitq(thread))
-		uk_waitq_cancel(thread);
-	if (thread == uk_thread_current())
+	if (thread == uk_thread_current()) {
+		if (uk_thread_in_waitq(thread))
+			uk_waitq_cancel(thread);
+		affinity_abandon(thread);
 		uk_thread_set_exited(thread);
+	}
 	/* remove from scheduling queue */
+	sched = thread->sched;
 	uk_sched_thread_remove(thread);
 	/* causes calling termination table */
 	uk_thread_set_exited(thread);
@@ -489,6 +541,8 @@ int uk_sched_thread_add(struct uk_sched *s, struct uk_thread *t)
 	UK_ASSERT(s);
 	UK_ASSERT(t);
 	UK_ASSERT(!t->sched);
+	if (!sched_cpu_allowed(t->allowed_cpus, s))
+		return -EINVAL;
 
 	ukplat_spin_lock_irqsave(&s->lock, flags);
 
@@ -496,7 +550,7 @@ int uk_sched_thread_add(struct uk_sched *s, struct uk_thread *t)
 	if (rc < 0)
 		goto out;
 
-	t->sched = s;
+	__atomic_store_n(&t->sched, s, __ATOMIC_RELEASE);
 	UK_TAILQ_INSERT_TAIL(&s->thread_list, t, thread_list);
 out:
 	ukplat_spin_unlock_irqrestore(&s->lock, flags);
@@ -509,18 +563,20 @@ int uk_sched_thread_remove(struct uk_thread *t)
 {
 	unsigned long flags;
 	struct uk_sched *s;
+	struct uk_sched_affinity_list cancelled;
 
 	UK_ASSERT(t);
-	UK_ASSERT(t->sched);
-
-	s = t->sched;
 	if (t != uk_thread_current())
 		uk_sched_thread_stop(t);
-	ukplat_spin_lock_irqsave(&s->lock, flags);
+	s = uk_thread_sched_lock(t, &flags);
+	UK_ASSERT(s);
+	UK_TAILQ_INIT(&cancelled);
+	affinity_cancel_locked(t, &cancelled);
 	s->thread_remove(s, t);
-	t->sched = NULL;
+	__atomic_store_n(&t->sched, NULL, __ATOMIC_RELEASE);
 	UK_TAILQ_REMOVE(&s->thread_list, t, thread_list);
-	ukplat_spin_unlock_irqrestore(&s->lock, flags);
+	uk_thread_sched_unlock(s, flags);
+	affinity_complete_list(&cancelled);
 	return 0;
 }
 
@@ -575,13 +631,6 @@ int uk_sched_get_cpu_mask(size_t size, unsigned long *mask)
 			mask[scheduler->cpu_index / word_bits] |=
 				1UL << (scheduler->cpu_index % word_bits);
 	return bytes;
-}
-
-UK_SYSCALL_R_DEFINE(int, sched_setaffinity, int, pid, long, cpusetsize,
-						unsigned long*, mask)
-{
-	UK_WARN_STUBBED();
-	return 0;
 }
 
 static void sched_membarrier_local(bool sync_core)
@@ -647,7 +696,7 @@ int uk_sched_membarrier(bool sync_core)
 	return 0;
 }
 
-struct uk_sched *uk_sched_select(void)
+struct uk_sched *uk_sched_select(const struct uk_thread *thread)
 {
 	static unsigned int next = 1;
 	struct uk_sched *scheduler;
@@ -655,12 +704,15 @@ struct uk_sched *uk_sched_select(void)
 	unsigned int selected;
 
 	for (scheduler = uk_sched_head; scheduler; scheduler = scheduler->next)
-		if (scheduler->is_started)
+		if (scheduler->is_started &&
+		    sched_cpu_allowed(thread->allowed_cpus, scheduler))
 			count++;
 	UK_ASSERT(count);
 	selected = __atomic_fetch_add(&next, 1, __ATOMIC_RELAXED) % count;
 	for (scheduler = uk_sched_head; scheduler; scheduler = scheduler->next)
-		if (scheduler->is_started && !selected--)
+		if (scheduler->is_started &&
+		    sched_cpu_allowed(thread->allowed_cpus, scheduler) &&
+		    !selected--)
 			return scheduler;
 	UK_CRASH("No started scheduler selected");
 }
@@ -683,4 +735,292 @@ bool uk_sched_has_higher_priority(void)
 	}
 	ukplat_spin_unlock_irqrestore(&scheduler->lock, flags);
 	return found;
+}
+
+static void affinity_release(struct uk_sched_affinity *request)
+{
+	if (!__atomic_sub_fetch(&request->references, 1, __ATOMIC_ACQ_REL))
+		uk_free(request->allocator, request);
+}
+
+static void affinity_complete(struct uk_sched_affinity *request, int result)
+{
+	struct uk_waitq_ticket *ticket;
+	unsigned long flags;
+
+	_uk_waitq_lock(&request->wait, flags);
+	request->result = result;
+	__atomic_store_n(&request->complete, true, __ATOMIC_RELEASE);
+	uk_list_for_each_entry(ticket, &request->wait.waiters, link)
+		_uk_waitq_wake(&request->wait, ticket);
+	_uk_waitq_unlock(&request->wait, flags);
+	affinity_release(request);
+}
+
+static void affinity_complete_list(struct uk_sched_affinity_list *cancelled)
+{
+	struct uk_sched_affinity *request;
+
+	while ((request = UK_TAILQ_FIRST(cancelled))) {
+		UK_TAILQ_REMOVE(cancelled, request, link);
+		affinity_complete(request, -ESRCH);
+	}
+}
+
+static unsigned int
+affinity_move_requests(struct uk_thread *thread,
+		       struct uk_sched_affinity_list *source,
+		       struct uk_sched_affinity_list *destination)
+{
+	struct uk_sched_affinity *request, *next;
+	unsigned int count = 0;
+
+	UK_TAILQ_FOREACH_SAFE(request, source, link, next) {
+		if (request->thread != thread)
+			continue;
+		UK_TAILQ_REMOVE(source, request, link);
+		UK_TAILQ_INSERT_TAIL(destination, request, link);
+		count++;
+	}
+	return count;
+}
+
+static void affinity_cancel_locked(struct uk_thread *thread,
+				   struct uk_sched_affinity_list *cancelled)
+{
+	unsigned int count =
+		affinity_move_requests(thread,
+				       &thread->sched->affinity_requests,
+				       cancelled);
+
+	__atomic_sub_fetch(&thread->affinity_pending, count, __ATOMIC_RELEASE);
+	UK_ASSERT(!thread->affinity_pending);
+}
+
+struct uk_sched_affinity *uk_sched_affinity_create(struct uk_alloc *allocator,
+						   const unsigned long *mask)
+{
+	struct uk_thread *caller = uk_thread_current();
+	struct uk_sched_affinity *request;
+	struct uk_sched *owner;
+	unsigned long flags;
+
+	request = uk_zalloc(allocator, sizeof(*request));
+	if (!request)
+		return ERR2PTR(-ENOMEM);
+	request->allocator = allocator;
+	request->references = 1;
+	memcpy(request->mask, mask, sizeof(request->mask));
+	uk_waitq_init(&request->wait);
+	owner = uk_thread_sched_lock(caller, &flags);
+	UK_ASSERT(!caller->affinity_wait);
+	caller->affinity_wait = request;
+	uk_thread_sched_unlock(owner, flags);
+	return request;
+}
+
+static void affinity_abandon(struct uk_thread *thread)
+{
+	struct uk_sched_affinity *request;
+	struct uk_sched *owner;
+	unsigned long flags;
+
+	owner = uk_thread_sched_lock(thread, &flags);
+	request = thread->affinity_wait;
+	thread->affinity_wait = NULL;
+	uk_thread_sched_unlock(owner, flags);
+	if (request)
+		affinity_release(request);
+}
+
+void uk_sched_affinity_discard(struct uk_sched_affinity *request)
+{
+	UK_ASSERT(uk_thread_current()->affinity_wait == request);
+	affinity_abandon(uk_thread_current());
+}
+
+int uk_sched_thread_get_affinity(struct uk_thread *thread, size_t size,
+				 unsigned long *mask)
+{
+	struct uk_sched *owner;
+	unsigned long flags;
+	int rc = uk_sched_get_cpu_mask(size, mask);
+
+	if (rc < 0)
+		return rc;
+	owner = uk_thread_sched_lock(thread, &flags);
+	if (uk_thread_is_exited(thread) || uk_thread_is_stopping(thread))
+		rc = -ESRCH;
+	else
+		for (size_t i = 0; i < (size_t)rc / sizeof(*mask); i++)
+			mask[i] &= thread->allowed_cpus[i];
+	uk_thread_sched_unlock(owner, flags);
+	return rc;
+}
+
+void uk_sched_thread_inherit_affinity(struct uk_thread *child,
+				      struct uk_thread *parent)
+{
+	struct uk_sched *owner;
+	unsigned long flags;
+
+	UK_ASSERT(!child->sched);
+	owner = uk_thread_sched_lock(parent, &flags);
+	memcpy(child->allowed_cpus, parent->allowed_cpus,
+	       sizeof(child->allowed_cpus));
+	uk_thread_sched_unlock(owner, flags);
+}
+
+void uk_sched_thread_notify(struct uk_thread *thread)
+{
+	struct uk_sched *owner;
+	unsigned long flags;
+
+	owner = uk_thread_sched_lock(thread, &flags);
+	if (owner)
+		uk_sched_wake_cpu(owner);
+	uk_thread_sched_unlock(owner, flags);
+}
+
+int uk_sched_thread_affinity_submit(struct uk_thread *thread,
+				    struct uk_sched_affinity *request)
+{
+	unsigned long online[UK_THREAD_CPU_MASK_WORDS] = {0};
+	struct uk_sched *owner;
+	unsigned long flags;
+	bool any = false, move = false;
+	int rc;
+
+	UK_ASSERT(uk_thread_current()->affinity_wait == request);
+	if (__atomic_exchange_n(&request->submitted, true, __ATOMIC_ACQ_REL))
+		return -EALREADY;
+	request->thread = thread;
+	rc = uk_sched_get_cpu_mask(sizeof(online), online);
+	if (rc < 0)
+		return rc;
+	for (size_t i = 0; i < UK_THREAD_CPU_MASK_WORDS; i++) {
+		request->mask[i] &= online[i];
+		any |= request->mask[i] != 0;
+	}
+	if (!any)
+		return -EINVAL;
+	owner = uk_thread_sched_lock(thread, &flags);
+	if (!owner || uk_thread_is_exited(thread) ||
+	    uk_thread_is_stopping(thread)) {
+		rc = -ESRCH;
+	} else {
+		__atomic_add_fetch(&request->references, 1, __ATOMIC_RELAXED);
+		if (sched_cpu_allowed(request->mask, owner)) {
+			memcpy(thread->allowed_cpus, request->mask,
+			       sizeof(request->mask));
+		} else {
+			UK_TAILQ_INSERT_TAIL(&owner->affinity_requests, request,
+					     link);
+			__atomic_add_fetch(&thread->affinity_pending, 1,
+					   __ATOMIC_RELEASE);
+			move = true;
+		}
+		rc = 0;
+	}
+	uk_thread_sched_unlock(owner, flags);
+	if (move)
+		uk_sched_wake_cpu(owner);
+	else if (!rc)
+		affinity_complete(request, 0);
+	return rc;
+}
+
+int uk_sched_thread_affinity_wait(struct uk_sched_affinity *request)
+{
+	int result;
+
+	uk_waitq_wait_event(&request->wait, __atomic_load_n(&request->complete,
+							    __ATOMIC_ACQUIRE));
+	result = request->result;
+	uk_sched_affinity_discard(request);
+	return result;
+}
+
+static int affinity_move(struct uk_sched *owner, struct uk_sched *destination,
+			 struct uk_thread *thread, const unsigned long *mask)
+{
+	__snsec deadline;
+	int result;
+
+	ukarch_spin_lock(&destination->lock);
+	deadline = thread->wakeup_time;
+	owner->thread_remove(owner, thread);
+	UK_TAILQ_REMOVE(&owner->thread_list, thread, thread_list);
+	thread->wakeup_time = deadline;
+	result = destination->thread_add(destination, thread);
+	if (!result) {
+		UK_TAILQ_INSERT_TAIL(&destination->thread_list, thread,
+				     thread_list);
+		memcpy(thread->allowed_cpus, mask,
+		       sizeof(thread->allowed_cpus));
+		affinity_move_requests(thread, &owner->affinity_requests,
+				       &destination->affinity_requests);
+		__atomic_store_n(&thread->sched, destination, __ATOMIC_RELEASE);
+	} else {
+		int restored = owner->thread_add(owner, thread);
+
+		UK_BUGON(restored);
+		UK_TAILQ_INSERT_TAIL(&owner->thread_list, thread, thread_list);
+	}
+	ukarch_spin_unlock(&destination->lock);
+	return result;
+}
+
+unsigned int uk_sched_process_affinity_requests(struct uk_sched *owner)
+{
+	struct uk_sched_affinity *request;
+	struct uk_sched *destination;
+	struct uk_thread *thread;
+	unsigned long flags;
+	unsigned int processed = 0;
+	int result;
+
+	UK_ASSERT(uk_thread_current() == owner->idle_thread(owner, 0));
+	for (;;) {
+		ukplat_spin_lock_irqsave(&affinity_transfer_lock, flags);
+		ukarch_spin_lock(&owner->lock);
+		request = UK_TAILQ_FIRST(&owner->affinity_requests);
+		if (!request) {
+			ukarch_spin_unlock(&owner->lock);
+			ukplat_spin_unlock_irqrestore(&affinity_transfer_lock,
+						      flags);
+			return processed;
+		}
+		thread = request->thread;
+		UK_ASSERT(thread->sched == owner && thread->affinity_pending);
+		UK_TAILQ_REMOVE(&owner->affinity_requests, request, link);
+		__atomic_sub_fetch(&thread->affinity_pending, 1,
+				   __ATOMIC_RELEASE);
+		destination = NULL;
+		result = -ESRCH;
+		if (!uk_thread_is_exited(thread) &&
+		    !uk_thread_is_stopping(thread)) {
+			if (sched_cpu_allowed(request->mask, owner)) {
+				memcpy(thread->allowed_cpus, request->mask,
+				       sizeof(request->mask));
+				result = 0;
+			} else {
+				for (destination = uk_sched_head; destination;
+				     destination = destination->next)
+					if (destination->is_started &&
+					    sched_cpu_allowed(request->mask,
+							      destination))
+						break;
+				UK_ASSERT(destination && destination != owner);
+				result = affinity_move(owner, destination,
+						       thread, request->mask);
+			}
+		}
+		ukarch_spin_unlock(&owner->lock);
+		ukplat_spin_unlock_irqrestore(&affinity_transfer_lock, flags);
+		if (!result && destination)
+			uk_sched_wake_cpu(destination);
+		affinity_complete(request, result);
+		processed++;
+	}
 }

@@ -66,6 +66,25 @@ void pprocess_brk_free(struct posix_vm_context *state)
 }
 #endif
 
+static void brk_lock(void)
+{
+#if CONFIG_LIBUKVMEM
+	UK_ASSERT(!uk_mutex_is_locked(&pprocess_mutex));
+	uk_mutex_lock(&uk_vas_get_active()->mutation_lock);
+#else
+	uk_mutex_lock(&pprocess_mutex);
+#endif
+}
+
+static void brk_unlock(void)
+{
+#if CONFIG_LIBUKVMEM
+	uk_mutex_unlock(&uk_vas_get_active()->mutation_lock);
+#else
+	uk_mutex_unlock(&pprocess_mutex);
+#endif
+}
+
 UK_LLSYSCALL_R_DEFINE(void *, brk, void *, addr)
 {
 	struct posix_process *pprocess;
@@ -74,14 +93,14 @@ UK_LLSYSCALL_R_DEFINE(void *, brk, void *, addr)
 	pprocess = uk_pprocess_current();
 	UK_ASSERT(pprocess);
 
-	uk_mutex_lock(&pprocess_mutex);
+	brk_lock();
 
 	base = (__uptr)pprocess->vm_context->brk.base;
 	cur_brk = base + pprocess->vm_context->brk.pos;
 	addr_arg = (__uptr)addr;
 
 	if (addr_arg == cur_brk) {
-		uk_mutex_unlock(&pprocess_mutex);
+		brk_unlock();
 		return addr;
 	}
 
@@ -90,13 +109,13 @@ UK_LLSYSCALL_R_DEFINE(void *, brk, void *, addr)
 #else
 	if (!IN_RANGE(addr_arg, base, PPROCESS_BRK_LEN)) {
 #endif
-		uk_mutex_unlock(&pprocess_mutex);
+		brk_unlock();
 		return (void *)cur_brk;
 	}
 
 #if CONFIG_LIBUKVMEM
 	if (pprocess_memory_brk(pprocess->vm_context, addr_arg - base)) {
-		uk_mutex_unlock(&pprocess_mutex);
+		brk_unlock();
 		return (void *)cur_brk;
 	}
 #elif CONFIG_LIBPOSIX_PROCESS_BRK_INC_MEMZERO
@@ -109,7 +128,7 @@ UK_LLSYSCALL_R_DEFINE(void *, brk, void *, addr)
 
 	pprocess->vm_context->brk.pos = addr_arg - base;
 
-	uk_mutex_unlock(&pprocess_mutex);
+	brk_unlock();
 
 	return addr;
 }
@@ -143,33 +162,33 @@ void *sbrk(intptr_t inc)
 	pprocess = uk_pprocess_current();
 	UK_ASSERT(pprocess);
 
-	uk_mutex_lock(&pprocess_mutex);
+	brk_lock();
 
 	/* We are increasing or reducing our range */
 	prev_brk = (__uptr)pprocess->vm_context->brk.base + pprocess->vm_context->brk.pos;
 
 	/* Check for 0 and overflow/underflow */
 	if (!inc) {
-		uk_mutex_unlock(&pprocess_mutex);
+		brk_unlock();
 		return (void *)prev_brk;
 	} else if (inc > 0) {
 		if (unlikely(prev_brk + (__uptr)inc < prev_brk))
 			goto err;
 	} else {
-		if (unlikely((__uptr)prev_brk < (__uptr)-inc))
+		if (unlikely(prev_brk < -(__uptr)inc))
 			goto err;
 	}
 
 	req_brk = (__uptr)prev_brk + inc;
 	new_brk = (void *)uk_syscall_r_brk((long)req_brk);
-	if (unlikely((__uptr)new_brk < req_brk))
+	if (unlikely((__uptr)new_brk != req_brk))
 		goto err;
 
-	uk_mutex_unlock(&pprocess_mutex);
+	brk_unlock();
 	return (void *)prev_brk;
 
 err:
-	uk_mutex_unlock(&pprocess_mutex);
+	brk_unlock();
 	errno = ENOMEM;
 	return (void *)-1;
 }

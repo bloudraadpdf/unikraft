@@ -6,6 +6,7 @@ config LIBUKFILE_PSEUDO
 	  - null: behaves as always on EOF
 	  - zero: reads all-zeros
 	  - void: behaves as always waiting on data
+	  The full pseudofile reads zeros and rejects writes with ENOSPC.
 
 if LIBUKFILE_PSEUDO
 
@@ -14,7 +15,7 @@ config LIBUKFILE_PSEUDO_DEVFS
 	bool
 	default y if LIBUKFS_DEVFS
 	help
-	  Provide the "null" and "zero" special files under devfs, made
+	  Provide the "null", "zero", and "full" special files under devfs, made
 	  available when mounted e.g., under /dev.
 
 endif

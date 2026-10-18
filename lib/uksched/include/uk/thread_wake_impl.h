@@ -5,6 +5,32 @@
 #include <uk/sched.h>
 #include <uk/plat/spinlock.h>
 
+static inline struct uk_sched *uk_thread_sched_lock(struct uk_thread *thread,
+						    unsigned long *flags)
+{
+	struct uk_sched *scheduler;
+
+	*flags = uk_lcpu_save_irqf();
+	for (;;) {
+		scheduler = __atomic_load_n(&thread->sched, __ATOMIC_ACQUIRE);
+		if (!scheduler)
+			return NULL;
+		ukarch_spin_lock(&scheduler->lock);
+		if (scheduler ==
+		    __atomic_load_n(&thread->sched, __ATOMIC_ACQUIRE))
+			return scheduler;
+		ukarch_spin_unlock(&scheduler->lock);
+	}
+}
+
+static inline void uk_thread_sched_unlock(struct uk_sched *scheduler,
+					  unsigned long flags)
+{
+	if (scheduler)
+		ukarch_spin_unlock(&scheduler->lock);
+	uk_lcpu_restore_irqf(flags);
+}
+
 static inline void uk_thread_wake_locked(struct uk_thread *thread, bool isr)
 {
 	struct uk_sched *scheduler = thread->sched;
@@ -38,18 +64,14 @@ static inline void uk_sched_wake_cpu(struct uk_sched *scheduler __maybe_unused)
 
 static inline void uk_thread_wake_impl(struct uk_thread *thread, bool isr)
 {
-	struct uk_sched *scheduler = thread->sched;
-	unsigned long flags = uk_lcpu_save_irqf();
+	struct uk_sched *scheduler;
+	unsigned long flags;
 
-	if (scheduler)
-		ukarch_spin_lock(&scheduler->lock);
+	scheduler = uk_thread_sched_lock(thread, &flags);
 	uk_thread_wake_locked(thread, isr);
 	if (scheduler)
-		ukarch_spin_unlock(&scheduler->lock);
-	if (scheduler)
 		uk_sched_wake_cpu(scheduler);
-
-	uk_lcpu_restore_irqf(flags);
+	uk_thread_sched_unlock(scheduler, flags);
 }
 
 #endif

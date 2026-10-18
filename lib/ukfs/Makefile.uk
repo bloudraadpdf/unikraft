@@ -4,6 +4,11 @@ CINCLUDES-$(CONFIG_LIBUKFS) += -I$(LIBUKFS_BASE)/include
 CXXINCLUDES-$(CONFIG_LIBUKFS) += -I$(LIBUKFS_BASE)/include
 
 LIBUKFS_SRCS-y += $(LIBUKFS_BASE)/common-ops.c
+LIBUKFS_SRCS-y += $(LIBUKFS_BASE)/device.c
 LIBUKFS_SRCS-y += $(LIBUKFS_BASE)/drivers.c
 
 LIBUKFS_SRCS-y += $(LIBUKFS_BASE)/driver-list.ld
+
+ifneq ($(filter y,$(CONFIG_LIBUKFS_TEST) $(CONFIG_LIBUKTEST_ALL)),)
+LIBUKFS_SRCS-y += $(LIBUKFS_BASE)/tests/test_device.c
+endif

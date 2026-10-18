@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include <errno.h>
 #include <uk/event.h>
+#include <uk/nofault.h>
 #include <uk/vmem.h>
 
 #include "application.h"
@@ -12,6 +13,7 @@
 struct deferred_file_fault {
 	__uptr auxsp;
 	__vaddr_t address;
+	unsigned int access;
 };
 
 static void file_fault_dispatch(struct ukarch_execenv *execenv, long arg)
@@ -24,7 +26,11 @@ static void file_fault_dispatch(struct ukarch_execenv *execenv, long arg)
 	uk_lcpu_enable_irq();
 	if (pprocess_application_context(execenv->regs))
 		pprocess_enter_application();
-	rc = uk_vma_populate_page(uk_vas_get_active(), fault->address);
+	rc = uk_vma_populate_page(uk_vas_get_active(), fault->address,
+				  fault->access);
+	if (rc && !pprocess_application_context(execenv->regs) &&
+	    !uk_nofault_fixup((struct uk_lcpu_regs *)execenv->regs))
+		rc = 0;
 	if (rc) {
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 		if (pprocess_application_context(execenv->regs)) {
@@ -67,6 +73,7 @@ static int deferred_file_fault(void *data)
 	fault = (void *)sp;
 	fault->auxsp = auxsp;
 	fault->address = uk_lcpu_except_err_ctx_get_fault_addr(ctx);
+	fault->access = uk_vmem_arch_fault_type(ctx) & UK_VMA_FAULT_ACCESSTYPE;
 	ukarch_ctx_init_ehtrampo(&target, regs, sp, file_fault_dispatch,
 				 (long)fault);
 	uk_lcpu_regs_set(regs, PC, target.ip);

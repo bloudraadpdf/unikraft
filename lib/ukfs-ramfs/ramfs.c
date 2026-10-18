@@ -259,6 +259,8 @@ unsigned char ramfs_dentry_type(const struct ramfs_dentry *dp)
 			return DT_REG;
 		case S_IFSOCK:
 			return DT_SOCK;
+		case S_IFIFO:
+			return DT_FIFO;
 		case S_IFLNK:
 			return DT_LNK;
 		default:
@@ -376,11 +378,16 @@ int ramfs_node_atime_need_update(const struct ramfs_node *n,
 	    ((mntflags & MS_NODIRATIME) &&
 	     ramfs_live_nodekind(n, UK_FS_TMPL_DIR)))
 		return 0;
-	if ((mntflags & MS_RELATIME) &&
-	    !(n->statx.stx_atime.tv_sec < n->statx.stx_mtime.tv_sec ||
-	      (n->statx.stx_atime.tv_sec == n->statx.stx_mtime.tv_sec &&
-	       n->statx.stx_atime.tv_nsec < n->statx.stx_mtime.tv_nsec)))
-		return 0;
+	if (mntflags & MS_RELATIME) {
+		const struct uk_statx_timestamp now = ramfs_now();
+		const struct uk_statx_timestamp access = n->statx.stx_atime;
+
+		if (!uk_statx_timestamp_le(access, n->statx.stx_mtime) &&
+		    !uk_statx_timestamp_le(access, n->statx.stx_ctime) &&
+		    (now.tv_sec < access.tv_sec ||
+		     (uint64_t)now.tv_sec - (uint64_t)access.tv_sec < 86400))
+			return 0;
+	}
 	return 1;
 }
 
@@ -567,7 +574,8 @@ int ramfs_check_regfile(const struct ramfs_node *n)
 		return -EISDIR;
 	if (ramfs_live_nodekind(n, UK_FS_TMPL_SYM))
 		return -EBADF;
-	if ((n->statx.stx_mode & S_IFMT) == S_IFSOCK)
+	if ((n->statx.stx_mode & S_IFMT) == S_IFSOCK ||
+	    (n->statx.stx_mode & S_IFMT) == S_IFIFO)
 		return -ENXIO;
 	return 0;
 }
@@ -743,6 +751,8 @@ int ramfs_live_setstat(struct ramfs_node *n,
 		return -EROFS;
 	if (unlikely(mask & ~RAMFS_SETSTAT_MASK))
 		return -EINVAL;
+	if ((mask & UK_STATX_MODE) && S_ISLNK(n->statx.stx_mode))
+		return -EOPNOTSUPP;
 	if (mask) {
 		if (mask & UK_STATX_MODE)
 			n->statx.stx_mode = (n->statx.stx_mode & ~0777) |
@@ -801,10 +811,15 @@ int ramfs_node_falloc(struct ramfs_node *n, int mode, off_t soff, off_t slen,
 	/* Validated soff & slen are positive, can assign to unsigned size_t */
 	off = soff;
 	len = slen;
+	if (len > LLONG_MAX - off)
+		return -EFBIG;
 	switch (mode) {
 	case 0:
 	case FALLOC_FL_KEEP_SIZE:
-		return -EOPNOTSUPP;
+		r = ramfs_file_data_alloc(&n->file_data, off, len);
+		if (!r && !mode && off + len > n->statx.stx_size)
+			n->statx.stx_size = off + len;
+		break;
 
 	case FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE:
 		r = ramfs_file_data_punch_hole(&n->file_data, off, len);
@@ -844,7 +859,7 @@ int ramfs_node_falloc(struct ramfs_node *n, int mode, off_t soff, off_t slen,
 	case FALLOC_FL_ZERO_RANGE | FALLOC_FL_KEEP_SIZE:
 		return -EOPNOTSUPP;
 	default:
-		return -EINVAL;
+		return -EOPNOTSUPP;
 	}
 	if (!r)
 		ramfs_node_touch(n, RAMFS_TOUCH_MODIFY, mntflags);
@@ -859,6 +874,22 @@ int ramfs_live_ctl(struct ramfs_node *n, int fam, int req,
 	switch (fam) {
 	case UKFILE_CTL_FILE:
 		switch (req) {
+		case UKFILE_CTL_FILE_TOUCH: {
+			enum ramfs_touch_op op = arg1 == UK_FILE_TOUCH_READ ?
+				RAMFS_TOUCH_ACCESS : RAMFS_TOUCH_MODIFY;
+
+			if (arg1 > UK_FILE_TOUCH_WRITE || (arg2 & ~O_NOATIME))
+				return -EINVAL;
+			if (ISROFS(mntflags) ||
+			    (arg1 == UK_FILE_TOUCH_READ && (arg2 & O_NOATIME)))
+				return 0;
+			ramfs_node_touch(n, op, mntflags);
+			return 0;
+		}
+		case UKFILE_CTL_FILE_MAXSIZE:
+			*(__off *)arg1 = LLONG_MAX;
+			return 0;
+		case UKFILE_CTL_FILE_SYNC_RANGE:
 		case UKFILE_CTL_FILE_SYNC:
 		case UKFILE_CTL_FILE_FADVISE:
 			return 0;
@@ -1134,6 +1165,7 @@ struct ramfs_node *ramfs_node_create(unsigned int mode,
 	case S_IFDIR:
 	case S_IFREG:
 	case S_IFSOCK:
+	case S_IFIFO:
 		newnode = ramfs_new(xlen);
 		if (unlikely(!newnode))
 			return ERR2PTR(-ENOMEM);
@@ -1158,6 +1190,7 @@ struct ramfs_node *ramfs_node_create(unsigned int mode,
 		ramfs_init_dir(newnode, mode);
 		break;
 	case S_IFSOCK:
+	case S_IFIFO:
 		ramfs_init_statx(newnode, mode);
 		break;
 	case S_IFREG:
@@ -1244,7 +1277,6 @@ struct ramfs_node *ramfs_live_fs_create_locked(struct ramfs_node *n,
 		return ERR2PTR(-ENAMETOOLONG);
 
 	switch (mode & S_IFMT) {
-	case S_IFIFO:
 	case S_IFCHR:
 	case S_IFBLK:
 		dtype = RAMFS_DENT_SPEC;
@@ -1555,7 +1587,7 @@ static int ramfs_node_cmp(struct ramfs_node *a, struct ramfs_node *b)
 }
 
 UK_FS_TMPL_LIVE_GENERATE_STATIC(ramfs, struct ramfs_node *, ramfs_node_cmp,
-				ramfs_liveops, 0, NULL);
+				ramfs_liveops, 0, NULL, true);
 
 UK_FS_DRIVER_REGISTER(ramfs, UK_FS_TMPL_LIVE_OP_VOPEN(ramfs),
 		      UK_FS_VOPEN_VOL_IGNORE | UK_FS_VOPEN_DATA_IGNORE);

@@ -13,7 +13,7 @@
 #define nf_do_probe_r(addr, isuffix, reg, cont_label)			\
 	__asm__ goto(							\
 		"1: ldr"isuffix" "reg", [%0]\n"				\
-		NF_EXCPTTAB_ENTRY_L(1b, cont_label, nf_mf_handler)	\
+		NF_EXCPTTAB_ENTRY_L(1b, cont_label, nf_mf_handler, 0)	\
 		: /* no outputs in goto asm allowed */			\
 		: "r"(addr)						\
 		: reg, "memory" : cont_label)
@@ -40,8 +40,8 @@
 	__asm__ goto(							\
 		"1: ldr"isuffix" "reg", [%1]\n"				\
 		"2: str"isuffix" "reg", [%0]\n"				\
-		NF_EXCPTTAB_ENTRY_L(1b, cont_label, nf_mf_handler)	\
-		NF_EXCPTTAB_ENTRY_L(2b, cont_label, nf_mf_handler)	\
+		NF_EXCPTTAB_ENTRY_L(1b, cont_label, nf_mf_handler, 0)	\
+		NF_EXCPTTAB_ENTRY_L(2b, cont_label, nf_mf_handler, 0)	\
 		: /* no outputs in goto asm allowed */			\
 		: "r"(dst), "r"(src)					\
 		: reg, "memory" : cont_label)

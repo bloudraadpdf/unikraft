@@ -118,6 +118,7 @@ extern struct udp_pcb *udp_pcbs;
    UDP code. */
 struct udp_pcb * udp_new        (void);
 struct udp_pcb * udp_new_ip_type(u8_t type);
+void udp_unbind(struct udp_pcb *pcb);
 void             udp_remove     (struct udp_pcb *pcb);
 err_t            udp_bind       (struct udp_pcb *pcb, const ip_addr_t *ipaddr,
                                  u16_t port);

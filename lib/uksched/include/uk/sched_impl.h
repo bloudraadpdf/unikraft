@@ -43,6 +43,7 @@
 #define __UK_SCHED_IMPL_H__
 
 #include <uk/sched.h>
+#include <uk/wait.h>
 
 #if CONFIG_LIBUKSCHED_STATS
 #include <string.h>
@@ -66,7 +67,7 @@ int uk_sched_register(struct uk_sched *s);
 #define uk_sched_init(s, start_func, yield_func, \
 		thread_add_func, thread_remove_func, \
 		thread_blocked_func, thread_woken_func, \
-		thread_woken_isr_func, idle_thread_func, \
+		thread_woken_isr_func, idle_thread_func, current_exec_time_func, \
 		sched_a, sched_a_stack, sched_a_auxstack, sched_a_uktls) \
 	do { \
 		ukarch_spin_init(&(s)->lock); \
@@ -78,6 +79,7 @@ int uk_sched_register(struct uk_sched *s);
 		(s)->thread_woken     = thread_woken_func; \
 		(s)->thread_woken_isr = thread_woken_isr_func; \
 		(s)->idle_thread      = idle_thread_func; \
+		(s)->current_exec_time = current_exec_time_func; \
 		uk_sched_register((s)); \
 		\
 		(s)->a = (sched_a); \
@@ -89,6 +91,7 @@ int uk_sched_register(struct uk_sched *s);
 		uk_waitq_init(&(s)->gc_wait); \
 		(s)->reaper = NULL; \
 		UK_TAILQ_INIT(&(s)->stop_requests); \
+		UK_TAILQ_INIT(&(s)->affinity_requests); \
 		uk_sched_stats_reset(s); \
 	} while (0)
 

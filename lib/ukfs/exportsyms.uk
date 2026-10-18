@@ -1,4 +1,8 @@
 # Common boilerplate ops
+uk_fs_device_new
+uk_fs_device_acquire
+uk_fs_device_release
+uk_fs_device_minor
 uk_fs_path_copy
 uk_fs_path_release
 uk_fs_common_nop_sync

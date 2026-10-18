@@ -10,6 +10,8 @@
 
 #include <sys/types.h>
 #include <uk/config.h>
+#include <uk/mutex.h>
+#include "task.h"
 
 #if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
 #include <linux/sched.h>
@@ -22,6 +24,7 @@
 #endif /* CONFIG_LIBPOSIX_PROCESS_MULTITHREADING */
 
 extern struct uk_thread *pprocess_thread_main;
+extern struct uk_mutex pprocess_mutex;
 
 extern int pprocess_exit_status;
 
@@ -34,6 +37,24 @@ extern int pprocess_exit_status;
 
 #define UK_PID_INIT		1
 #define TIDMAP_SIZE		(CONFIG_LIBPOSIX_PROCESS_MAX_PID + 1)
+
+struct uk_signal;
+
+struct pprocess_retired {
+	struct posix_vm_context *vms;
+	struct posix_thread *threads;
+	struct posix_process *processes;
+	struct uk_posix_task *tasks;
+#if CONFIG_LIBPOSIX_PROCESS_SIGNAL
+	struct uk_signal *signals;
+#endif
+};
+
+void pprocess_retired_release(struct pprocess_retired *retired);
+void pprocess_retire_thread_locked(struct posix_thread *thread,
+				   struct pprocess_retired *retired);
+void pprocess_retire_process_locked(struct posix_process *process,
+				    struct pprocess_retired *retired);
 
 /* Notice: The RUNNING state is not necessarily in sync with the state
  * of the underlying uk_thread (may be blocked by the scheduler).
@@ -56,9 +77,18 @@ enum posix_process_state {
 	POSIX_PROCESS_KILLED,         /* terminated by signal */
 };
 
+struct posix_vm_context;
+
+struct uk_posix_vm_view {
+	struct posix_vm_context *context;
+};
+
 struct posix_vm_context {
+	struct posix_vm_context *retired_next;
 	struct uk_alloc *allocator;
+	unsigned int users;
 	unsigned int references;
+	struct uk_posix_vm_view view;
 	unsigned int membarrier_registered;
 #if CONFIG_LIBPOSIX_PROCESS_EXECVE
 	void *auxv;
@@ -80,6 +110,7 @@ struct posix_vm_context {
 };
 
 struct posix_process {
+	struct posix_process *retired_next;
 	__atomic references;
 	pid_t pid;
 	struct posix_process *parent;
@@ -106,6 +137,8 @@ struct posix_process {
 };
 
 struct posix_thread {
+	struct posix_thread *retired_next;
+	struct posix_task task;
 	pid_t tid;
 	void *rseq_area;
 	__u32 rseq_length;
@@ -129,6 +162,7 @@ struct posix_thread {
 	enum posix_thread_state exit_state;
 	int exit_status;
 	bool user_started;
+	bool cleanup_started;
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 	struct uk_signal_tdesc *signal;
 #endif /* CONFIG_LIBPOSIX_PROCESS_SIGNAL */
@@ -138,15 +172,20 @@ struct posix_thread {
 
 extern struct posix_process *pid_process[TIDMAP_SIZE];
 struct posix_vm_context *pprocess_vm_alloc(struct uk_alloc *allocator);
+
 int pprocess_vm_init(struct posix_process *process, struct posix_process *parent);
-void pprocess_vm_put(struct posix_vm_context *state, pid_t pid);
+void pprocess_vm_release_user(struct posix_vm_context *state, pid_t pid);
+void pprocess_vm_retire_locked(struct posix_vm_context *state, pid_t pid,
+			       struct pprocess_retired *retired);
+void pprocess_vm_destroy_retired(struct posix_vm_context *state);
 #if CONFIG_LIBUKVMEM
 struct uk_vma_ops;
 void pprocess_vm_unmap_owned(struct posix_vm_context *state,
 			     const struct uk_vma_ops *ops);
 #endif
-void pprocess_vm_replace(struct posix_process *process,
-			struct posix_vm_context *state);
+void pprocess_thread_cleanup(struct uk_thread *thread);
+void pprocess_vm_replace(struct uk_thread *thread,
+			 struct posix_vm_context *state);
 #if CONFIG_LIBPOSIX_PROCESS_BRK
 int pprocess_brk_init(struct posix_vm_context *state);
 #if CONFIG_LIBUKVMEM
@@ -155,7 +194,7 @@ void pprocess_brk_commit(struct posix_vm_context *state);
 void pprocess_brk_free(struct posix_vm_context *state);
 #endif
 #endif
-extern struct uk_mutex pprocess_mutex;
+void pprocess_thread_fini(struct uk_thread *thread);
 void pprocess_resource_init(struct posix_process *process,
 			    struct posix_process *parent);
 #if CONFIG_LIBUKVMEM && CONFIG_LIBPOSIX_PROCESS_BRK
@@ -172,7 +211,8 @@ int pprocess_stack_trim(struct posix_vm_context *state,
 #define PPROCESS_BRK_LEN (UK_PAGING_PAGE_SIZE * PPROCESS_BRK_PAGES)
 #endif
 void pprocess_finish_exit(struct posix_process *process,
-                         struct posix_thread *thread);
+			  struct posix_thread *thread,
+			  struct pprocess_retired *retired);
 int pprocess_stop_others(struct posix_process *process);
 void pprocess_enter_application(void);
 void __noreturn pprocess_execenv_load(long execenv);
@@ -195,16 +235,25 @@ extern __uk_tls struct posix_thread *pthread_self;
 				    &(_proc)->threads, thread_list_entry)
 
 #define uk_pprocess_foreach_child(_proc, _pchild, _pchildn)		\
-	uk_list_for_each_entry_safe((_pchild), (_pchildn),		\
-				    &(_proc)->children, child_list_entry)
+	uk_list_for_each_entry_safe((_pchild), (_pchildn), &(_proc)->children, \
+				    child_list_entry)
 
 #define uk_pthread_current()						\
 	uk_thread_uktls_var(uk_thread_current(), pthread_self)
 
-#define uk_pprocess_current()						\
-	uk_pthread_current()->process
+#define uk_pprocess_current() uk_pthread_current()->process
 
 void pprocess_pi_update(struct uk_thread *changed);
+#if CONFIG_LIBPOSIX_FUTEX
+int pprocess_pi_owner_died(struct uk_thread *thread, __u32 *address, pid_t tid);
+#endif
+
+struct uk_posix_task *pprocess_task_get_locked(struct posix_process *process,
+					       pid_t tid);
+struct posix_thread *
+pprocess_task_resolve_locked(struct posix_process *process,
+			     struct uk_posix_task *identity);
+void pprocess_task_put(struct uk_posix_task *identity);
 
 struct posix_process *pid2pprocess(pid_t pid);
 struct uk_thread *tid2ukthread(pid_t tid);
@@ -214,7 +263,8 @@ pid_t ukthread2tid(struct uk_thread *thread);
 pid_t ukthread2pid(struct uk_thread *thread);
 
 void pprocess_exit_pthread(struct posix_thread *thread,
-                          enum posix_thread_state state);
+			   enum posix_thread_state state,
+			   struct pprocess_retired *retired);
 void pprocess_exit(struct posix_process *process,
 		   enum posix_process_state state,
 		   int exit_status);
@@ -226,7 +276,8 @@ void pprocess_exit(struct posix_process *process,
  *
  * @param pthread The thread to release.
  */
-void pprocess_release_pthread(struct posix_thread *pthread);
+void pprocess_release_pthread(struct posix_thread *pthread,
+			      struct pprocess_retired *retired);
 void pprocess_complete_vfork(struct posix_thread *pthread);
 
 /**
@@ -237,7 +288,8 @@ void pprocess_complete_vfork(struct posix_thread *pthread);
  *
  * @param pprocess  The process to release.
  */
-void pprocess_release(struct posix_process *pprocess);
+void pprocess_release(struct posix_process *pprocess,
+		      struct pprocess_retired *retired);
 void pprocess_acquire(struct posix_process *process);
 void pprocess_put(struct posix_process *process);
 
@@ -249,7 +301,8 @@ void pprocess_put(struct posix_process *process);
  * @return pthread on success or negative value on failure
  */
 struct posix_thread *pprocess_create_pthread(struct posix_process *pprocess,
-					     struct uk_thread *thread);
+					     struct uk_thread *thread,
+					     struct uk_thread *creator);
 /**
  * INTERNAL. Create process
  *

@@ -8,6 +8,7 @@
 
 #include <inttypes.h>
 #include <stdbool.h>
+#include <string.h>
 #include <netinet/in.h>
 
 #include <uk/bitops/bitscan.h>
@@ -19,6 +20,8 @@
 #include <linux/if_link.h>
 #include <linux/if_arp.h> /* ARPHRD_ETHER */
 #include <lwip/tcp.h>
+#include <lwip/tcpip.h>
+#include <lwip/priv/tcpip_priv.h>
 
 static void uk_pr_debug_nlh(const struct nlmsghdr *nlh)
 {
@@ -29,59 +32,12 @@ static void uk_pr_debug_nlh(const struct nlmsghdr *nlh)
 	uk_pr_debug("nlh->pid: %"PRIu32"\n", nlh->nlmsg_pid);
 }
 
-static size_t netif_name_len(const struct netif *ni)
-{
-	size_t len;
-
-	len = sizeof(ni->name);
-	if (ni->num >= 100)
-		len += 3;
-	else if (ni->num >= 10)
-		len += 2;
-	else
-		len += 1;
-	len += 1; /* `\0` termination */
-	return len;
-}
-
-static void netif_name_dump(char *dest, const struct netif *ni)
-{
-	char *pos = dest;
-	unsigned int num;
-	unsigned int i;
-
-	for (i = 0; i < sizeof(ni->name); i++)
-		*(pos++) = ni->name[i];
-
-	num = ni->num;
-	if (num >= 100)
-		goto hundreds;
-	else if (num >= 10)
-		goto tens;
-	goto ones;
-
-hundreds:
-	i = num / 100;
-	num %= 100;
-	*(pos++) = '0' + i;
-tens:
-	i = num / 10;
-	num %= 10;
-	*(pos++) = '0' + i;
-ones:
-	*(pos++) = '0' + num;
-
-	/* Add zero termination */
-	*pos = '\0';
-}
-
 /**
  * Append an rtattr to a netlink reply.
  *
  * @return pointer to payload to be filled, NULL if there is no space left
  */
-static void *nlbuf_rtattr(struct uk_streambuf *rep,
-			  unsigned short rta_type,
+static void *nlbuf_rtattr(struct uk_streambuf *rep, unsigned short rta_type,
 			  unsigned short data_len)
 {
 	struct rtattr *attr;
@@ -121,10 +77,11 @@ static inline bool netif_is_loopback(const struct netif *netif)
 #endif /* !MIB2_STATS */
 
 #define NLMSG_ERR_LEN NLMSG_LENGTH(sizeof(struct nlmsgerr))
+#define NLMSG_DONE_LEN NLMSG_LENGTH(sizeof(int))
 
 /* Only prepares msg; does not send msg, does not assume streambuf is empty */
-static void prep_reply_err(struct nl_ctx *ctx, struct uk_streambuf *sb,
-			   int err, uint16_t flags, const struct nlmsghdr *req)
+static void prep_reply_err(struct nl_ctx *ctx, struct uk_streambuf *sb, int err,
+			   uint16_t flags, const struct nlmsghdr *req)
 {
 	struct nlmsghdr *nlh;
 	struct nlmsgerr *nlerr;
@@ -151,6 +108,7 @@ static void prep_reply_done(struct nl_ctx *ctx, struct uk_streambuf *sb,
 			    const struct nlmsghdr *req)
 {
 	struct nlmsghdr *nlh;
+	int *error;
 
 	uk_pr_debug("Reply with DONE message\n");
 
@@ -161,26 +119,32 @@ static void prep_reply_done(struct nl_ctx *ctx, struct uk_streambuf *sb,
 	nlh->nlmsg_flags = NLM_F_MULTI;
 	nlh->nlmsg_pid = nl_ctx_pid(ctx);
 	nlh->nlmsg_seq = req->nlmsg_seq;
-	nlh->nlmsg_len = NLMSG_HDRLEN;
+	nlh->nlmsg_len = NLMSG_DONE_LEN;
+	error = nlbuf_reserve(sb, sizeof(*error));
+	UK_ASSERT(error);
+	*error = 0;
 	uk_pr_debug_nlh(nlh);
 }
 
-static int reply_getlink_if(struct nl_ctx *ctx, struct netif *netif,
-			    const struct nlmsghdr *req)
+static int reply_getlink_if(struct nl_ctx *ctx, struct nl_reply_batch *batch,
+			    struct netif *netif, const struct nlmsghdr *req)
 {
 	struct uk_streambuf *rep;
 	struct nlmsghdr *nlh;
 	struct ifinfomsg *ifi;
 	char *ifname;
+	char name[NETIF_NAMESIZE];
 	uint32_t *ifmtu;
 	char *ifaddr;
 
+	if (!netif_index_to_name(netif_get_index(netif), name))
+		return -ENODEV;
 	rep = nlbuf_alloc(ctx, 512);
 	if (unlikely(!rep))
 		return -ENOMEM;
 
-	uk_pr_debug("Generate getlink for %c%c%d\n",
-		    netif->name[0], netif->name[1], netif->num);
+	uk_pr_debug("Generate getlink for %c%c%d\n", netif->name[0],
+		    netif->name[1], netif->num);
 	nlh = nlbuf_reserve(rep, NLMSG_HDRLEN);
 	UK_ASSERT(nlh);
 	nlh->nlmsg_type = RTM_NEWLINK;
@@ -206,7 +170,7 @@ static int reply_getlink_if(struct nl_ctx *ctx, struct netif *netif,
 		ifi->ifi_type = ARPHRD_ETHER;
 		break;
 	}
-#else /* !MIB2_STATS */
+#else  /* !MIB2_STATS */
 	if (netif_is_loopback(netif)) {
 		ifi->ifi_type = ARPHRD_LOOPBACK;
 	} else if (netif->flags & NETIF_FLAG_ETHERNET) {
@@ -215,20 +179,26 @@ static int reply_getlink_if(struct nl_ctx *ctx, struct netif *netif,
 		ifi->ifi_type = ARPHRD_VOID;
 	}
 #endif /* !MIB2_STATS */
-	ifi->ifi_index = netif->num;
+	ifi->ifi_index = netif_get_index(netif);
 	ifi->ifi_family = AF_UNSPEC;
-	ifi->ifi_flags = IFF_RUNNING | IFF_LOWER_UP;
+	ifi->ifi_flags = 0;
+	if (netif_is_link_up(netif))
+		ifi->ifi_flags |= IFF_RUNNING | IFF_LOWER_UP;
+	if (netif_is_loopback(netif))
+		ifi->ifi_flags |= IFF_LOOPBACK;
+	if (netif->flags & (NETIF_FLAG_IGMP | NETIF_FLAG_MLD6))
+		ifi->ifi_flags |= IFF_MULTICAST;
 	ifi->ifi_change = 0xffffffff;
 	if (netif->flags & NETIF_FLAG_UP)
 		ifi->ifi_flags |= IFF_UP;
 	if (netif->flags & NETIF_FLAG_BROADCAST)
-		ifi->ifi_flags |= IFF_BROADCAST | IFF_MULTICAST;
+		ifi->ifi_flags |= IFF_BROADCAST;
 
 	/* IFLA_IFNAME (C-string) */
 	uk_pr_debug("Append IFLA_IFNAME\n");
-	ifname = nlbuf_rtattr(rep, IFLA_IFNAME, netif_name_len(netif));
+	ifname = nlbuf_rtattr(rep, IFLA_IFNAME, strlen(name) + 1);
 	UK_ASSERT(ifname);
-	netif_name_dump(ifname, netif);
+	memcpy(ifname, name, strlen(name) + 1);
 
 	/* IFLA_MTU (u32) */
 	uk_pr_debug("Append IFLA_MTU\n");
@@ -247,53 +217,47 @@ static int reply_getlink_if(struct nl_ctx *ctx, struct netif *netif,
 
 	nlh->nlmsg_len = nlbuf_len(rep);
 
-	uk_pr_debug("Put getlink message for %c%c%d\n",
-		    netif->name[0], netif->name[1], netif->num);
+	uk_pr_debug("Put getlink message for %c%c%d\n", netif->name[0],
+		    netif->name[1], netif->num);
 	uk_pr_debug_nlh(nlh);
 
-	nlbuf_send(ctx, rep);
-	return 0;
+	return nlbuf_send(batch, rep);
 }
 
-static int reply_getlink(struct nl_ctx *ctx, const struct nlmsghdr *req)
+static int reply_dump(struct nl_ctx *ctx, struct nl_reply_batch *batch,
+		      const struct nlmsghdr *request,
+		      int (*reply)(struct nl_ctx *, struct nl_reply_batch *,
+				   struct netif *, const struct nlmsghdr *))
 {
-	struct uk_streambuf *eor; /* end-of-reply */
-	struct netif *netif;
-	int err = 0;
+	struct uk_streambuf *end;
+	struct netif *interface;
+	int error = 0;
 
-	/* Reserve space ahead of time for DONE msg + optional ERROR msg */
-	eor = nlbuf_alloc(ctx, NLMSG_HDRLEN + NLMSG_ERR_LEN);
-	if (unlikely(!eor))
+	end = nlbuf_alloc(ctx, NLMSG_DONE_LEN + NLMSG_ERR_LEN);
+	if (!end)
 		return -ENOMEM;
-
-	uk_pr_debug("Handle GETLINK request\n");
-	uk_pr_debug_nlh(req);
-	if (unlikely((req->nlmsg_flags & (NLM_F_REQUEST | NLM_F_DUMP)) !=
-		     (NLM_F_REQUEST | NLM_F_DUMP))) {
-		uk_pr_debug("Unsupported message flags for GETLINK\n");
-		err = -EINVAL;
-		goto done;
+	if ((request->nlmsg_flags & (NLM_F_REQUEST | NLM_F_DUMP)) !=
+	    (NLM_F_REQUEST | NLM_F_DUMP)) {
+		error = -EINVAL;
+	} else if (reply) {
+		for (interface = netif_list; interface;
+		     interface = interface->next) {
+			error = reply(ctx, batch, interface, request);
+			if (error)
+				break;
+		}
 	}
-
-	for (netif = netif_list; netif != NULL; netif = netif->next)
-		if ((err = reply_getlink_if(ctx, netif, req)))
-			break;
-
-done:
-	if (err) {
-		UK_ASSERT(err < 0);
-		prep_reply_err(ctx, eor, err, NLM_F_MULTI, req);
-	}
-	prep_reply_done(ctx, eor, req);
-	nlbuf_send(ctx, eor);
-	return 0;
+	if (error)
+		prep_reply_err(ctx, end, error, NLM_F_MULTI, request);
+	prep_reply_done(ctx, end, request);
+	return nlbuf_send(batch, end);
 }
 
 #if LWIP_IPV4
 /* The following code assumes that long is at least a 32 bit number */
 UK_CTASSERT(sizeof(long) >= sizeof(uint32_t));
 
-static inline uint8_t netmask_2_suffixlen(ip4_addr_t *netmask)
+static inline uint8_t netmask_2_suffixlen(const ip4_addr_t *netmask)
 {
 	long hmask;
 
@@ -310,10 +274,9 @@ static inline uint8_t netmask_2_suffixlen(ip4_addr_t *netmask)
 	return (uint8_t)uk_lssbl(hmask);
 }
 
-#define netmask_2_prefixlen(netmask) \
-	(32 - netmask_2_suffixlen(netmask))
+#define netmask_2_prefixlen(netmask) (32 - netmask_2_suffixlen(netmask))
 
-static inline void ip4_addr_2_in_addr(ip4_addr_t *in, in_addr_t *out)
+static inline void ip4_addr_2_in_addr(const ip4_addr_t *in, in_addr_t *out)
 {
 	UK_ASSERT(in);
 	UK_ASSERT(out);
@@ -323,15 +286,8 @@ static inline void ip4_addr_2_in_addr(ip4_addr_t *in, in_addr_t *out)
 	*((uint32_t *)out) = (uint32_t)in->addr;
 }
 
-static inline in_addr_t in_addr_netmask(uint8_t prefixlen)
-{
-	in_addr_t mask = 0xFFFFFFFFUL;
-
-	return (mask ^ ((1UL << (32 - prefixlen)) - 1));
-}
-
-static int reply_getaddr_if(struct nl_ctx *ctx, struct netif *netif,
-			    const struct nlmsghdr *req)
+static int reply_getaddr_if(struct nl_ctx *ctx, struct nl_reply_batch *batch,
+			    struct netif *netif, const struct nlmsghdr *req)
 {
 	struct uk_streambuf *rep;
 	struct nlmsghdr *nlh;
@@ -339,19 +295,19 @@ static int reply_getaddr_if(struct nl_ctx *ctx, struct netif *netif,
 	in_addr_t *inaddr;
 	in_addr_t *inbc;
 	char *ifname;
+	char name[NETIF_NAMESIZE];
 
-#if LWIP_IPV6
-	/* With dual-stack, addresses get a type */
-	if (netif->address.type != IPADDR_TYPE_V4)
-		return 0; /* no IPv4 address */
-#endif /* LWIP_IPV6 */
+	if (ip4_addr_isany_val(*netif_ip4_addr(netif)))
+		return 0;
+	if (!netif_index_to_name(netif_get_index(netif), name))
+		return -ENODEV;
 
 	rep = nlbuf_alloc(ctx, 256);
 	if (unlikely(!rep))
 		return -ENOMEM;
 
-	uk_pr_debug("Generate getaddr for %c%c%d\n",
-		    netif->name[0], netif->name[1], netif->num);
+	uk_pr_debug("Generate getaddr for %c%c%d\n", netif->name[0],
+		    netif->name[1], netif->num);
 	nlh = nlbuf_reserve(rep, NLMSG_HDRLEN);
 	UK_ASSERT(nlh);
 	nlh->nlmsg_type = RTM_NEWADDR;
@@ -361,7 +317,7 @@ static int reply_getaddr_if(struct nl_ctx *ctx, struct netif *netif,
 
 	ifa = nlbuf_reserve(rep, NLMSG_ALIGN(sizeof(*ifa)));
 	UK_ASSERT(ifa);
-	ifa->ifa_index = netif->num;
+	ifa->ifa_index = netif_get_index(netif);
 	ifa->ifa_family = AF_INET;
 	if (netif_is_loopback(netif)) {
 		ifa->ifa_flags = IFA_F_PERMANENT;
@@ -370,92 +326,39 @@ static int reply_getaddr_if(struct nl_ctx *ctx, struct netif *netif,
 		ifa->ifa_flags = 0x0;
 		ifa->ifa_scope = RT_SCOPE_UNIVERSE;
 	}
-#if LWIP_IPV6
-	ifa->ifa_prefixlen = netmask_2_prefixlen(&netif->netmask.u_addr.ip4);
-#else /* !LWIP_IPV6*/
-	ifa->ifa_prefixlen = netmask_2_prefixlen(&netif->netmask);
-#endif /* !LWIP_IPV6 */
-
-	/* IFA_ADDRESS */
-	uk_pr_debug("Append IFA_ADDRESS\n");
+	ifa->ifa_prefixlen = netmask_2_prefixlen(netif_ip4_netmask(netif));
 	inaddr = nlbuf_rtattr(rep, IFA_ADDRESS, sizeof(*inaddr));
 	UK_ASSERT(inaddr);
-#if LWIP_IPV6
-	ip4_addr_2_in_addr(&netif->ip_addr.u_addr.ip4, inaddr);
-#else /* !LWIP_IPV6*/
-	ip4_addr_2_in_addr(&netif->ip_addr, inaddr);
-#endif /* !LWIP_IPV6 */
-
-	/* IFA_BROADCAST */
-	uk_pr_debug("Append IFA_BROADCAST\n");
-	inbc = nlbuf_rtattr(rep, IFA_BROADCAST, sizeof(*inbc));
-	UK_ASSERT(inbc);
-#if LWIP_IPV6
-	ip4_addr_2_in_addr(&netif->ip_addr.u_addr.ip4, inbc);
-#else /* !LWIP_IPV6*/
-	ip4_addr_2_in_addr(&netif->ip_addr, inbc);
-#endif /* !LWIP_IPV6 */
-	*inbc |= ~in_addr_netmask(ifa->ifa_prefixlen);
+	ip4_addr_2_in_addr(netif_ip4_addr(netif), inaddr);
+	inaddr = nlbuf_rtattr(rep, IFA_LOCAL, sizeof(*inaddr));
+	UK_ASSERT(inaddr);
+	ip4_addr_2_in_addr(netif_ip4_addr(netif), inaddr);
+	if (netif->flags & NETIF_FLAG_BROADCAST) {
+		inbc = nlbuf_rtattr(rep, IFA_BROADCAST, sizeof(*inbc));
+		UK_ASSERT(inbc);
+		*inbc = ip4_addr_get_u32(netif_ip4_addr(netif)) |
+			~ip4_addr_get_u32(netif_ip4_netmask(netif));
+	}
 
 	/* IFA_LABEL (C-string) */
 	uk_pr_debug("Append IFA_LABEL\n");
-	ifname = nlbuf_rtattr(rep, IFA_LABEL, netif_name_len(netif));
+	ifname = nlbuf_rtattr(rep, IFA_LABEL, strlen(name) + 1);
 	UK_ASSERT(ifname);
-	netif_name_dump(ifname, netif);
+	memcpy(ifname, name, strlen(name) + 1);
 
 	nlh->nlmsg_len = nlbuf_len(rep);
 
-	uk_pr_debug("Put getaddr message for %c%c%d\n",
-		    netif->name[0], netif->name[1], netif->num);
+	uk_pr_debug("Put getaddr message for %c%c%d\n", netif->name[0],
+		    netif->name[1], netif->num);
 	uk_pr_debug_nlh(nlh);
 
-	nlbuf_send(ctx, rep);
-	return 0;
+	return nlbuf_send(batch, rep);
 }
 
 #endif /* LWIP_IPV4 */
 
-static int reply_getaddr(struct nl_ctx *ctx, const struct nlmsghdr *req)
-{
-	struct uk_streambuf *eor; /* end-of-reply */
-	struct netif *netif;
-	int err = 0;
-
-	/* Reserve space ahead of time for DONE msg + optional ERROR msg */
-	eor = nlbuf_alloc(ctx, NLMSG_HDRLEN + NLMSG_ERR_LEN);
-	if (unlikely(!eor))
-		return -ENOMEM;
-
-	uk_pr_debug("Handle GETADDR request\n");
-	uk_pr_debug_nlh(req);
-	if (unlikely((req->nlmsg_flags & (NLM_F_REQUEST | NLM_F_DUMP)) !=
-		     (NLM_F_REQUEST | NLM_F_DUMP))) {
-		uk_pr_debug("Unsupported message flags for GETADDR\n");
-		err = -EINVAL;
-		goto done;
-	}
-
-#if LWIP_IPV4
-	for (netif = netif_list; netif != NULL; netif = netif->next)
-		if ((err = reply_getaddr_if(ctx, netif, req)))
-			break;
-#endif /* LWIP_IPV4 */
-
-#if LWIP_IPV6
-	uk_pr_warn_once("IPv6 getaddr not supported\n");
-#endif /* LWIP_IPV6 */
-
-done:
-	if (err) {
-		UK_ASSERT(err < 0);
-		prep_reply_err(ctx, eor, err, NLM_F_MULTI, req);
-	}
-	prep_reply_done(ctx, eor, req);
-	nlbuf_send(ctx, eor);
-	return 0;
-}
-
-static int reply_enotsup(struct nl_ctx *ctx, const struct nlmsghdr *req)
+static int reply_enotsup(struct nl_ctx *ctx, struct nl_reply_batch *batch,
+			 const struct nlmsghdr *req)
 {
 	struct uk_streambuf *rep;
 
@@ -464,28 +367,73 @@ static int reply_enotsup(struct nl_ctx *ctx, const struct nlmsghdr *req)
 		return -ENOMEM;
 
 	prep_reply_err(ctx, rep, -ENOTSUP, 0, req);
-	nlbuf_send(ctx, rep);
-	return 0;
+	return nlbuf_send(batch, rep);
 }
 
-static int lwip_nl_route_handle(struct nl_ctx *ctx,
-				const struct nlmsghdr *req)
+struct route_query {
+	struct tcpip_api_call_data call;
+	struct nl_ctx *context;
+	struct nl_reply_batch *batch;
+	const struct nlmsghdr *request;
+	int result;
+};
+
+static err_t route_query_core(struct tcpip_api_call_data *call)
 {
-	/* Switch to target handler routine */
-	switch(req->nlmsg_type) {
-		case RTM_GETLINK:
-			return reply_getlink(ctx, req);
-		case RTM_GETADDR:
-			return reply_getaddr(ctx, req);
-		default:
-			uk_pr_warn("Unsupported netlink message %d, flags 0x%x.\n",
-				   req->nlmsg_type, req->nlmsg_flags);
-			return reply_enotsup(ctx, req);
+	struct route_query *query =
+		__containerof(call, struct route_query, call);
+	const struct nlmsghdr *request = query->request;
+	struct nl_ctx *context = query->context;
+	struct nl_reply_batch *batch = query->batch;
+	unsigned int family;
+
+	if (request->nlmsg_len < NLMSG_LENGTH(sizeof(struct rtgenmsg))) {
+		query->result = reply_enotsup(context, batch, request);
+		return ERR_OK;
 	}
+	family = ((const struct rtgenmsg *)NLMSG_DATA(request))->rtgen_family;
+	switch (request->nlmsg_type) {
+	case RTM_GETLINK:
+		query->result =
+			reply_dump(context, batch, request, reply_getlink_if);
+		break;
+	case RTM_GETADDR:
+		if (family == AF_UNSPEC || family == AF_INET) {
+#if LWIP_IPV4
+			query->result = reply_dump(context, batch, request,
+						   reply_getaddr_if);
+#else
+			query->result =
+				reply_dump(context, batch, request, NULL);
+#endif
+		} else {
+			query->result = reply_enotsup(context, batch, request);
+		}
+		break;
+	default:
+		query->result = reply_enotsup(context, batch, request);
+		break;
+	}
+	return ERR_OK;
+}
+
+static int lwip_nl_route_handle(struct nl_ctx *context,
+				struct nl_reply_batch *batch,
+				const struct nlmsghdr *request)
+{
+	struct route_query query = {
+		.context = context,
+		.batch = batch,
+		.request = request,
+	};
+	err_t error = tcpip_api_call(route_query_core, &query.call);
+
+	return error == ERR_OK	  ? query.result
+	       : error == ERR_MEM ? -ENOMEM
+				  : -EIO;
 }
 
 static const struct posix_netlink_protocol_ops lwip_nl_route_ops = {
-	.handle = lwip_nl_route_handle
-};
+	.handle = lwip_nl_route_handle};
 
 POSIX_NETLINK_PROTOCOL_REGISTER(NETLINK_ROUTE, &lwip_nl_route_ops);

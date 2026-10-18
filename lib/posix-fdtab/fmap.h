@@ -204,39 +204,6 @@ static inline void uk_fmap_set(const struct uk_fmap *m, int idx, const void *p)
 }
 
 /**
- * Looks up and returns the entry at `idx`.
- *
- * WARNING: Use of this function is vulnerable to use-after-free race conditions
- * for entry objects whose lifetime depends on their membership in this data
- * structure (e.g., refcounting on put, take, and after lookups).
- * For that case please use the `uk_fmap_critical_*` functions.
- *
- * @param m
- *   fmap in which to search
- * @param idx
- *   Index from which to return the entry
- * @return
- *   The entry at `idx`, or NULL if out of range.
- */
-static inline void *uk_fmap_lookup(const struct uk_fmap *m, int idx)
-{
-	void *got;
-
-	if (!_FMAP_INRANGE(m, idx))
-		return NULL;
-
-	do {
-		got = m->map[idx];
-		if (!got) {
-			if (uk_bmap_isfree(&m->bmap, idx))
-				break; /* Entry is actually free */
-			uk_sched_yield(); /* Lost race, retry */
-		}
-	} while (!got);
-	return got;
-}
-
-/**
  * Puts a new entry in the map and returns its index.
  *
  * @param m

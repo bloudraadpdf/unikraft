@@ -5,6 +5,7 @@
  */
 #define _GNU_SOURCE
 
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mount.h>
@@ -22,9 +23,11 @@
 #include <uk/nofault.h>
 #include <uk/posix-fdio.h>
 #include <uk/posix-vfs.h>
+#include <uk/vfs-open.h>
 #include <uk/posix-vfsroot.h>
 #include <uk/posix-fdtab.h>
 #include "vfs-path.h"
+#include "vfs-fifo.h"
 #include <uk/spinlock.h>
 
 #if CONFIG_LIBPOSIX_VFS_MULTICTX
@@ -51,17 +54,17 @@ int uk_fs_checkperm(int desired __unused, int mode __unused,
 }
 #endif /* CONFIG_LIBPOSIX_VFS_PERMISSIONS */
 
-/* mount table */
-struct vfs_mtab_entry {
-	const struct uk_file *point;
-	const struct uk_file *root;
-	const struct uk_file *parent_root;
+static struct vfs_mount vfs_initial_mount = {
+	.root = &uk_posix_vfsroot_file,
+	.references = UK_REFCOUNT_INITIALIZER(2),
+	.attached = true
 };
 
+/* mount table */
 struct vfs_mtab {
 	struct uk_mutex lock;
 	size_t top;
-	struct vfs_mtab_entry tab[CONFIG_LIBPOSIX_VFS_MAX_MOUNTS];
+	struct vfs_mount *tab[CONFIG_LIBPOSIX_VFS_MAX_MOUNTS];
 };
 
 static struct vfs_mtab mtab = {
@@ -78,14 +81,17 @@ void vfs_mtab_cleanup(struct uk_term_ctx *tctx __unused)
 	 * touching the mtab; we can safely ignore any locks.
 	 */
 	for (size_t i = mtab.top; i-- > 0;) {
-		const struct uk_file *point = mtab.tab[i].point;
+		const struct uk_file *point = mtab.tab[i]->point;
 		const struct uk_file *prev = NULL;
 		int r = uk_fs_mountat(point, &prev);
 
-		if (unlikely(r))
+		if (unlikely(r)) {
 			uk_pr_warn("Unable to unmount %p: %d\n", point, r);
-		else
+		} else {
 			uk_file_release(prev);
+			mtab.tab[i]->attached = false;
+			vfs_mount_release(mtab.tab[i]);
+		}
 	}
 }
 
@@ -93,81 +99,25 @@ uk_rootfs_initcall(0x0, vfs_mtab_cleanup);
 
 #endif /* CONFIG_LIBPOSIX_VFS_MOUNT_CLEANUP */
 
-/**
- * Find the mount table entry that is the parent of directory `f`.
- *
- * Must be called with the mtab lock held.
- */
-static
-const struct vfs_mtab_entry *vfs_parent_mount(const struct uk_file *f)
+static struct vfs_mount *vfs_mounted_root(const struct uk_file *file)
 {
-	const struct uk_file *d = f;
-	const struct vfs_mtab_entry *ret = NULL;
-	const struct uk_file *parent __maybe_unused;
-	unsigned int lflags = UKFS_LOOKUP_IGNMNT | UKFS_LOOKUP_NO_MNTAUX;
+	struct vfs_mount *mount = NULL;
 
-	/* Clearing flag for later UK_ASSERT */
-	UK_ASSERT((lflags &= ~UKFS_LOOKUP_NO_MNTAUX));
-
-	UK_ASSERT(uk_fs_isdir(d));
-	do {
-		union uk_fs_lookup_out lout;
-		size_t prog __maybe_unused;
-		int r = uk_fs_lookupat(d, "..", 2, lflags, &lout, &prog);
-
-		switch (r) {
-		case UKFS_STOP_MNT:
-			UK_ASSERT((uk_file_release(lout.aux), lout.aux == d));
-			parent = lout.target;
-			uk_file_release(lout.target);
-			goto found;
-		case UKFS_STOP_NOD:
-			if (!prog) {
-				UK_ASSERT(lout.target == d);
-				uk_file_release(lout.target);
-				uk_file_poll(d, UKFD_POLLIN);
-				continue;
-			}
-			UK_ASSERT(prog == 2);
-			__fallthrough;
-		case UKFS_SUCCESS:
-			if (d == lout.target) {
-				/* Root reached, no mount found */
-				uk_file_release(lout.target);
-				goto out;
-			}
-			if (d != f)
-				uk_file_release(d);
-			UK_ASSERT(lout.target != f);
-			d = lout.target;
-			break;
-		case UKFS_STOP_FILE:
-		case UKFS_STOP_SPEC:
-		case UKFS_STOP_END:
-		case UKFS_STOP_SYM:
-			UK_CRASH("Impossible return from parent lookup: %d\n",
-				 r);
-		default:
-			UK_CRASH("Unknown return from parent lookup: %d\n", r);
-		}
-	} while (1);
-found:
+	uk_mutex_lock(&mtab.lock);
 	for (size_t i = mtab.top; i-- > 0;)
-		if (d == mtab.tab[i].root) {
-			UK_ASSERT(parent == mtab.tab[i].point);
-			ret = &mtab.tab[i];
+		if (mtab.tab[i]->root == file) {
+			mount = mtab.tab[i];
 			break;
 		}
-out:
-	if (d != f)
-		uk_file_release(d);
-	return ret;
+	uk_mutex_unlock(&mtab.lock);
+	return mount;
 }
 
 /* per-process vfs state */
 
 struct vfs_proc_state {
 	const struct uk_file *fsroot;
+	struct vfs_mount *root_mount;
 	struct uk_ofile *cwd;
 	struct uk_spinlock fsroot_lock;
 	struct uk_spinlock cwd_lock;
@@ -179,6 +129,7 @@ struct vfs_proc_state {
 
 static struct vfs_proc_state vfs_init_ctx = {
 	.fsroot = &uk_posix_vfsroot_file,
+	.root_mount = &vfs_initial_mount,
 	.cwd = &uk_posix_vfsroot_ofile,
 	.fsroot_lock = UK_SPINLOCK_INITIALIZER(),
 	.cwd_lock = UK_SPINLOCK_INITIALIZER(),
@@ -212,6 +163,7 @@ void vfs_ctx_release(struct vfs_proc_state *ctx)
 {
 	if (uk_refcount_release(&ctx->refcnt)) {
 		uk_file_release(ctx->fsroot);
+		vfs_mount_release(ctx->root_mount);
 		uk_ofile_release(ctx->cwd);
 		uk_free(uk_alloc_get_default(), ctx);
 	}
@@ -272,6 +224,8 @@ struct vfs_proc_state *vfs_ctx_duplicate(struct vfs_proc_state *ctx)
 		uk_spin_lock(&ctx->fsroot_lock);
 		uk_spin_lock(&ctx->cwd_lock);
 		fsroot = ctx->fsroot;
+		newctx->root_mount = ctx->root_mount;
+		vfs_mount_acquire(newctx->root_mount);
 		cwd = ctx->cwd;
 		uk_file_acquire(fsroot);
 		uk_ofile_acquire(cwd);
@@ -355,18 +309,19 @@ const struct uk_file *vfs_active_fsroot(void)
 	return fsroot;
 }
 
-static
-const struct uk_file *vfs_set_fsroot(const struct uk_file *newroot)
+static void vfs_set_fsroot(struct uk_vfs_path *path)
 {
 	const struct uk_file *prev;
+	struct vfs_mount *mount;
 
-	UK_ASSERT(vfs_ctx);
-	UK_ASSERT(newroot);
+	uk_file_acquire(path->file);
+	vfs_mount_acquire(path->mount);
 	uk_spin_lock(&vfs_ctx->fsroot_lock);
-	prev = uk_exchange_n(&vfs_ctx->fsroot, newroot);
+	prev = uk_exchange_n(&vfs_ctx->fsroot, path->file);
+	mount = uk_exchange_n(&vfs_ctx->root_mount, path->mount);
 	uk_spin_unlock(&vfs_ctx->fsroot_lock);
-	UK_ASSERT(prev);
-	return prev;
+	uk_file_release(prev);
+	vfs_mount_release(mount);
 }
 
 static inline
@@ -504,6 +459,9 @@ void vfs_wunlock(const struct uk_file *f)
 }
 
 #define VFS_LOOKUP_NOFOLLOW 1
+#define VFS_LOOKUP_NO_XDEV 2
+#define VFS_LOOKUP_CACHED 4
+#define VFS_LOOKUP_IGNMNT_START 8
 
 /**
  * INTERNAL. Symlink follow function.
@@ -512,6 +470,7 @@ static
 const struct uk_file *_vfs_lookupat(const struct uk_file *atroot,
 				    const char *path, size_t len,
 				    unsigned int flags,
+				    struct vfs_mount **mount,
 #if CONFIG_LIBPOSIX_VFS_SYMLIMIT_DEPTH
 				    size_t lvl);
 #elif CONFIG_LIBPOSIX_VFS_SYMLIMIT_NUM
@@ -538,15 +497,23 @@ const struct uk_file *_vfs_symfollow(const struct uk_file *sym,
 		return ERR2PTR(-ELOOP);
 
 	if (sym->fsops->follow_link) {
-		target = sym->fsops->follow_link(sym);
-		if (target)
+		struct uk_vfs_path *follow =
+			sym->fsops->follow_link(sym, UKFS_LINK_FOLLOW);
+
+		if (PTRISERR(follow))
+			return ERR2PTR(PTR2ERR(follow));
+		if (follow) {
+			target = uk_posix_vfs_path_file(follow);
+			uk_posix_vfs_path_release(follow);
 			return target;
+		}
 	}
+
 	sympath = uk_fs_readlink(sym);
 	if (unlikely(PTRISERR(sympath.s)))
 		return ERR2PTR(PTR2ERR(sympath.s));
 	target = _vfs_lookupat(vfs_atroot(parent, sympath.s, sympath.len),
-			       sympath.s, sympath.len, 0,
+			       sympath.s, sympath.len, 0, NULL,
 #if CONFIG_LIBPOSIX_VFS_SYMLIMIT_DEPTH
 			       lvl);
 #elif CONFIG_LIBPOSIX_VFS_SYMLIMIT_NUM
@@ -568,19 +535,24 @@ static
 const struct uk_file *_vfs_lookupat(const struct uk_file *atroot,
 				    const char *path, size_t len,
 				    unsigned int flags,
+				    struct vfs_mount **mount,
 				    size_t lvl)
 #elif CONFIG_LIBPOSIX_VFS_SYMLIMIT_NUM
 static
 const struct uk_file *_vfs_lookupat(const struct uk_file *atroot,
 				    const char *path, size_t len,
 				    unsigned int flags,
+				    struct vfs_mount **mount,
 				    size_t *nsyms)
 #endif /* CONFIG_LIBPOSIX_VFS_SYMLIMIT_NUM */
 {
 	const struct uk_file *d = atroot;
 	const struct uk_file *fsroot;
 	const struct uk_file *ret;
-	unsigned int lflags = UKFS_LOOKUP_NO_MNTAUX;
+	unsigned int lflags =
+	    UKFS_LOOKUP_NO_MNTAUX |
+	    ((flags & VFS_LOOKUP_IGNMNT_START) ? UKFS_LOOKUP_IGNMNT_START : 0) |
+	    ((flags & VFS_LOOKUP_CACHED) ? UKFS_LOOKUP_CACHED : 0);
 	size_t pos;
 
 	/* Skip leading '/' */
@@ -595,6 +567,7 @@ const struct uk_file *_vfs_lookupat(const struct uk_file *atroot,
 
 	for (;;) {
 		union uk_fs_lookup_out lout;
+		const unsigned int lookup_flags = lflags;
 		int r;
 
 		UK_ASSERT(d);
@@ -611,7 +584,8 @@ const struct uk_file *_vfs_lookupat(const struct uk_file *atroot,
 		r = uk_fs_lookupat(d, path, len, lflags,
 				   &lout, &pos);
 		vfs_runlock(d);
-		lflags = UKFS_LOOKUP_NO_MNTAUX;
+		lflags = UKFS_LOOKUP_NO_MNTAUX |
+			((flags & VFS_LOOKUP_CACHED) ? UKFS_LOOKUP_CACHED : 0);
 		if (r < 0) {
 			ret = ERR2PTR(r);
 			goto out;
@@ -629,9 +603,15 @@ const struct uk_file *_vfs_lookupat(const struct uk_file *atroot,
 
 		case UKFS_STOP_NOD:
 			if (!pos) {
+				lflags |=
+				    lookup_flags & UKFS_LOOKUP_IGNMNT_START;
 				/* No progress, should wait */
 				UK_ASSERT(lout.target == d);
 				uk_file_release(lout.target);
+				if (flags & VFS_LOOKUP_CACHED) {
+					ret = ERR2PTR(-EAGAIN);
+					goto out;
+				}
 				uk_file_poll(d, UKFD_POLLIN);
 			} else {
 				/* Progress made, continue */
@@ -641,6 +621,24 @@ const struct uk_file *_vfs_lookupat(const struct uk_file *atroot,
 			break;
 
 		case UKFS_STOP_MNT:
+			if (flags & VFS_LOOKUP_NO_XDEV) {
+				uk_file_release(lout.target);
+				ret = ERR2PTR(-EXDEV);
+				goto out;
+			}
+			if (mount) {
+				struct vfs_mount *next =
+				    vfs_mounted_root(lout.target);
+
+				if (!next && *mount)
+					next = (*mount)->parent;
+				if (!next) {
+					uk_file_release(lout.target);
+					ret = ERR2PTR(-ESTALE);
+					goto out;
+				}
+				*mount = next;
+			}
 			uk_file_release(d);
 			d = lout.target;
 			if (uk_fs_path_isdotdot(path + pos, len - pos))
@@ -723,18 +721,24 @@ out:
  * Convenience wrapper to start a lookup at symlink depth 0.
  * Consumes the `atroot` reference.
  */
-static inline
-const struct uk_file *vfs_lookupat(const struct uk_file *atroot,
-				   const char *path, size_t len,
-				   unsigned int flags)
+static inline const struct uk_file *
+vfs_lookupat_mount(const struct uk_file *atroot, const char *path, size_t len,
+		   unsigned int flags, struct vfs_mount **mount)
 {
 #if CONFIG_LIBPOSIX_VFS_SYMLIMIT_NUM
 	size_t nsyms = 0;
 
-	return _vfs_lookupat(atroot, path, len, flags, &nsyms);
+	return _vfs_lookupat(atroot, path, len, flags, mount, &nsyms);
 #elif CONFIG_LIBPOSIX_VFS_SYMLIMIT_DEPTH
-	return _vfs_lookupat(atroot, path, len, flags, 0);
-#endif /* CONFIG_LIBPOSIX_VFS_SYMLIMIT_DEPTH */
+	return _vfs_lookupat(atroot, path, len, flags, mount, 0);
+#endif
+}
+
+static inline const struct uk_file *vfs_lookupat(const struct uk_file *atroot,
+						 const char *path, size_t len,
+						 unsigned int flags)
+{
+	return vfs_lookupat_mount(atroot, path, len, flags, NULL);
 }
 
 /* Convenience for the common call vfs_lookupat(vfs_atroot(...), ...) */
@@ -783,6 +787,28 @@ int vfs_check_perms(const struct uk_file *f __unused, mode_t desired __unused)
 
 #endif /* !CONFIG_LIBPOSIX_VFS_PERMISSIONS */
 
+static int vfs_check_access(const struct uk_file *file, mode_t desired)
+{
+	if (desired & X_OK) {
+		struct uk_statx status;
+		const unsigned int mask = UK_STATX_TYPE | UK_STATX_MODE;
+		const bool lock = !uk_fs_isfs(file) || _vfs_should_lock(file);
+		int result;
+
+		if (lock)
+			uk_file_rlock(file);
+		result = uk_file_getstat(file, mask, &status);
+		if (lock)
+			uk_file_runlock(file);
+		if (result)
+			return result;
+		UK_ASSERT((status.stx_mask & mask) == mask);
+		if (S_ISREG(status.stx_mode) && !(status.stx_mode & 0111))
+			return -EACCES;
+	}
+	return vfs_check_perms(file, desired);
+}
+
 /**
  * INTERNAL. Check whether `path` is acceptable for an *at lookup.
  *
@@ -798,6 +824,8 @@ int vfs_check_path(const char *path, int flags)
 {
 	if (!path)
 		return -EFAULT;
+	if (strnlen(path, PATH_MAX) == PATH_MAX)
+		return -ENAMETOOLONG;
 	if (!path[0] && !(flags & AT_EMPTY_PATH))
 		return -ENOENT;
 	return 0;
@@ -849,15 +877,45 @@ struct uk_fs_path uk_posix_vfs_ofile_name(struct uk_ofile *file)
 	return uk_fs_path_copy(name, strlen(name), uk_alloc_get_default());
 }
 
+struct uk_vfs_path *uk_posix_vfs_ofile_path(struct uk_ofile *file)
+{
+	struct uk_vfs_path *path;
+	struct uk_fs_path name;
+
+	if (file->destroy == vfs_ofile_destroy && file->context) {
+		path = file->context;
+		uk_posix_vfs_path_acquire(path);
+		return path;
+	}
+	if (uk_fs_isfs(file->file))
+		return ERR2PTR(-ENOENT);
+	name = uk_posix_vfs_ofile_name(file);
+	if (PTRISERR(name.s))
+		return ERR2PTR(PTR2ERR(name.s));
+	path = vfs_path_get(NULL, NULL, file->file, name.s, name.len);
+	uk_fs_path_release(name);
+	return path;
+}
+
 static struct uk_vfs_path *vfs_path_root(void)
 {
-	const struct uk_file *file = vfs_lookupat(vfs_active_fsroot(), "", 0, 0);
+	const struct uk_file *file;
+	struct vfs_mount *held, *mount;
 	struct uk_vfs_path *path;
 
-	if (PTRISERR(file))
-		return ERR2PTR(PTR2ERR(file));
-	path = vfs_path_get(NULL, file, "", 0);
-	uk_file_release(file);
+	uk_spin_lock(&vfs_ctx->fsroot_lock);
+	file = vfs_ctx->fsroot;
+	held = vfs_ctx->root_mount;
+	uk_file_acquire(file);
+	vfs_mount_acquire(held);
+	uk_spin_unlock(&vfs_ctx->fsroot_lock);
+	mount = held;
+	file = vfs_lookupat_mount(file, "", 0, 0, &mount);
+	path = PTRISERR(file) ? ERR2PTR(PTR2ERR(file)) :
+		vfs_path_get(NULL, mount, file, "", 0);
+	if (!PTRISERR(file))
+		uk_file_release(file);
+	vfs_mount_release(held);
 	return path;
 }
 
@@ -891,22 +949,133 @@ static struct uk_vfs_path *vfs_path_base(struct uk_ofile *base)
 	return path;
 }
 
+struct vfs_walk {
+	struct uk_vfs_path *anchor;
+	__u64 resolve;
+	unsigned int links;
+	int flags;
+	mode_t mode;
+	bool created;
+};
+
+static unsigned int vfs_walk_flags(const struct vfs_walk *walk)
+{
+	return VFS_LOOKUP_NOFOLLOW | VFS_LOOKUP_IGNMNT_START |
+	       ((walk->resolve & UK_VFS_RESOLVE_NO_XDEV) ? VFS_LOOKUP_NO_XDEV
+							 : 0) |
+	       ((walk->resolve & UK_VFS_RESOLVE_CACHED) ? VFS_LOOKUP_CACHED
+							: 0);
+}
+
 static struct uk_vfs_path *vfs_path_walk(struct uk_vfs_path *base,
 					 const char *name, size_t length,
-					 unsigned int *links, bool nofollow)
+					 struct vfs_walk *walk, bool terminal,
+					 bool nofollow);
+
+static struct uk_vfs_path *vfs_walk_symlink(struct uk_vfs_path *base,
+					    const struct uk_file *target,
+					    struct vfs_walk *walk,
+					    bool terminal)
 {
+	struct uk_fs_path name;
+	struct uk_vfs_path *next = NULL;
+	enum uk_fs_link_policy policy = UKFS_LINK_FOLLOW;
+
+	if (walk->resolve & UK_VFS_RESOLVE_NO_SYMLINKS)
+		return ERR2PTR(-ELOOP);
+#if CONFIG_LIBPOSIX_VFS_SYMLIMIT_DEPTH
+	if (++walk->links > CONFIG_LIBPOSIX_VFS_MAX_SYMDEPTH)
+#else
+	if (++walk->links > CONFIG_LIBPOSIX_VFS_MAX_SYMNUM)
+#endif
+		return ERR2PTR(-ELOOP);
+	if (walk->resolve & UK_VFS_RESOLVE_NO_MAGICLINKS)
+		policy = UKFS_LINK_NO_MAGIC;
+	else if (walk->resolve & UK_VFS_RESOLVE_SCOPED)
+		policy = UKFS_LINK_SCOPED;
+	if (target->fsops->follow_link)
+		next = target->fsops->follow_link(target, policy);
+	if (next) {
+		if (!PTRISERR(next) &&
+		    (walk->resolve & UK_VFS_RESOLVE_NO_XDEV) &&
+		    next->mount != base->mount) {
+			uk_posix_vfs_path_release(next);
+			next = ERR2PTR(-EXDEV);
+		}
+		goto out;
+	}
+	name = uk_fs_readlink(target);
+	if (PTRISERR(name.s)) {
+		next = ERR2PTR(PTR2ERR(name.s));
+		goto out;
+	}
+	uk_posix_vfs_path_acquire(base);
+	next = vfs_path_walk(base, name.s, name.len, walk, terminal, false);
+	uk_fs_path_release(name);
+out:
+#if CONFIG_LIBPOSIX_VFS_SYMLIMIT_DEPTH
+	--walk->links;
+#endif
+	return next;
+}
+
+static const struct uk_file *vfs_walk_create(const struct uk_file *directory,
+					     const char *name, size_t length,
+					     struct vfs_walk *walk)
+{
+	const struct uk_file *file;
+	int error;
+
+	if (walk->resolve & UK_VFS_RESOLVE_CACHED)
+		return ERR2PTR(-EAGAIN);
+	vfs_wlock(directory);
+	error = vfs_check_perms(directory, W_OK);
+	file = error ? ERR2PTR(error)
+		     : uk_fs_createat(directory, name, length, walk->mode,
+				      O_EXCL, UKFS_NOTARGET);
+	vfs_wunlock(directory);
+	if (!PTRISERR(file))
+		walk->created = true;
+	return file;
+}
+
+static struct uk_vfs_path *vfs_path_walk(struct uk_vfs_path *base,
+					 const char *name, size_t length,
+					 struct vfs_walk *walk, bool terminal,
+					 bool nofollow)
+{
+	const bool directory = length && name[length - 1] == '/';
 	struct uk_vfs_path *next;
-	const struct uk_file *file, *target;
-	struct uk_fs_path link;
+	struct vfs_mount *mount;
+	const struct uk_file *target;
 	size_t part, rest;
+	int error;
 
 	if (PTRISERR(base))
 		return base;
 	if (length && name[0] == '/') {
+		if (walk->resolve & UK_VFS_RESOLVE_BENEATH) {
+			error = -EXDEV;
+			goto fail;
+		}
+		if (walk->resolve & UK_VFS_RESOLVE_IN_ROOT) {
+			next = walk->anchor;
+			uk_posix_vfs_path_acquire(next);
+		} else {
+			next = vfs_path_root();
+			if (PTRISERR(next)) {
+				error = PTR2ERR(next);
+				goto fail;
+			}
+		}
+		if ((walk->resolve & UK_VFS_RESOLVE_NO_XDEV) &&
+		    next->mount != base->mount) {
+			uk_posix_vfs_path_release(next);
+			error = -EXDEV;
+			goto fail;
+		}
 		uk_posix_vfs_path_release(base);
-		base = vfs_path_root();
-		if (PTRISERR(base))
-			return base;
+		base = next;
 	}
 	while (length) {
 		while (length && *name == '/') {
@@ -915,61 +1084,69 @@ static struct uk_vfs_path *vfs_path_walk(struct uk_vfs_path *base,
 		}
 		if (!length)
 			break;
+		if (!uk_fs_isdir(base->file)) {
+			error = -ENOTDIR;
+			goto fail;
+		}
+		error = vfs_check_perms(base->file, X_OK);
+		if (error)
+			goto fail;
 		for (part = 0; part < length && name[part] != '/'; part++)
 			;
 		for (rest = part; rest < length && name[rest] == '/'; rest++)
 			;
+		if (terminal && rest == length && part < length &&
+		    (walk->flags & O_CREAT)) {
+			error = -EISDIR;
+			goto fail;
+		}
 		if (part == 1 && name[0] == '.')
 			goto advance;
 		if (part == 2 && name[0] == '.' && name[1] == '.') {
-			next = vfs_path_parent(base);
-			goto replace;
-		}
-		file = uk_posix_vfs_path_file(base);
-		target = vfs_lookupat(file, name, part, VFS_LOOKUP_NOFOLLOW);
-		if (PTRISERR(target)) {
-			next = ERR2PTR(PTR2ERR(target));
-			goto replace;
-		}
-		if (uk_fs_issym(target) && (!nofollow || rest < length)) {
-			#if CONFIG_LIBPOSIX_VFS_SYMLIMIT_DEPTH
-			if (++*links > CONFIG_LIBPOSIX_VFS_MAX_SYMDEPTH) {
-#else
-			if (++*links > CONFIG_LIBPOSIX_VFS_MAX_SYMNUM) {
-#endif
-				next = ERR2PTR(-ELOOP);
-				goto release_target;
-			}
-			link = uk_fs_readlink(target);
-			if (PTRISERR(link.s)) {
-				next = ERR2PTR(PTR2ERR(link.s));
-				goto release_target;
-			}
-			if (target->fsops->follow_link) {
-				file = target->fsops->follow_link(target);
-				if (PTRISERR(file)) {
-					next = ERR2PTR(PTR2ERR(file));
-				} else if (file) {
-					next = vfs_path_find(file, &link);
-					uk_file_release(file);
-				} else {
-					uk_posix_vfs_path_acquire(base);
-					next = vfs_path_walk(base, link.s, link.len,
-							     links, false);
+			if (base == walk->anchor) {
+				if (walk->resolve & UK_VFS_RESOLVE_BENEATH) {
+					error = -EXDEV;
+					goto fail;
 				}
-			} else {
-				uk_posix_vfs_path_acquire(base);
-				next = vfs_path_walk(base, link.s, link.len,
-						     links, false);
+				goto advance;
 			}
-			uk_fs_path_release(link);
-#if CONFIG_LIBPOSIX_VFS_SYMLIMIT_DEPTH
-			--*links;
-#endif
-		} else {
-			next = vfs_path_get(base, target, name, part);
+			next = vfs_path_parent(base);
+			if ((walk->resolve & UK_VFS_RESOLVE_NO_XDEV) &&
+			    next->mount != base->mount) {
+				uk_posix_vfs_path_release(next);
+				error = -EXDEV;
+				goto fail;
+			}
+			goto replace;
 		}
-release_target:
+		mount = base->mount;
+		target = vfs_lookupat_mount(uk_posix_vfs_path_file(base), name,
+					    part, vfs_walk_flags(walk), &mount);
+		if (PTRISERR(target) && PTR2ERR(target) == -ENOENT &&
+		    terminal && part == length && (walk->flags & O_CREAT)) {
+			target = vfs_walk_create(base->file, name, part, walk);
+			if (PTRISERR(target) && PTR2ERR(target) == -EEXIST &&
+			    !(walk->flags & O_EXCL))
+				target =
+				vfs_lookupat_mount(uk_posix_vfs_path_file(base),
+						   name, part,
+						   vfs_walk_flags(walk),
+						   &mount);
+		}
+		if (PTRISERR(target)) {
+			error = PTR2ERR(target);
+			goto fail;
+		}
+		if (!walk->created && terminal && rest == length &&
+		    (walk->flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL)) {
+			next = ERR2PTR(-EEXIST);
+		} else if (uk_fs_issym(target) &&
+			   (!nofollow || part < length)) {
+			next = vfs_walk_symlink(base, target, walk,
+						terminal && part == length);
+		} else {
+			next = vfs_path_get(base, mount, target, name, part);
+		}
 		uk_file_release(target);
 replace:
 		uk_posix_vfs_path_release(base);
@@ -980,77 +1157,105 @@ advance:
 		name += rest;
 		length -= rest;
 	}
+	if (directory && !uk_fs_isdir(base->file)) {
+		error = -ENOTDIR;
+		goto fail;
+	}
 	return base;
+fail:
+	uk_posix_vfs_path_release(base);
+	return ERR2PTR(error);
+}
+
+static struct uk_vfs_path *vfs_walk_start(struct uk_ofile *base,
+					  const char *name, size_t length,
+					  struct vfs_walk *walk, bool nofollow)
+{
+	struct uk_vfs_path *path;
+
+	if (walk->resolve & UK_VFS_RESOLVE_SCOPED) {
+		walk->anchor = vfs_path_base(base);
+		if (PTRISERR(walk->anchor))
+			return walk->anchor;
+		path = walk->anchor;
+		uk_posix_vfs_path_acquire(path);
+	} else {
+		path = length && name[0] == '/' ? vfs_path_root() :
+			vfs_path_base(base);
+	}
+	path = vfs_path_walk(path, name, length, walk, true, nofollow);
+	uk_posix_vfs_path_release(walk->anchor);
+	walk->anchor = NULL;
+	return path;
 }
 
 static struct uk_vfs_path *vfs_path_resolve(struct uk_ofile *base,
 					    const char *name, size_t length, bool nofollow)
 {
-	unsigned int links = 0;
-	struct uk_vfs_path *path = length && name[0] == '/' ?
-		vfs_path_root() : vfs_path_base(base);
+	struct vfs_walk walk = {0};
 
-	return vfs_path_walk(path, name, length, &links, nofollow);
+	return vfs_walk_start(base, name, length, &walk, nofollow);
 }
 
-static struct uk_ofile *vfs_open_file(const struct uk_file *f, unsigned int mode,
-				      struct uk_ofile *basedir,
-				      const char *path, size_t pathlen)
+static struct uk_ofile *vfs_open_identity(struct uk_vfs_path *identity,
+					  unsigned int mode)
 {
-	struct uk_ofile *of = NULL;
-	struct uk_vfs_path *identity;
-	struct uk_fs_path name;
+	const struct uk_file *f = uk_fs_inode(identity->file);
 	const struct uk_file *opened = NULL;
+	struct uk_ofile *of = NULL;
+	struct uk_fs_path name;
+	bool filesystem = uk_fs_isfs(f);
 
-	identity = vfs_path_resolve(basedir, path, pathlen, uk_fs_issym(f));
-	if (PTRISERR(identity))
-		return ERR2PTR(PTR2ERR(identity));
-	if (identity->file->state != f->state) {
-		of = ERR2PTR(-ESTALE);
-		goto out;
-	}
 	name = uk_posix_vfs_path_name(identity);
 	if (PTRISERR(name.s)) {
 		of = ERR2PTR(PTR2ERR(name.s));
 		goto out;
 	}
-	if (uk_fs_isfs(f)) {
+	if (filesystem)
 		mode |= uk_fs_mode_constraints(f);
-	} else {
+	else
 		mode |= UKFD_O_NOSEEK;
-		if (f->ops->reopen) {
-			opened = f->ops->reopen(f, mode);
-			if (PTRISERR(opened)) {
-				of = ERR2PTR(PTR2ERR(opened));
-				opened = NULL;
-				goto out_name;
-			}
+	if (f->ops->open) {
+		struct uk_vfs_path *replacement;
+
+		opened = f->ops->open(f, mode);
+		if (PTRISERR(opened)) {
+			of = ERR2PTR(PTR2ERR(opened));
+			opened = NULL;
+			goto out_name;
+		}
+		if (!filesystem) {
+			replacement = vfs_path_get(NULL, identity->mount,
+						   opened, name.s, name.len);
+
 			uk_posix_vfs_path_release(identity);
-			identity = vfs_path_get(NULL, opened, name.s, name.len);
+			identity = replacement;
 			if (PTRISERR(identity)) {
 				of = ERR2PTR(PTR2ERR(identity));
 				identity = NULL;
 				goto out_name;
 			}
-			f = opened;
-		} else if (!(mode & O_PATH)) {
-			struct uk_statx status = {0};
-			int rc = uk_file_getstat(f, UK_STATX_TYPE, &status);
+		}
+		f = opened;
+	} else if (!filesystem && !(mode & O_PATH)) {
+		struct uk_statx status = {0};
+		int rc = uk_file_getstat(f, UK_STATX_TYPE, &status);
 
-			if (rc) {
-				of = ERR2PTR(rc);
-				goto out_name;
-			}
-			switch (status.stx_mode & S_IFMT) {
-			case S_IFBLK:
+		if (rc) {
+			of = ERR2PTR(rc);
+			goto out_name;
+		}
+		switch (status.stx_mode & S_IFMT) {
+		case S_IFBLK:
+			mode &= ~UKFD_O_NOSEEK;
+			break;
+		case S_IFCHR:
+			if (f->ops->seek)
 				mode &= ~UKFD_O_NOSEEK;
-				break;
-			case S_IFCHR:
-				break;
-			default:
-				of = ERR2PTR(-ENXIO);
-				goto out_name;
-			}
+			break;
+		default:
+			of = ERR2PTR(-ENXIO);
+			goto out_name;
 		}
 	}
 	of = uk_ofile_new(f, mode, name.len);
@@ -1069,6 +1274,24 @@ out:
 	return of ? of : ERR2PTR(-ENOMEM);
 }
 
+static struct uk_ofile *vfs_open_file(const struct uk_file *file,
+				      unsigned int mode,
+				      struct uk_ofile *basedir,
+				      const char *name, size_t length)
+{
+	struct uk_vfs_path *path =
+		vfs_path_resolve(basedir, name, length,
+				 uk_fs_issym(uk_fs_inode(file)));
+
+	if (PTRISERR(path))
+		return ERR2PTR(PTR2ERR(path));
+	if (path->file->state != uk_fs_inode(file)->state) {
+		uk_posix_vfs_path_release(path);
+		return ERR2PTR(-ESTALE);
+	}
+	return vfs_open_identity(path, mode);
+}
+
 /*
  * Internal syscalls
  */
@@ -1078,7 +1301,7 @@ void uk_sys_sync(void)
 {
 	uk_mutex_lock(&mtab.lock);
 	for (size_t i = 0; i < mtab.top; i++)
-		uk_sys_syncfs(mtab.tab[i].root);
+		uk_sys_syncfs(mtab.tab[i]->root);
 	uk_mutex_unlock(&mtab.lock);
 }
 
@@ -1087,8 +1310,8 @@ int uk_sys_statfs(const char *path, struct statfs *buf)
 	const struct uk_file *target;
 	int r;
 
-	if (unlikely(!path))
-		return -EFAULT;
+	if (unlikely((r = vfs_check_path(path, 0))))
+		return r;
 
 	target = vfs_lookup(NULL, path, strlen(path), 0);
 	if (unlikely(PTRISERR(target)))
@@ -1124,8 +1347,8 @@ static int vfs_chdir(const char *path)
 	size_t pathlen;
 	int ret;
 
-	if (unlikely(!path))
-		return -EFAULT;
+	if (unlikely((ret = vfs_check_path(path, 0))))
+		return ret;
 
 	pathlen = strlen(path);
 	dir = vfs_lookupat(vfs_atroot_named(NULL, path, pathlen, &base),
@@ -1174,7 +1397,9 @@ ssize_t uk_sys_getcwd(char *buf, size_t len)
 	uk_posix_vfs_path_release(path);
 	if (PTRISERR(name.s))
 		return PTR2ERR(name.s);
-	if (name.len + 1 > len) {
+	if (name.len >= PATH_MAX) {
+		result = -ENAMETOOLONG;
+	} else if (name.len + 1 > len) {
 		result = -ERANGE;
 	} else {
 		memcpy(buf, name.s, name.len + 1);
@@ -1184,33 +1409,27 @@ ssize_t uk_sys_getcwd(char *buf, size_t len)
 	return result;
 }
 
-int uk_sys_chroot(const char *path)
+int uk_sys_chroot(const char *name)
 {
-	const struct uk_file *newroot;
-	const struct uk_file *prev;
-	int err;
+	struct uk_vfs_path *path;
+	int error = vfs_check_path(name, 0);
 
-	if (unlikely(!path))
-		return -EFAULT;
-
-	newroot = vfs_lookup(NULL, path, strlen(path), 0);
-	if (unlikely(PTRISERR(newroot)))
-		return PTR2ERR(newroot);
-
-	if (unlikely(!uk_fs_isdir(newroot))) {
-		err = -ENOTDIR;
-		goto out_err;
+	if (error)
+		return error;
+	uk_mutex_lock(&vfs_namespace_lock);
+	path = vfs_path_resolve(NULL, name, strlen(name), false);
+	if (PTRISERR(path)) {
+		error = PTR2ERR(path);
+		goto out;
 	}
-	if (unlikely((err = vfs_check_perms(newroot, X_OK))))
-		goto out_err;
-
-	prev = vfs_set_fsroot(newroot);
-	uk_file_release(prev);
-	return 0;
-
-out_err:
-	uk_file_release(newroot);
-	return err;
+	error = uk_fs_isdir(path->file) ? vfs_check_perms(path->file, X_OK) :
+		-ENOTDIR;
+	if (!error)
+		vfs_set_fsroot(path);
+	uk_posix_vfs_path_release(path);
+out:
+	uk_mutex_unlock(&vfs_namespace_lock);
+	return error;
 }
 
 mode_t uk_sys_umask(mode_t mask)
@@ -1234,7 +1453,7 @@ int uk_sys_faccessat(const struct uk_file *f, const char *path,
 	target = vfs_lookup(f, path, strlen(path), lflags);
 	if (unlikely(PTRISERR(target)))
 		return PTR2ERR(target);
-	ret = (mode == F_OK) ? 0 : vfs_check_perms(target, mode);
+	ret = (mode == F_OK) ? 0 : vfs_check_access(target, mode);
 	uk_file_release(target);
 	return ret;
 }
@@ -1455,9 +1674,13 @@ ssize_t uk_sys_readlinkat(const struct uk_file *f, const char *restrict path,
 		ret = PTR2ERR(linkpath.s);
 		goto out;
 	}
-	ret = MIN(bufsz, linkpath.len);
-	if (uk_nofault_memcpy(buf, linkpath.s, ret, 0) != (size_t)ret)
-		ret = -EFAULT;
+	if (linkpath.len >= PATH_MAX) {
+		ret = -ENAMETOOLONG;
+	} else {
+		ret = MIN(bufsz, linkpath.len);
+		if (uk_nofault_memcpy(buf, linkpath.s, ret, 0) != (size_t)ret)
+			ret = -EFAULT;
+	}
 	uk_fs_path_release(linkpath);
 out:
 	uk_file_release(target);
@@ -1470,6 +1693,9 @@ int uk_sys_truncate(const char *path, off_t len)
 	const struct uk_file *target;
 	struct uk_ofile of;
 	int ret;
+
+	if (unlikely((ret = vfs_check_path(path, 0))))
+		return ret;
 
 	target = vfs_lookup(NULL, path, strlen(path), 0);
 	if (unlikely(PTRISERR(target)))
@@ -1606,6 +1832,8 @@ int uk_sys_symlinkat(const char *targetpath, const struct uk_file *f,
 	struct uk_fs_poslen p;
 	int ret;
 
+	if (unlikely((ret = vfs_check_path(targetpath, 0))))
+		return ret;
 	if (unlikely((ret = vfs_check_path(linkpath, 0))))
 		return ret;
 
@@ -1657,10 +1885,10 @@ int uk_sys_mknodat(const struct uk_file *f, const char *path,
 		switch (ftype) {
 		case S_IFREG:
 		case S_IFSOCK:
+		case S_IFIFO:
 			break;
 		case S_IFCHR:
 		case S_IFBLK:
-		case S_IFIFO:
 			uk_pr_warn("Special files not supported\n");
 			__fallthrough;
 		default:
@@ -1842,68 +2070,79 @@ out_src:
 
 /* Mounting */
 
-int uk_posix_vfs_mount(const char *path, const struct uk_file *newroot)
+static struct vfs_mount *vfs_mount_new(struct uk_vfs_path *point,
+				       const struct uk_file *root)
 {
-	const struct uk_file *target;
-	const struct uk_file *parent = NULL;
-	const struct vfs_mtab_entry *parent_ent;
-	struct uk_fs_poslen p;
-	int ret;
+	struct vfs_mount *mount =
+	    uk_zalloc(uk_alloc_get_default(), sizeof(*mount));
 
-	/* Find mount target */
-	p = uk_fs_path_len_trail(path, 0);
-	target = vfs_lookup(NULL, path, p.len, 0);
-	if (unlikely(PTRISERR(target)))
-		return PTR2ERR(target);
+	if (!mount)
+		return NULL;
+	mount->root = root;
+	mount->point = point->file;
+	mount->parent = point->mount;
+	uk_refcount_init(&mount->references, 1);
+	uk_file_acquire(root);
+	uk_file_acquire(mount->point);
+	vfs_mount_acquire(mount->parent);
+	return mount;
+}
 
-	if (!uk_fs_isdir(target)) {
-		/* Need to look up parent */
-		parent = vfs_lookup(NULL, path, p.pos, 0);
-		if (unlikely(PTRISERR(parent))) {
-			uk_file_release(target);
-			return PTR2ERR(parent);
-		}
+static int vfs_mount(const char *name, const struct uk_file *newroot)
+{
+	struct uk_vfs_path *path;
+	struct vfs_mount *mount;
+	int error = vfs_check_path(name, 0);
+
+	if (error)
+		return error;
+	path = vfs_path_resolve(NULL, name, strlen(name), false);
+	if (PTRISERR(path))
+		return PTR2ERR(path);
+	mount = vfs_mount_new(path, newroot);
+	if (!mount) {
+		error = -ENOMEM;
+		goto out_path;
 	}
-
-	/* uk_fs_mount */
 	uk_mutex_lock(&mtab.lock);
-	if (unlikely(mtab.top == CONFIG_LIBPOSIX_VFS_MAX_MOUNTS)) {
-		ret = -EMFILE;
+	if (mtab.top == CONFIG_LIBPOSIX_VFS_MAX_MOUNTS) {
+		error = -EMFILE;
 		goto out_unlock;
 	}
-	/* This takes a ref on newroot */
-	ret = uk_fs_mountat(target, &newroot);
-	if (unlikely(ret))
+	error = uk_fs_mountat(path->file, &newroot);
+	if (error)
 		goto out_unlock;
 	if (uk_fs_isdir(newroot)) {
-		/* This takes a ref on target */
-		ret = uk_fs_graft(newroot, target);
-		if (unlikely(ret)) {
-			/* Undo the previous mount & drop ref */
+		error = uk_fs_graft(newroot, path->file);
+		if (error) {
 			const struct uk_file *prev = NULL;
-			int r __maybe_unused;
+			int rollback __maybe_unused =
+			    uk_fs_mountat(path->file, &prev);
 
-			r = uk_fs_mountat(target, &prev);
-			UK_ASSERT(!r); /* This should never fail */
-			UK_ASSERT(prev == newroot);
+			UK_ASSERT(!rollback && prev == newroot);
 			uk_file_release(prev);
 			goto out_unlock;
 		}
 	}
-	/* Mount is now live in VFS, cannot fail past this point */
-	parent_ent = vfs_parent_mount(parent ? parent : target);
-	mtab.tab[mtab.top].point = target; /* Uses reference from graft */
-	mtab.tab[mtab.top].root = newroot; /* Uses reference from mount */
-	mtab.tab[mtab.top].parent_root = parent_ent ? parent_ent->root : NULL;
-	mtab.top++;
-	ret = 0;
+	mount->attached = true;
+	mtab.tab[mtab.top++] = mount;
+	mount = NULL;
 out_unlock:
 	uk_mutex_unlock(&mtab.lock);
+	vfs_mount_release(mount);
+out_path:
+	uk_posix_vfs_path_release(path);
+	return error;
+}
 
-	if (parent)
-		uk_file_release(parent);
-	uk_file_release(target);
-	return ret;
+int uk_posix_vfs_mount(const char *path, const struct uk_file *newroot)
+{
+	int result;
+
+	uk_mutex_lock(&vfs_namespace_lock);
+	result = vfs_mount(path, newroot);
+	uk_mutex_unlock(&vfs_namespace_lock);
+	return result;
 }
 
 static
@@ -1984,8 +2223,9 @@ out_vol:
 	return f;
 }
 
-int uk_sys_mount(const char *source, const char *targetpath, const char *fstype,
-		 unsigned long flags, void *data)
+static int vfs_mount_request(const char *source, const char *targetpath,
+			     const char *fstype, unsigned long flags,
+			     void *data)
 {
 	const struct uk_file *newroot;
 	int ret;
@@ -2003,6 +2243,9 @@ int uk_sys_mount(const char *source, const char *targetpath, const char *fstype,
 	if (flags & MS_BIND) {
 		const struct uk_file *src;
 
+		if (unlikely((ret = vfs_check_path(source, 0))))
+			return ret;
+
 		src = vfs_lookup(NULL, source, strlen(source), 0);
 
 		if (unlikely(PTRISERR(src)))
@@ -2015,179 +2258,81 @@ int uk_sys_mount(const char *source, const char *targetpath, const char *fstype,
 	if (unlikely(PTRISERR(newroot)))
 		return PTR2ERR(newroot);
 
-	ret = uk_posix_vfs_mount(targetpath, newroot);
+	ret = vfs_mount(targetpath, newroot);
 	uk_file_release(newroot);
 	return ret;
 }
 
-int uk_sys_umount(const char *targetpath, int flags __unused)
+int uk_sys_mount(const char *source, const char *targetpath, const char *fstype,
+		 unsigned long flags, void *data)
 {
-	const struct uk_file *target;
-	size_t mntidx;
-	int ret;
-	int inval __maybe_unused = 0;
+	int result;
 
-	/* TODO: require privileges for (un)mounting */
+	uk_mutex_lock(&vfs_namespace_lock);
+	result = vfs_mount_request(source, targetpath, fstype, flags, data);
+	uk_mutex_unlock(&vfs_namespace_lock);
+	return result;
+}
 
-	target = vfs_lookup(NULL, targetpath, strlen(targetpath), 0);
-	if (unlikely(PTRISERR(target)))
-		return PTR2ERR(target);
+static int vfs_umount(const char *name, int flags __unused)
+{
+	struct uk_vfs_path *path;
+	struct vfs_mount *removed = NULL;
+	size_t index;
+	int error = vfs_check_path(name, 0);
 
+	if (error)
+		return error;
+	path = vfs_path_resolve(NULL, name, strlen(name), false);
+	if (PTRISERR(path))
+		return PTR2ERR(path);
 	uk_mutex_lock(&mtab.lock);
-	/* Find target in mtab */
-	for (mntidx = 0; mntidx < mtab.top; mntidx++) {
-		if (mtab.tab[mntidx].parent_root == target)
-			inval = 1;
-		if (mtab.tab[mntidx].root == target)
+	for (index = 0; index < mtab.top; index++)
+		if (mtab.tab[index] == path->mount &&
+		    mtab.tab[index]->root->state == path->file->state)
 			break;
+	if (index == mtab.top) {
+		error = -EINVAL;
+		goto out;
 	}
-	UK_ASSERT(!inval);
-	if (mntidx != mtab.top) {
+	for (size_t i = 0; i < mtab.top; i++)
+		if (mtab.tab[i]->parent == path->mount) {
+			error = -EBUSY;
+			goto out;
+		}
+	error = uk_fs_sync(mtab.tab[index]->root);
+	if (!error) {
 		const struct uk_file *prev = NULL;
 
-		for (size_t i = mntidx + 1; i < mtab.top; i++)
-			if (unlikely(mtab.tab[i].parent_root == target)) {
-				ret = -EBUSY;
-				goto out;
-			}
-		ret = uk_fs_sync(target);
-		if (unlikely(ret))
+		error = uk_fs_mountat(mtab.tab[index]->point, &prev);
+		if (error)
 			goto out;
-		/* unmount & release */
-		ret = uk_fs_mountat(mtab.tab[mntidx].point, &prev);
-		if (unlikely(ret))
-			goto out;
-		UK_ASSERT(prev == target);
+		UK_ASSERT(prev == mtab.tab[index]->root);
 		uk_file_release(prev);
-		/* rm from mtab */
-		for (size_t i = mntidx + 1; i < mtab.top; i++)
+		removed = mtab.tab[index];
+		removed->attached = false;
+		for (size_t i = index + 1; i < mtab.top; i++)
 			mtab.tab[i - 1] = mtab.tab[i];
 		mtab.top--;
-		ret = 0;
-	} else {
-		ret = -EINVAL;
 	}
 out:
 	uk_mutex_unlock(&mtab.lock);
-	uk_file_release(target);
-	return ret;
+	vfs_mount_release(removed);
+	uk_posix_vfs_path_release(path);
+	return error;
+}
+
+int uk_sys_umount(const char *targetpath, int flags)
+{
+	int result;
+
+	uk_mutex_lock(&vfs_namespace_lock);
+	result = vfs_umount(targetpath, flags);
+	uk_mutex_unlock(&vfs_namespace_lock);
+	return result;
 }
 
 /* Open */
-
-/**
- * Lookup a path, following all symlinks; if not exist but could be created,
- * return a reference to a parent dir, the desired filename, and an optional
- * owned symlink target that contains the filename.
- *
- * The reference to `atroot` is consumed by this call.
- */
-static
-int vfs_lookupat_parent(const struct uk_file *atroot,
-			const char *path, size_t pathlen,
-			const struct uk_file **ref, const char **name,
-			size_t *len, struct uk_fs_path *owned_path)
-{
-	struct uk_fs_path current_path = {0};
-	const struct uk_file *f = atroot;
-	size_t symlvl = 0;
-	int ret;
-
-	do {
-		size_t ppos = pathlen;
-		const struct uk_file *dir;
-		const struct uk_file *target;
-
-		while (ppos && path[ppos - 1] != '/')
-			ppos--;
-		dir = _vfs_lookupat(f, path, ppos, 0,
-#if CONFIG_LIBPOSIX_VFS_SYMLIMIT_DEPTH
-				    symlvl
-#elif CONFIG_LIBPOSIX_VFS_SYMLIMIT_NUM
-				    &symlvl
-#endif /* CONFIG_LIBPOSIX_VFS_SYMLIMIT_NUM */
-		);
-		if (unlikely(PTRISERR(dir))) {
-			ret = PTR2ERR(dir);
-			break;
-		}
-		/* f is consumed at this point */
-		/* Take extra ref on dir as following call consumes 1 ref */
-		uk_file_acquire(dir);
-		target = _vfs_lookupat(dir, &path[ppos], pathlen - ppos,
-				       VFS_LOOKUP_NOFOLLOW,
-#if CONFIG_LIBPOSIX_VFS_SYMLIMIT_DEPTH
-				     symlvl
-#elif CONFIG_LIBPOSIX_VFS_SYMLIMIT_NUM
-				     &symlvl
-#endif /* CONFIG_LIBPOSIX_VFS_SYMLIMIT_NUM */
-		);
-		if (PTRISERR(target)) {
-			if (PTR2ERR(target) == -ENOENT) {
-				/* Reached end & not present, ret parent */
-				*ref = dir;
-				*name = &path[ppos];
-				*len = pathlen - ppos;
-				*owned_path = current_path;
-				current_path = (struct uk_fs_path){0};
-				ret = 1;
-			} else {
-				uk_file_release(dir);
-				ret = PTR2ERR(target);
-				UK_ASSERT(ret < 0);
-			}
-			break;
-		}
-		/* Present; if symlink follow, if not ret success */
-		if (uk_fs_issym(target)) {
-			const struct uk_file *followed = target->fsops->follow_link ?
-				target->fsops->follow_link(target) : NULL;
-			struct uk_fs_path p;
-
-			if (followed) {
-				uk_file_release(target);
-				uk_file_release(dir);
-				if (PTRISERR(followed)) {
-					ret = PTR2ERR(followed);
-				} else {
-					*ref = followed;
-					ret = 0;
-				}
-				break;
-			}
-			p = uk_fs_readlink(target);
-
-			uk_file_release(target);
-			if (unlikely(PTRISERR(p.s))) {
-				uk_file_release(dir);
-				ret = PTR2ERR(p.s);
-				break;
-			}
-			f = vfs_atroot(dir, p.s, p.len);
-			uk_file_release(dir);
-			uk_fs_path_release(current_path);
-			current_path = p;
-			path = p.s;
-			pathlen = p.len;
-#if CONFIG_LIBPOSIX_VFS_SYMLIMIT_DEPTH
-			if (++symlvl > CONFIG_LIBPOSIX_VFS_MAX_SYMDEPTH) {
-#elif CONFIG_LIBPOSIX_VFS_SYMLIMIT_NUM
-			if (++symlvl > CONFIG_LIBPOSIX_VFS_MAX_SYMNUM) {
-#endif /* CONFIG_LIBPOSIX_VFS_SYMLIMIT_NUM */
-				uk_file_release(f);
-				ret = -ELOOP;
-				break;
-			}
-		} else {
-			uk_file_release(dir);
-			*ref = target;
-			ret = 0;
-			break;
-		}
-	} while (1);
-	uk_fs_path_release(current_path);
-	return ret;
-}
 
 static
 const struct uk_file *vfs_createx(struct uk_ofile *of,
@@ -2242,140 +2387,58 @@ const struct uk_file *uk_posix_vfs_socket_create(const char *path)
 	return file;
 }
 
-static
-const struct uk_file *vfs_create(struct uk_ofile *of,
-				 const char *path, size_t len,
-				 mode_t mode, int *created,
-				 struct uk_ofile **base)
-{
-	UK_ASSERT(base && !*base);
-	do {
-		const struct uk_file *newf;
-		const struct uk_file *ref = NULL;
-		struct uk_fs_path owned_path = {0};
-		const char *fname = NULL;
-		size_t fnlen = 0;
-		int r;
-
-		r = vfs_lookupat_parent(vfs_atroot_named(of, path, len, base),
-					path, len,
-					&ref, &fname, &fnlen, &owned_path);
-		if (!r) {
-			/* Lookup success */
-			UK_ASSERT(ref);
-			return ref;
-		}
-		if (unlikely(r != 1)) {
-			/* Lookup error */
-			UK_ASSERT(r < 0);
-			return ERR2PTR(r);
-		}
-		/* Not found, but could be created */
-		UK_ASSERT(ref);
-		UK_ASSERT(uk_fs_isdir(ref));
-
-		vfs_wlock(ref);
-		r = vfs_check_perms(ref, W_OK);
-		if (unlikely(r))
-			newf = ERR2PTR(r);
-		else
-			newf = uk_fs_createat(ref, fname, fnlen, mode, O_EXCL,
-					      UKFS_NOTARGET);
-		vfs_wunlock(ref);
-
-		uk_file_release(ref);
-		uk_fs_path_release(owned_path);
-
-		if (PTRISERR(newf) && PTR2ERR(newf) == -EEXIST) {
-			if (*base) {
-				uk_ofile_release(*base);
-				*base = NULL;
-			}
-			continue;
-		}
-		if (!PTRISERR(newf))
-			*created = 1;
-		return newf;
-	} while (1);
-}
-
 static struct uk_ofile *vfs_openat(struct uk_ofile *of, const char *path,
-				   int flags, mode_t mode)
+				   int flags, mode_t mode, __u64 resolve)
 {
-	const int oflags = flags & UKFD_MODE_MASK;
-	struct uk_ofile *base = NULL;
-	int created = 0; /* Set to non-zero if we create a new file */
+	struct vfs_walk walk = {.resolve = resolve};
+	struct uk_vfs_path *identity;
 	const struct uk_file *target;
 	struct uk_ofile *ret;
-	size_t pathlen;
 	int err;
 
-	if (unlikely((flags & O_CREAT) && (flags & O_DIRECTORY)))
+	if ((err = vfs_check_path(path, 0)))
+		return ERR2PTR(err);
+	if (flags & O_PATH)
+		flags &= O_PATH | O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC;
+	else
+		flags |= O_LARGEFILE;
+	if ((flags & O_CREAT) && (flags & O_DIRECTORY))
 		return ERR2PTR(-EINVAL);
-	if (unlikely(((flags & O_TMPFILE) == O_TMPFILE) &&
-		     !((flags & O_WRONLY) || (flags & O_RDWR))))
-		return ERR2PTR(-EINVAL);
-
-	/* Open creates only regular files */
-	mode = (mode & ~S_IFMT) | S_IFREG;
-	mode = vfs_apply_umask(mode);
-
-	/* Do actual open */
-	switch (flags & (O_CREAT | O_EXCL | O_TMPFILE)) {
-	case O_CREAT | O_TMPFILE:
-	case O_CREAT | O_TMPFILE | O_EXCL:
-		return ERR2PTR(-EINVAL);
-	case O_CREAT | O_EXCL:
-		target = vfs_createx(of, path, mode, &pathlen, &base);
-		created = 1;
-		break;
-	case O_CREAT:
-		pathlen = strlen(path);
-		target = vfs_create(of, path, pathlen, mode, &created, &base);
-		break;
-	case O_TMPFILE | O_EXCL:
-		uk_pr_warn("O_EXCL ignored in combination with O_TMPFILE\n");
-		__fallthrough;
-	case O_TMPFILE:
-		uk_pr_warn("O_TMPFILE not supported\n");
+	if ((flags & O_TMPFILE) == O_TMPFILE)
 		return ERR2PTR(-ENOSYS);
-	default:
-		/* lookup & ret */
-		pathlen = strlen(path);
-		target = vfs_lookupat(vfs_atroot_named(of, path, pathlen,
-						       &base),
-				      path, pathlen,
-				      (flags & O_NOFOLLOW) ?
-				      VFS_LOOKUP_NOFOLLOW : 0);
-		break;
+	walk.flags = flags;
+	walk.mode = vfs_apply_umask((mode & ~S_IFMT) | S_IFREG);
+	identity = vfs_walk_start(of, path, strlen(path), &walk,
+				  !!(flags & O_NOFOLLOW));
+	if (PTRISERR(identity))
+		return ERR2PTR(PTR2ERR(identity));
+	target = identity->file;
+	if ((flags & O_CREAT) && uk_fs_isdir(target)) {
+		ret = ERR2PTR((flags & O_EXCL) && path[strlen(path) - 1] != '/'
+				  ? -EEXIST
+				  : -EISDIR);
+		goto out_identity;
 	}
-	if (unlikely(PTRISERR(target))) {
-		ret = ERR2PTR(PTR2ERR(target));
-		goto out_base;
-	}
-
-	/* Check file type & perms */
 	if ((flags & O_DIRECTORY) && !uk_fs_isdir(target)) {
 		ret = ERR2PTR(-ENOTDIR);
-		goto out_targ;
+		goto out_identity;
 	}
-	if (!created && !(flags & O_PATH)) {
+	if (!walk.created && !(flags & O_PATH)) {
 		if (uk_fs_isdir(target)) {
 			if (unlikely((flags & O_WRONLY) || (flags & O_RDWR))) {
 				ret = ERR2PTR(-EISDIR);
-				goto out_targ;
+				goto out_identity;
 			}
 			if (unlikely((err = vfs_check_perms(target, R_OK)))) {
 				ret = ERR2PTR(err);
-				goto out_targ;
+				goto out_identity;
 			}
 		}
 		if (unlikely(uk_fs_issym(target))) {
 			ret = ERR2PTR(-ELOOP);
-			goto out_targ;
+			goto out_identity;
 		}
 		if (!uk_fs_isdir(target) && !uk_fs_issym(target)) {
-			/* Check access perms */
 			mode_t desired = (flags & O_WRONLY) ? W_OK : R_OK;
 
 			if (flags & O_RDWR)
@@ -2383,7 +2446,7 @@ static struct uk_ofile *vfs_openat(struct uk_ofile *of, const char *path,
 			err = vfs_check_perms(target, desired);
 			if (unlikely(err)) {
 				ret = ERR2PTR(err);
-				goto out_targ;
+				goto out_identity;
 			}
 		}
 	}
@@ -2393,25 +2456,27 @@ static struct uk_ofile *vfs_openat(struct uk_ofile *of, const char *path,
 		err = uk_file_getstat(target, UK_STATX_TYPE, &status);
 		if (err) {
 			ret = ERR2PTR(err);
-			goto out_targ;
+			goto out_identity;
 		}
 		if ((status.stx_mode & S_IFMT) == S_IFSOCK) {
 			ret = ERR2PTR(-ENXIO);
-			goto out_targ;
+			goto out_identity;
 		}
 	}
-	/* Open named file description */
-	ret = vfs_open_file(target, oflags, base, path, pathlen);
-out_targ:
-	uk_file_release(target);
-out_base:
-	if (base)
-		uk_ofile_release(base);
+	ret = vfs_open_identity(identity, flags & UKFD_MODE_MASK);
+	identity = NULL;
+out_identity:
+	uk_posix_vfs_path_release(identity);
 
-	/* Truncate if success and required */
 	if (!PTRISERR(ret) && uk_fs_isfs(ret->file) && (flags & O_TRUNC) &&
 	    ((flags & O_WRONLY) || (flags & O_RDWR))) {
-		err = uk_sys_ftruncate(ret, 0);
+		struct uk_statx status;
+
+		vfs_rlock(ret->file);
+		err = uk_file_getstat(ret->file, UK_STATX_TYPE, &status);
+		vfs_runlock(ret->file);
+		if (!err && (status.stx_mode & S_IFMT) != S_IFIFO)
+			err = uk_sys_ftruncate(ret, 0);
 		if (unlikely(err)) {
 			UK_ASSERT(err < 0);
 			uk_ofile_release(ret);
@@ -2422,34 +2487,151 @@ out_base:
 	return ret;
 }
 
+static struct uk_ofile *vfs_open_finish(struct uk_ofile *opened)
+{
+	if (!PTRISERR(opened) && !(opened->mode & O_PATH)) {
+		const struct uk_file *endpoint;
+
+		endpoint = vfs_fifo_open(opened->file, opened->mode);
+		if (PTRISERR(endpoint)) {
+			uk_ofile_release(opened);
+			return ERR2PTR(PTR2ERR(endpoint));
+		}
+		if (endpoint) {
+			uk_file_release(opened->file);
+			opened->file = endpoint;
+			opened->mode |= UKFD_O_NOSEEK | UKFD_O_NOIOLOCK;
+		}
+	}
+	return opened;
+}
+
+static const __u64 vfs_valid_open_flags =
+	O_ACCMODE | O_APPEND | O_ASYNC | O_CLOEXEC | O_CREAT | O_DIRECT |
+	O_DIRECTORY | O_DSYNC | O_EXCL | O_LARGEFILE | O_NOATIME | O_NOCTTY |
+	O_NOFOLLOW | O_NONBLOCK | O_PATH | O_SYNC | O_TMPFILE | O_TRUNC;
+
+int uk_posix_vfs_open_validate(const struct uk_vfs_open_how *how)
+{
+	const __u64 valid_resolve = UK_VFS_RESOLVE_NO_XDEV |
+		UK_VFS_RESOLVE_NO_MAGICLINKS | UK_VFS_RESOLVE_NO_SYMLINKS |
+		UK_VFS_RESOLVE_SCOPED | UK_VFS_RESOLVE_CACHED;
+	const __u64 tmpfile = O_TMPFILE & ~O_DIRECTORY;
+	const bool temporary = !!(how->flags & tmpfile);
+
+	if ((how->flags & ~vfs_valid_open_flags) ||
+	    (how->resolve & ~valid_resolve))
+		return -EINVAL;
+	if ((how->resolve & UK_VFS_RESOLVE_SCOPED) == UK_VFS_RESOLVE_SCOPED)
+		return -EINVAL;
+	if ((how->flags & O_PATH) &&
+	    (how->flags & ~(O_PATH | O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC)))
+		return -EINVAL;
+	if (how->mode & ~07777ULL)
+		return -EINVAL;
+	if (how->mode && !(how->flags & O_CREAT) && !temporary)
+		return -EINVAL;
+	if (temporary && ((how->flags & O_TMPFILE) != O_TMPFILE ||
+			  !(how->flags & (O_WRONLY | O_RDWR))))
+		return -EINVAL;
+	if ((how->flags & O_CREAT) && (how->flags & O_DIRECTORY))
+		return -EINVAL;
+	if ((how->resolve & UK_VFS_RESOLVE_CACHED) &&
+	    ((how->flags & (O_CREAT | O_TRUNC)) || temporary))
+		return -EAGAIN;
+	return 0;
+}
+
+int uk_posix_vfs_open_how(int flags, mode_t mode, struct uk_vfs_open_how *how)
+{
+	*how = (struct uk_vfs_open_how){
+		.flags = (unsigned int)flags & vfs_valid_open_flags
+	};
+	if (how->flags & O_PATH)
+		how->flags &= O_PATH | O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC;
+	else if (how->flags & (O_CREAT | (O_TMPFILE & ~O_DIRECTORY)))
+		how->mode = mode & 07777;
+	return uk_posix_vfs_open_validate(how);
+}
+
 struct uk_ofile *uk_sys_openat(struct uk_ofile *of, const char *path,
 			       int flags, mode_t mode)
 {
 	struct uk_ofile *opened;
 
 	uk_mutex_lock(&vfs_namespace_lock);
-	opened = vfs_openat(of, path, flags, mode);
+	opened = vfs_openat(of, path, flags, mode, 0);
 	uk_mutex_unlock(&vfs_namespace_lock);
-	return opened;
+	return vfs_open_finish(opened);
 }
 
-int uk_posix_vfs_exec_open(const char *name, struct uk_vfs_path **identity)
+struct uk_ofile *uk_sys_openat2(struct uk_ofile *of, const char *path,
+				const struct uk_vfs_open_how *how)
 {
-	struct uk_ofile *opened = uk_sys_open(name, O_RDONLY, 0);
-	int descriptor;
+	struct uk_ofile *opened;
+	int error = uk_posix_vfs_open_validate(how);
 
-	if (PTRISERR(opened))
-		return PTR2ERR(opened);
-	*identity = opened->context;
-	UK_ASSERT(opened->destroy == vfs_ofile_destroy && *identity);
-	uk_posix_vfs_path_acquire(*identity);
-	descriptor = uk_fdtab_open_desc(opened, O_RDONLY | O_CLOEXEC);
-	if (descriptor < 0) {
-		uk_posix_vfs_path_release(*identity);
-		*identity = NULL;
-		uk_ofile_release(opened);
+	if (error)
+		return ERR2PTR(error);
+	if (how->resolve & UK_VFS_RESOLVE_CACHED) {
+		if (!uk_mutex_trylock(&vfs_namespace_lock))
+			return ERR2PTR(-EAGAIN);
+	} else {
+		uk_mutex_lock(&vfs_namespace_lock);
 	}
-	return descriptor;
+	opened = vfs_openat(of, path, (int)how->flags, (mode_t)how->mode,
+			    how->resolve);
+	uk_mutex_unlock(&vfs_namespace_lock);
+	return vfs_open_finish(opened);
+}
+
+struct uk_ofile *uk_posix_vfs_exec_open(const char *name,
+					struct uk_vfs_path **identity)
+{
+	struct uk_vfs_path *path;
+	struct uk_ofile *opened;
+	struct uk_statx metadata;
+	size_t length;
+	bool lock;
+	int rc;
+
+	*identity = NULL;
+	rc = vfs_check_path(name, 0);
+	if (rc)
+		return ERR2PTR(rc);
+	length = strlen(name);
+	uk_mutex_lock(&vfs_namespace_lock);
+	path = vfs_path_resolve(NULL, name, length, false);
+	if (PTRISERR(path)) {
+		opened = ERR2PTR(PTR2ERR(path));
+		goto out;
+	}
+	lock = !uk_fs_isfs(path->file) || _vfs_should_lock(path->file);
+	if (lock)
+		uk_file_rlock(path->file);
+	rc = uk_file_getstat(path->file, UK_STATX_TYPE | UK_STATX_MODE,
+			     &metadata);
+	if (lock)
+		uk_file_runlock(path->file);
+	if (!rc && (!S_ISREG(metadata.stx_mode) ||
+		    !(metadata.stx_mode & 0111)))
+		rc = -EACCES;
+	if (!rc)
+		rc = vfs_check_access(path->file, X_OK);
+	if (rc) {
+		opened = ERR2PTR(rc);
+		goto out_path;
+	}
+	opened = vfs_open_file(path->file, O_RDONLY, NULL, name, length);
+	if (PTRISERR(opened))
+		goto out_path;
+	*identity = path;
+	goto out;
+out_path:
+	uk_posix_vfs_path_release(path);
+out:
+	uk_mutex_unlock(&vfs_namespace_lock);
+	return opened;
 }
 
 int uk_sys_unlinkat(const struct uk_file *file, const char *path, int flags)

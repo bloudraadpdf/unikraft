@@ -25,10 +25,13 @@ struct nf_excpttab_entry {
 	__s32 cont_ip;
 	/** Exception handler function (nf_excpt_handler) */
 	__s32 handler;
+	__u32 flags;
 } __packed;
 
+#define NF_EXCPT_NOPAGING 0x1
+
 typedef int (*nf_excpt_handler)(const struct nf_excpttab_entry *e,
-				struct uk_lcpu_except_err_ctx *ctx);
+				struct uk_lcpu_regs *regs);
 
 #define _NF_DECLARE_EXCPTTAB_ENTRY_GETTER(field, type)			\
 static inline type							\
@@ -56,11 +59,12 @@ extern const struct nf_excpttab_entry uk_excpttab_end[];
  * @param handler
  *   The exception handler to call
  */
-#define NF_EXCPTTAB_ENTRY_L(label, cont_label, handler)			\
+#define NF_EXCPTTAB_ENTRY_L(label, cont_label, handler, flags)		\
 	".pushsection .uk_excpttab, \"a\"\n"				\
 	".long " #label " - .\n"					\
 	".long %l[" #cont_label "] - .\n"				\
 	".long " STRINGIFY(handler) " - .\n"				\
+	".long " STRINGIFY(flags) "\n"					\
 	".popsection\n"
 
 /**
@@ -77,7 +81,9 @@ extern const struct nf_excpttab_entry uk_excpttab_end[];
 #define nf_excpttab_foreach(itr, excpttab_start, excpttab_end)		\
 	for ((itr) = (excpttab_start); (itr) < (excpttab_end); (itr)++)
 
-static inline int nf_handle_trap(__vaddr_t ip, struct uk_lcpu_except_err_ctx *ctx)
+static inline int nf_handle_trap(__vaddr_t ip,
+				 struct uk_lcpu_regs *regs,
+				 __u32 required_flags)
 {
 	const struct nf_excpttab_entry *itr;
 	nf_excpt_handler handler;
@@ -86,10 +92,12 @@ static inline int nf_handle_trap(__vaddr_t ip, struct uk_lcpu_except_err_ctx *ct
 	nf_excpttab_foreach(itr, uk_excpttab_start, uk_excpttab_end) {
 		UK_ASSERT(itr);
 		if (nf_excpttab_get_ip(itr) == ip) {
+			if ((itr->flags & required_flags) != required_flags)
+				return UK_EVENT_NOT_HANDLED;
 			handler = nf_excpttab_get_handler(itr);
 			UK_ASSERT(handler);
 
-			return handler(itr, ctx);
+			return handler(itr, regs);
 		}
 	}
 

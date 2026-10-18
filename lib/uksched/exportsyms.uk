@@ -1,6 +1,7 @@
 uk_sched_register
 uk_sched_create
 uk_sched_start
+uk_sched_current_exec_time
 uk_sched_thread_create_fn0
 uk_sched_thread_create_fn1
 uk_sched_thread_create_fn2
@@ -41,7 +42,14 @@ uk_thread_wake_isr
 __uk_sched_thread_current
 sched_yield
 uk_sched_get_cpu_mask
-sched_setaffinity
 uk_sched_select
 uk_sched_membarrier
 uk_sched_has_higher_priority
+uk_sched_thread_affinity_submit
+uk_sched_thread_affinity_wait
+uk_sched_thread_get_affinity
+uk_sched_thread_inherit_affinity
+uk_sched_thread_notify
+uk_sched_process_affinity_requests
+uk_sched_affinity_create
+uk_sched_affinity_discard

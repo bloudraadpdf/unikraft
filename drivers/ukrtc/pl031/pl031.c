@@ -42,13 +42,15 @@
 #include <uk/pl031.h>
 #include <uk/bus/platform.h>
 #include <uk/plat/common/bootinfo.h>
+#include <uk/plat/time.h>
 
 #if CONFIG_LIBUKPAGING
 #include <uk/errptr.h>
 #endif /* CONFIG_LIBUKPAGING */
 
 static __u64 pl031_base_addr;
-static int pl031_irq;
+static __u64 pl031_epoch_offset;
+static int pl031_irq = -1;
 static struct uk_alloc *a;
 
 /* FDT compatible property for PL031 device */
@@ -72,6 +74,11 @@ static struct uk_alloc *a;
 static __u32 pl031_read_raw(void)
 {
 	return uk_arch_arm64_ioreg_read32(PL031_REG(RTC_DR));
+}
+
+__u64 pl031_wall_clock_offset(void)
+{
+	return __atomic_load_n(&pl031_epoch_offset, __ATOMIC_RELAXED);
 }
 
 void pl031_read_time(struct rtc_time *rt)
@@ -160,6 +167,8 @@ void pl031_clear_intr(void)
 
 int pl031_register_alarm_handler(int (*handler)(void *))
 {
+	if (pl031_irq < 0)
+		return -ENOTSUP;
 	return uk_intctlr_irq_register(pl031_irq, handler, NULL);
 }
 
@@ -167,6 +176,7 @@ int pl031_init_rtc(void *dtb)
 {
 	__u64 size;
 	int offs, rc;
+	const void *interrupts;
 	struct uk_intctlr_irq irq;
 
 	uk_pr_info("Probing RTC...\n");
@@ -190,13 +200,21 @@ int pl031_init_rtc(void *dtb)
 		return PTR2ERR(pl031_base_addr);
 #endif /* CONFIG_LIBUKPAGING */
 
-	rc = uk_intctlr_irq_fdt_xlat(dtb, offs, 0, &irq);
-	if (unlikely(rc))
-		return rc;
-
-	uk_intctlr_irq_configure(&irq);
-
-	pl031_irq = irq.id;
+	interrupts = fdt_getprop(dtb, offs, "interrupts", &rc);
+	if (!interrupts && rc == -FDT_ERR_NOTFOUND)
+		interrupts = fdt_getprop(dtb, offs, "interrupts-extended", &rc);
+	if (!interrupts && rc != -FDT_ERR_NOTFOUND)
+		return -EINVAL;
+	pl031_irq = -1;
+	if (interrupts) {
+		rc = uk_intctlr_irq_fdt_xlat(dtb, offs, 0, &irq);
+		if (unlikely(rc))
+			return rc;
+		rc = uk_intctlr_irq_configure(&irq);
+		if (unlikely(rc))
+			return rc;
+		pl031_irq = irq.id;
+	}
 
 	if (pl031_get_status() == PL031_STATUS_DISABLED)
 		pl031_enable();
@@ -207,8 +225,8 @@ int pl031_init_rtc(void *dtb)
 	}
 	uk_pr_info("RTC enabled\n");
 
-	/* Enable RTC alarm IRQ at its reset. */
-	pl031_enable_intr();
+	if (pl031_irq >= 0)
+		pl031_enable_intr();
 
 	return 0;
 }
@@ -216,10 +234,19 @@ int pl031_init_rtc(void *dtb)
 static int pl031_probe(struct pf_device *pfdev __unused)
 {
 	void *dtb;
+	__u64 seconds;
+	__nsec now;
+	int ret;
 
 	dtb = (void *)ukplat_bootinfo_get()->dtb;
 
-	pl031_init_rtc(dtb);
+	ret = pl031_init_rtc(dtb);
+	if (unlikely(ret))
+		return ret;
+	now = ukplat_monotonic_clock();
+	seconds = pl031_read_raw();
+	__atomic_store_n(&pl031_epoch_offset,
+			 seconds * UKARCH_NSEC_PER_SEC - now, __ATOMIC_RELAXED);
 
 	return 0;
 }

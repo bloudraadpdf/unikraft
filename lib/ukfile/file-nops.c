@@ -19,12 +19,13 @@ ssize_t uk_file_nop_read(const struct uk_file *f __unused,
 	return -ENOSYS;
 }
 
-ssize_t uk_file_nop_write(const struct uk_file *f __unused,
-			  const struct iovec *iov __unused,
-			  size_t iovcnt __unused,
-			  size_t off __unused, long flags __unused)
+struct uk_file_io_result
+uk_file_nop_write(const struct uk_file *f __unused,
+		  const struct iovec *iov __unused, size_t iovcnt __unused,
+		  size_t off __unused, long flags __unused,
+		  enum uk_file_write_kind kind __unused)
 {
-	return -ENOSYS;
+	return uk_file_io_status(-ENOSYS);
 }
 
 ssize_t uk_file_nop_mem(const struct uk_file *f __unused,
@@ -64,12 +65,21 @@ void uk_file_static_release(const struct uk_file *f __maybe_unused,
 	uk_pr_warn("Destructor called on static file: %p\n", f);
 }
 
-ssize_t uk_file_anon_noio(const struct uk_file *file __unused,
+ssize_t uk_file_anon_read(const struct uk_file *file __unused,
 			  const struct iovec *iov __unused,
 			  size_t count __unused, size_t offset __unused,
 			  long flags __unused)
 {
 	return -EINVAL;
+}
+
+struct uk_file_io_result
+uk_file_anon_write(const struct uk_file *file __unused,
+		   const struct iovec *iov __unused, size_t count __unused,
+		   size_t offset __unused, long flags __unused,
+		   enum uk_file_write_kind kind __unused)
+{
+	return uk_file_io_status(-EINVAL);
 }
 
 int uk_file_anon_getstat(const struct uk_file *file __unused,
@@ -89,8 +99,8 @@ int uk_file_anon_getstat(const struct uk_file *file __unused,
 }
 
 const struct uk_file_ops uk_file_anon_ops = {
-	.read = uk_file_anon_noio,
-	.write = uk_file_anon_noio,
+	.read = uk_file_anon_read,
+	.write = uk_file_anon_write,
 	.mem = uk_file_nop_mem,
 	.getstat = uk_file_anon_getstat,
 	.setstat = uk_file_nop_setstat,

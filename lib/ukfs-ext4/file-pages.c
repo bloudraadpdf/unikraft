@@ -124,8 +124,9 @@ int ukext4_pages_io(struct ukext4_pages *pages, struct ext4_inode_ref *inode,
     return 0;
 }
 
-int ukext4_pages_writeback(struct ukext4_pages *pages, struct ext4_inode_ref *inode,
-                           int *changed)
+int ukext4_pages_writeback(struct ukext4_pages *pages,
+			   struct ext4_inode_ref *inode, size_t first,
+			   size_t limit, int *changed)
 {
     struct uk_sparsebuf_cur cursor;
     const size_t size = ext4_inode_get_size(&inode->fs->sb, inode->inode);
@@ -139,25 +140,30 @@ int ukext4_pages_writeback(struct ukext4_pages *pages, struct ext4_inode_ref *in
     UK_SPARSEBUF_FOREACH(&pages->head, &cursor) {
         struct uk_sparsebuf_slice *slice = uk_sparsebuf_slice_at(&cursor);
         size_t offset = uk_sparsebuf_slice_offset(slice);
-        for (size_t index = 0; index < uk_sparsebuf_slice_size(slice) && offset < size;
-             index += UK_PAGING_PAGE_SIZE, offset += UK_PAGING_PAGE_SIZE) {
-            size_t length = MIN(UK_PAGING_PAGE_SIZE, size - offset), done;
-            memcpy(scratch, slice->buf + index, length);
-            result = ukext4_inode_read(inode, scratch + UK_PAGING_PAGE_SIZE,
-                                       length, offset, &done);
-            if (!result && done != length)
-                result = EIO;
-            if (result)
-                goto out;
-            if (!memcmp(scratch, scratch + UK_PAGING_PAGE_SIZE, length))
-                continue;
-            result = ukext4_inode_write(inode, scratch, length, offset, &done);
-            *changed |= done != 0;
-            if (!result && done != length)
-                result = EIO;
-            if (result)
-                goto out;
-        }
+	for (size_t index = 0; index < uk_sparsebuf_slice_size(slice) &&
+	     offset < size && offset < limit;
+	     index += UK_PAGING_PAGE_SIZE, offset += UK_PAGING_PAGE_SIZE) {
+		if (offset < first)
+			continue;
+		size_t length = MIN(UK_PAGING_PAGE_SIZE, size - offset), done;
+
+		memcpy(scratch, slice->buf + index, length);
+		result = ukext4_inode_read(inode, scratch + UK_PAGING_PAGE_SIZE,
+					   length, offset, &done);
+		if (!result && done != length)
+			result = EIO;
+		if (result)
+			goto out;
+		if (!memcmp(scratch, scratch + UK_PAGING_PAGE_SIZE, length))
+			continue;
+		result =
+		    ukext4_inode_write(inode, scratch, length, offset, &done);
+		*changed |= done != 0;
+		if (!result && done != length)
+			result = EIO;
+		if (result)
+			goto out;
+	}
     }
 out:
     free(scratch);

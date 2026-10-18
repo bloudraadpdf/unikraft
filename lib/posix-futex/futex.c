@@ -40,62 +40,41 @@
  */
 
 #include <uk/config.h>
-#include <stdio.h>
 #include <errno.h>
+#include <stdint.h>
 #include <time.h>
-#include <inttypes.h>
-
 #include <linux/futex.h>
-#include <uk/futex.h>
-#include <uk/syscall.h>
-#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
-#include <uk/nofault.h>
-#include <uk/process.h>
-#endif
+#include <uk/alloc.h>
 #include <uk/atomic.h>
-#include <uk/thread.h>
-#include <uk/thread.h>
-#include <uk/list.h>
-#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
-#include <uk/process.h>
-#endif /* CONFIG_LIBPOSIX_PROCESS_MULTITHREADING */
-#include <uk/sched.h>
-#include <uk/list.h>
-#include <uk/assert.h>
-#include <uk/print.h>
-#include <uk/spinlock.h>
+#include <uk/futex.h>
 #include <uk/lcpu.h>
+#include <uk/nofault.h>
 #include <uk/plat/time.h>
 #include <uk/posix-time.h>
+#include <uk/sched.h>
+#include <uk/spinlock.h>
+#include <uk/syscall.h>
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+#include <uk/process.h>
+#endif
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 #include <uk/posix-signal-wait.h>
 #endif
 
-/** @struct uk_futex
- *  @brief Futex structure.
- */
-struct uk_futex {
-	uint32_t *uaddr; /** The futex address. */
-	struct uk_thread *thread; /** The thread waiting on the futex. */
-	struct uk_list_head list_node; /** The list containing all the futexes
-					 * on which the threads are waiting.
-					 */
-};
-
 static UK_LIST_HEAD(futex_list);
 static uk_spinlock futex_list_lock = UK_SPINLOCK_INITIALIZER();
 
-bool uk_futex_has_waiters(__u32 *address)
+bool uk_futex_pi_conflict(const struct uk_futex_key *key)
 {
-	struct uk_futex *waiter;
+	struct uk_futex_waiter *waiter;
 	unsigned long flags;
 	bool found = false;
 
 	flags = uk_lcpu_save_irqf();
 	uk_spin_lock(&futex_list_lock);
-	uk_list_for_each_entry(waiter, &futex_list, list_node) {
-		if (waiter->uaddr == address) {
-			found = true;
+	uk_list_for_each_entry(waiter, &futex_list, link) {
+		if (uk_futex_key_equal(waiter->key, key)) {
+			found = !waiter->is_pi;
 			break;
 		}
 	}
@@ -104,249 +83,270 @@ bool uk_futex_has_waiters(__u32 *address)
 	return found;
 }
 
-
-
-/**
- * Prepare to wait on a futex.
- *
- * Get the futex value atomically and compare it with the expected value. Add
- * the thread to the wait list and then block it if the value is equal to the
- * expected one. If the futex was not removed from the list when the thread was
- * unblocked, remove its entry before returning a timeout or interruption.
- *
- * @param uaddr		The futex userspace address
- * @param val		The expected value
- * @param timeout	The deadline until the function will block at most.
- * 			If it is NULL, the thread will wait indefinitely.
- *
- * @return
- *	0: uaddr contains val and the thread finished waiting;
- *	<1: -EAGAIN (uaddr does not contain val) or -ETIMEDOUT (the futex timed
- *       out)
- */
-static int futex_wait_prepare(__u32 *uaddr, __u32 val,
-			      const __nsec *timeout,
-			      const unsigned int *interrupted)
+static void futex_queue_insert(struct uk_futex_waiter *waiter)
 {
-	unsigned long irqf;
-	struct uk_thread *current = uk_thread_current();
-	struct uk_futex f = {.uaddr = uaddr, .thread = current};
+	struct uk_futex_waiter *cursor;
 
-#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
-	int ret = uk_posix_futex_lock(uaddr, NULL);
+	uk_list_for_each_entry(cursor, &futex_list, link) {
+		if (waiter->queue_priority > cursor->queue_priority) {
+			uk_list_add_tail(&waiter->link, &cursor->link);
+			return;
+		}
+	}
+	uk_list_add_tail(&waiter->link, &futex_list);
+}
 
-	if (ret)
-		return ret;
-#endif
-	irqf = uk_lcpu_save_irqf();
+void uk_futex_queue_add(struct uk_futex_waiter *waiter)
+{
+	unsigned long flags = uk_lcpu_save_irqf();
+
 	uk_spin_lock(&futex_list_lock);
-	if (uk_load_n(uaddr) != val) {
-		uk_spin_unlock(&futex_list_lock);
-		uk_lcpu_restore_irqf(irqf);
-#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
-		uk_posix_futex_unlock();
-#endif
-		return -EAGAIN;
-	}
-	if (timeout && *timeout <= ukplat_monotonic_clock()) {
-		uk_spin_unlock(&futex_list_lock);
-		uk_lcpu_restore_irqf(irqf);
-#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
-		uk_posix_futex_unlock();
-#endif
-		return -ETIMEDOUT;
-	}
-	uk_list_add_tail(&f.list_node, &futex_list);
-
-	if (timeout) {
-		/* Block at most until `timeout` nanosecs */
-		uk_pr_debug("FUTEX_WAIT: Wait %"__PRIsnsec" nsec for wake-up\n",
-				(__snsec) (*timeout));
-		uk_thread_block_until(current, (__snsec) (*timeout));
-	} else {
-		/* Block indefinitely */
-		uk_pr_debug("FUTEX_WAIT: Wait indefinitely for wake-up\n");
-		uk_thread_block(current);
-	}
+	waiter->queue_priority = uk_load_n(&waiter->thread->sched_priority);
+	futex_queue_insert(waiter);
 	uk_spin_unlock(&futex_list_lock);
-	uk_lcpu_restore_irqf(irqf);
+	uk_lcpu_restore_irqf(flags);
+}
+
+void uk_futex_queue_remove(struct uk_futex_waiter *waiter)
+{
+	unsigned long flags = uk_lcpu_save_irqf();
+
+	uk_spin_lock(&futex_list_lock);
+	uk_list_del_init(&waiter->link);
+	uk_spin_unlock(&futex_list_lock);
+	uk_lcpu_restore_irqf(flags);
+}
+
+static void futex_lock(unsigned long *flags)
+{
+#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
+	uk_posix_futex_lock();
+#endif
+	*flags = uk_lcpu_save_irqf();
+	uk_spin_lock(&futex_list_lock);
+}
+
+static void futex_unlock(unsigned long flags)
+{
+	uk_spin_unlock(&futex_list_lock);
+	uk_lcpu_restore_irqf(flags);
 #if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
 	uk_posix_futex_unlock();
 #endif
-	/* A signal can arrive before uk_thread_block(). */
+}
+
+static int futex_wait_prepare(__u32 *address, __u32 value, bool private_key,
+			      const __nsec *deadline,
+			      const unsigned int *interrupted)
+{
+	struct uk_thread *thread = uk_thread_current();
+	struct uk_futex_call *call =
+		uk_futex_call_create(thread, uk_alloc_get_default());
+	struct uk_futex_call *retired = NULL;
+	struct uk_futex_waiter *waiter;
+	unsigned long flags;
+	__u32 observed;
+	int rc;
+
+	if (!call)
+		return -ENOMEM;
+	waiter = &call->waiter;
+	waiter->address = address;
+	waiter->result = -EINTR;
+	for (;;) {
+		uk_futex_key_put(&call->keys[0]);
+		rc = uk_futex_key_get(thread, address, private_key, false,
+				      &call->keys[0]);
+		if (rc)
+			goto out;
+		rc = uk_futex_key_fault(address, false, &call->keys[0]);
+		if (rc)
+			goto out;
+		futex_lock(&flags);
+		rc = uk_nofault_read32(address, &observed,
+				       UK_NOFAULTF_NOPAGING);
+		if (rc) {
+			futex_unlock(flags);
+			continue;
+		}
+		if (observed != value) {
+			rc = -EAGAIN;
+			goto unlock;
+		}
+		if (deadline && *deadline <= ukplat_monotonic_clock()) {
+			rc = -ETIMEDOUT;
+			goto unlock;
+		}
+		uk_futex_waiter_key_set(waiter, call, 0, &retired);
+		waiter->queue_priority = uk_load_n(&thread->sched_priority);
+		futex_queue_insert(waiter);
+		if (deadline)
+			uk_thread_block_until(thread, *deadline);
+		else
+			uk_thread_block(thread);
+		futex_unlock(flags);
+		uk_futex_retired_release(retired);
+		break;
+	}
 	if (interrupted && uk_load_n(interrupted))
-		uk_thread_wake(current);
+		uk_thread_wake(thread);
 #if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
 	if (uk_posix_process_exit_requested())
-		uk_thread_wake(current);
+		uk_thread_wake(thread);
 #endif
 	uk_sched_yield();
-
-	uk_pr_debug("FUTEX_WAIT: Woke up (uaddr: %p)\n", uaddr);
-	irqf = uk_lcpu_save_irqf();
+	flags = uk_lcpu_save_irqf();
 	uk_spin_lock(&futex_list_lock);
-
-	if (!uk_list_empty(&f.list_node)) {
-		uk_list_del_init(&f.list_node);
-		uk_spin_unlock(&futex_list_lock);
-		uk_lcpu_restore_irqf(irqf);
-		return timeout && *timeout <= ukplat_monotonic_clock() ?
+	rc = waiter->result;
+	if (!uk_list_empty(&waiter->link)) {
+		uk_list_del_init(&waiter->link);
+		rc = deadline && *deadline <= ukplat_monotonic_clock() ?
 			-ETIMEDOUT : -EINTR;
 	}
 	uk_spin_unlock(&futex_list_lock);
-	uk_lcpu_restore_irqf(irqf);
-
-	return 0;
+	uk_lcpu_restore_irqf(flags);
+	goto out;
+unlock:
+	futex_unlock(flags);
+out:
+	uk_futex_call_end(thread, call);
+	return rc;
 }
 
-static int futex_wait(__u32 *uaddr, __u32 val, const __nsec *timeout)
+static int futex_wait(__u32 *address, __u32 value, bool private_key,
+		      const __nsec *deadline)
 {
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 	struct uk_posix_signal_wait wait;
-	int ret;
+	int rc;
 
-	ret = uk_posix_signal_wait_init(&wait, NULL, NULL, 0);
-	if (ret)
-		return ret;
-	ret = uk_posix_signal_wait_check(&wait);
-	if (!ret) {
-		ret = futex_wait_prepare(uaddr, val, timeout,
-					 &wait.interrupted);
-		if (ret == -EINTR)
-			ret = uk_posix_signal_wait_check(&wait);
+	rc = uk_posix_signal_wait_init(&wait, NULL, NULL, 0);
+	if (rc)
+		return rc;
+	rc = uk_posix_signal_wait_check(&wait);
+	if (!rc) {
+		rc = futex_wait_prepare(address, value, private_key, deadline,
+					&wait.interrupted);
+		if (rc == -EINTR)
+			rc = uk_posix_signal_wait_check(&wait);
 	}
-	uk_posix_signal_wait_end(&wait, ret, timeout ?
+	uk_posix_signal_wait_end(&wait, rc, deadline ?
 		UK_POSIX_SIGNAL_RESTART_NONE : UK_POSIX_SIGNAL_RESTART_HANDLER);
-	return ret;
+	return rc;
 #else
-	return futex_wait_prepare(uaddr, val, timeout, NULL);
+	return futex_wait_prepare(address, value, private_key, deadline, NULL);
 #endif
 }
 
-/**
- * Wake up threads waiting on a futex.
- *
- * Find val threads in the wait list for the futex, remove the futexes from the
- * list and wake up the threads.
- *
- * @param uaddr	The futex userspace address
- * @param val	The number of threads waiting on the futex to be woken up
- *
- * @return
- *	0: no threads were woken up;
- *	>0: the number of threads woken up
- */
-static int futex_wake(uint32_t *uaddr, uint32_t val)
+int uk_futex_wake(struct uk_thread *thread, __u32 *address, __u32 maximum,
+		  bool private_key)
 {
-	unsigned long irqf;
-	struct uk_list_head *itr, *tmp;
-	struct uk_futex *f;
-	uint32_t count = 0;
+	struct uk_futex_key key = {0};
+	struct uk_futex_waiter *waiter, *next;
+	unsigned long flags;
+	__u32 count = 0;
+	int rc;
 
-#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
-	int ret = uk_posix_futex_lock(uaddr, NULL);
-
-	if (ret)
-		return ret;
-#endif
-	irqf = uk_lcpu_save_irqf();
-	uk_spin_lock(&futex_list_lock);
-
-	uk_list_for_each_safe(itr, tmp, &futex_list) {
-		f = uk_list_entry(itr, struct uk_futex, list_node);
-
-		if (f->uaddr == uaddr) {
-			/* Remove the thread from the futex list */
-			uk_list_del_init(&f->list_node);
-
-			/* TODO: Replace with uk_thread_wakeup when the new
-			 * scheduler API is ready
-			 */
-			uk_thread_wake(f->thread);
-
-			/* Wake at most val threads */
-			if (++count >= val)
-				break;
-		}
-	}
-
-	uk_spin_unlock(&futex_list_lock);
-	uk_lcpu_restore_irqf(irqf);
-
-#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
-	uk_posix_futex_unlock();
-#endif
-	return (int) count;
-}
-
-/**
- * Requeue waiters from uaddr to uaddr2.
- *
- * Requeue waiters on uaddr to uaddr2. Wakes up a maximum of val waiters that
- * are waiting on the futex at uaddr.  If there are more than val waiters, then
- * the remaining waiters are removed from the wait queue of the source futex at
- * uaddr and added to the wait queue of the target futex at uaddr2. The val2
- * argument specifies an upper limit on the number of waiters that are requeued
- * to the futex at uaddr2.
- *
- * @param uaddr		Source futex user address
- * @param val		Number of waiters to wake
- * @param val2		Number of waiters to requeue (0-INT_MAX)
- * @param uaddr2	Target futex user address
- * @param expected	Optional uaddr expected value
- *
- * @return
- *	>=0: on success, the number of tasks requeued or woken;
- *	<0: on error
- */
-static int futex_requeue(__u32 *uaddr, __u32 val, __u32 val2,
-			 __u32 *uaddr2, const __u32 *expected)
-{
-	unsigned long irqf;
-	struct uk_list_head *itr, *tmp;
-	struct uk_futex *f;
-	__u32 woken = 0;
-	__u32 requeued = 0;
-
-#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
-	int ret = uk_posix_futex_lock(uaddr, uaddr2);
-
-	if (ret)
-		return ret;
-#endif
-	irqf = uk_lcpu_save_irqf();
-	uk_spin_lock(&futex_list_lock);
-	if (expected && *expected != uk_load_n(uaddr)) {
-		uk_spin_unlock(&futex_list_lock);
-		uk_lcpu_restore_irqf(irqf);
-#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
-		uk_posix_futex_unlock();
-#endif
-		return -EAGAIN;
-	}
-
-	uk_list_for_each_safe(itr, tmp, &futex_list) {
-		f = uk_list_entry(itr, struct uk_futex, list_node);
-		if (f->uaddr != uaddr)
+	rc = uk_futex_key_get(thread, address, private_key, false, &key);
+	if (rc)
+		return rc;
+	futex_lock(&flags);
+	uk_list_for_each_entry_safe(waiter, next, &futex_list, link) {
+		if (!uk_futex_key_equal(waiter->key, &key))
 			continue;
-		if (woken < val) {
-			uk_list_del_init(&f->list_node);
-			uk_thread_wake(f->thread);
+		if (waiter->is_pi) {
+			rc = -EINVAL;
+			goto unlock;
+		}
+		uk_list_del_init(&waiter->link);
+		waiter->result = 0;
+		uk_thread_wake(waiter->thread);
+		if (++count >= maximum)
+			break;
+	}
+	rc = count;
+unlock:
+	futex_unlock(flags);
+	uk_futex_key_put(&key);
+	return rc;
+}
+
+static int futex_requeue(__u32 *address, __u32 maximum, __u32 moves,
+			 __u32 *target, const __u32 *expected, bool private_key)
+{
+	struct uk_thread *thread = uk_thread_current();
+	struct uk_futex_call *call =
+		uk_futex_call_create(thread, uk_alloc_get_default());
+	struct uk_futex_call *retired = NULL;
+	struct uk_futex_waiter *waiter, *next;
+	unsigned long flags;
+	__u32 observed, woken = 0, requeued = 0;
+	int rc;
+
+	if (!call)
+		return -ENOMEM;
+	for (;;) {
+		uk_futex_key_put(&call->keys[0]);
+		uk_futex_key_put(&call->keys[1]);
+		rc = uk_futex_key_get(thread, address, private_key, false,
+				      &call->keys[0]);
+		if (!rc)
+			rc = uk_futex_key_get(thread, target, private_key,
+					      false, &call->keys[1]);
+		if (rc)
+			goto out;
+		if (expected) {
+			rc = uk_futex_key_fault(address, false, &call->keys[0]);
+			if (rc)
+				goto out;
+		}
+		futex_lock(&flags);
+		if (expected) {
+			rc = uk_nofault_read32(address, &observed,
+					       UK_NOFAULTF_NOPAGING);
+			if (rc) {
+				futex_unlock(flags);
+				continue;
+			}
+			if (observed != *expected) {
+				rc = -EAGAIN;
+				goto unlock;
+			}
+		}
+		break;
+	}
+	uk_list_for_each_entry_safe(waiter, next, &futex_list, link) {
+		if (!uk_futex_key_equal(waiter->key, &call->keys[0]))
+			continue;
+		if (waiter->is_pi) {
+			rc = -EINVAL;
+			goto unlock;
+		}
+		if (woken < maximum) {
+			uk_list_del_init(&waiter->link);
+			waiter->result = 0;
+			uk_thread_wake(waiter->thread);
 			woken++;
-		} else if (requeued < val2) {
-			f->uaddr = uaddr2;
+		} else if (requeued < moves) {
+			if (!uk_futex_key_equal(&call->keys[0],
+						&call->keys[1])) {
+				uk_futex_waiter_key_set(waiter, call, 1,
+							&retired);
+				uk_list_del_init(&waiter->link);
+				futex_queue_insert(waiter);
+			}
 			requeued++;
 		} else {
 			break;
 		}
 	}
-
-	uk_spin_unlock(&futex_list_lock);
-	uk_lcpu_restore_irqf(irqf);
-#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
-	uk_posix_futex_unlock();
-#endif
-	return woken + requeued;
+	rc = woken + requeued;
+unlock:
+	futex_unlock(flags);
+	uk_futex_retired_release(retired);
+out:
+	uk_futex_call_end(thread, call);
+	return rc;
 }
 
 static int futex_deadline(const struct timespec *timeout, int cmd,
@@ -362,7 +362,7 @@ static int futex_deadline(const struct timespec *timeout, int cmd,
 	    timeout->tv_nsec >= UKARCH_NSEC_PER_SEC)
 		return -EINVAL;
 	if ((__u64)timeout->tv_sec >
-	    (INT64_MAX - timeout->tv_nsec) / UKARCH_NSEC_PER_SEC)
+	    ((__u64)INT64_MAX - timeout->tv_nsec) / UKARCH_NSEC_PER_SEC)
 		target = INT64_MAX;
 	else
 		target = ukarch_time_sec_to_nsec(timeout->tv_sec) +
@@ -384,106 +384,96 @@ static int futex_deadline(const struct timespec *timeout, int cmd,
 	return 0;
 }
 
-/**
- * According to man pages, there exists no libc wrapper for futex
- *
- * @param uaddr		Source futex user address
- * @param futex_op	Futex operation
- * @param val		Depends on the futex operation
- * @param timeout	Usually a timeout for the futex operation, but can be
- *			used as an integer value for other operations
- * @param uaddr2	Optional target futex user address
- * @param val3		Depends on the futex operation
- *
- * @return
- *	>=0: on success
- *	<0: on error
- */
 UK_LLSYSCALL_R_DEFINE(int, futex, uint32_t *, uaddr, int, futex_op,
 		      uint32_t, val, const struct timespec *, timeout,
 		      uint32_t *, uaddr2, uint32_t, val3)
 {
 	__nsec timeout_ns;
+	struct timespec copied;
 	int cmd = futex_op & FUTEX_CMD_MASK;
-	int ret;
+	bool private_key = !!(futex_op & FUTEX_PRIVATE_FLAG);
+	int rc;
 
-	/* Reject invalid combinations of the realtime clock flag */
 	if (futex_op & FUTEX_CLOCK_REALTIME && !(
-		cmd == FUTEX_WAIT ||
-		cmd == FUTEX_WAIT_BITSET ||
-		cmd == FUTEX_LOCK_PI2 ||
-		cmd == FUTEX_WAIT_REQUEUE_PI))
+		cmd == FUTEX_WAIT || cmd == FUTEX_WAIT_BITSET ||
+		cmd == FUTEX_LOCK_PI2 || cmd == FUTEX_WAIT_REQUEUE_PI))
 		return -ENOSYS;
-
 	if (timeout && (cmd == FUTEX_WAIT || cmd == FUTEX_WAIT_BITSET ||
 			cmd == FUTEX_LOCK_PI || cmd == FUTEX_LOCK_PI2)) {
-		ret = futex_deadline(timeout, cmd, futex_op, &timeout_ns);
-		if (ret)
-			return ret;
+		if (!uk_nofault_try_read(copied, timeout))
+			return -EFAULT;
+		rc = futex_deadline(&copied, cmd, futex_op, &timeout_ns);
+		if (rc)
+			return rc;
 	}
 	switch (cmd) {
-	case FUTEX_WAIT:
-		return futex_wait(uaddr, val, timeout ? &timeout_ns : NULL);
-
 	case FUTEX_WAIT_BITSET:
-		/*
-		 * Special case implementation for cases where the val3/mask has
-		 * all bits set. Some applications do this to use the absolute
-		 * timeout mode. We return ENOSYS for all non-supported calls.
-		 */
 		if (val3 != UINT32_MAX)
 			return -ENOSYS;
-
-		return futex_wait(uaddr, val, timeout ? &timeout_ns : NULL);
-
+		__fallthrough;
+	case FUTEX_WAIT:
+		return futex_wait(uaddr, val, private_key,
+				   timeout ? &timeout_ns : NULL);
 	case FUTEX_WAKE:
-		return futex_wake(uaddr, val);
-
+		return uk_futex_wake(uk_thread_current(), uaddr, val,
+				     private_key);
 #if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
 	case FUTEX_TRYLOCK_PI:
 	case FUTEX_UNLOCK_PI:
-		return uk_posix_futex_pi(uaddr, cmd, NULL, NULL);
+		return uk_posix_futex_pi(uaddr, cmd, private_key, NULL, NULL);
 	case FUTEX_LOCK_PI:
 	case FUTEX_LOCK_PI2:
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 	{
 		struct uk_posix_signal_wait wait;
 
-		ret = uk_posix_signal_wait_init(&wait, NULL, NULL, 0);
-		if (ret)
-			return ret;
-		ret = uk_posix_signal_wait_check(&wait);
-		if (!ret)
-			ret = uk_posix_futex_pi(uaddr, cmd,
-				timeout ? &timeout_ns : NULL,
-				&wait.interrupted);
-		if (ret == -EINTR)
-			ret = uk_posix_signal_wait_check(&wait);
-		uk_posix_signal_wait_end(&wait, ret,
+		rc = uk_posix_signal_wait_init(&wait, NULL, NULL, 0);
+		if (rc)
+			return rc;
+		rc = uk_posix_signal_wait_check(&wait);
+		if (!rc)
+			rc = uk_posix_futex_pi(uaddr, cmd, private_key,
+					       timeout ? &timeout_ns : NULL,
+					       &wait.interrupted);
+		if (rc == -EINTR)
+			rc = uk_posix_signal_wait_check(&wait);
+		uk_posix_signal_wait_end(&wait, rc,
 					 UK_POSIX_SIGNAL_RESTART_ALWAYS);
-		return ret;
+		return rc;
 	}
 #else
-		return uk_posix_futex_pi(uaddr, cmd,
-			timeout ? &timeout_ns : NULL, NULL);
+		return uk_posix_futex_pi(uaddr, cmd, private_key,
+					 timeout ? &timeout_ns : NULL, NULL);
 #endif
 #endif
-	case FUTEX_FD:
-		return -ENOSYS;
-
 	case FUTEX_REQUEUE:
 		return futex_requeue(uaddr, val, (unsigned long)timeout,
-				     uaddr2, NULL);
-
+				     uaddr2, NULL, private_key);
 	case FUTEX_CMP_REQUEUE:
 		return futex_requeue(uaddr, val, (unsigned long)timeout,
-				     uaddr2, &val3);
-
+				     uaddr2, &val3, private_key);
 	default:
 		return -ENOSYS;
-		/* TODO: other operations? */
 	}
 }
+
+static void futex_thread_cleanup(struct uk_thread *thread)
+{
+	struct uk_futex_waiter *waiter, *next;
+	unsigned long flags;
+
+	flags = uk_lcpu_save_irqf();
+	uk_spin_lock(&futex_list_lock);
+	uk_list_for_each_entry_safe(waiter, next, &futex_list, link)
+		if (waiter->thread == thread)
+			uk_list_del_init(&waiter->link);
+	uk_spin_unlock(&futex_list_lock);
+	uk_lcpu_restore_irqf(flags);
+	uk_futex_call_abort_all(thread);
+}
+
+UK_THREAD_INIT_PRIO_FLAGS(0, futex_thread_cleanup, UK_PRIO_EARLIEST,
+			  UK_THREAD_INITF_UKTLS);
 
 #if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
 /*
@@ -546,51 +536,18 @@ static void futex_clear_child_tid(struct uk_thread *thread)
 	uk_thread_uktls_var(thread, child_tid_clear_ref) = NULL;
 	if (clear_ref) {
 		(void)uk_nofault_try_write(zero, clear_ref);
-		futex_wake((uint32_t *)clear_ref, 1);
+		uk_futex_wake(thread, (uint32_t *)clear_ref, 1, false);
 	}
 }
-
-#if CONFIG_LIBPOSIX_PROCESS_EXECVE
-static int futex_exec_handler(void *arg)
-{
-	struct posix_process_execve_event_data *event = arg;
-
-	futex_clear_child_tid(event->thread);
-	return UK_EVENT_HANDLED_CONT;
-}
-
-POSIX_PROCESS_EXECVE_HANDLER_PRIO(futex_exec_handler, UK_PRIO_EARLIEST);
-#endif
 
 static int pthread_exit_handler(void *arg)
 {
-	struct posix_process_ptexit_event_data *event_data;
-	struct uk_list_head *itr, *tmp;
-	struct uk_thread *child;
-	struct uk_futex *f;
+	struct posix_process_ptexit_event_data *event = arg;
 
-	UK_ASSERT(arg);
-
-	event_data = (struct posix_process_ptexit_event_data *)arg;
-	child = event_data->thread;
-
-	futex_clear_child_tid(child);
-
-	/* Clear this thread's entries from the list */
-	uk_spin_lock(&futex_list_lock);
-	uk_list_for_each_safe(itr, tmp, &futex_list) {
-		f = uk_list_entry(itr, struct uk_futex, list_node);
-		if (f->thread == child) {
-			uk_list_del_init(&f->list_node);
-			break; /* a thread can wait on one futex */
-		}
-	}
-	uk_spin_unlock(&futex_list_lock);
-
-	return 0;
+	futex_clear_child_tid(event->thread);
+	futex_thread_cleanup(event->thread);
+	return UK_EVENT_HANDLED_CONT;
 }
 
-POSIX_PROCESS_PTEXIT_HANDLER_PRIO(pthread_exit_handler,
-				  UK_PRIO_AFTER(UK_PRIO_EARLIEST));
-
-#endif /* CONFIG_LIBPOSIX_PROCESS_MULTITHREADING */
+POSIX_PROCESS_PTCLEANUP_HANDLER_PRIO(pthread_exit_handler, UK_PRIO_LATEST);
+#endif

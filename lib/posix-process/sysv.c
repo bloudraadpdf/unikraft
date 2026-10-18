@@ -72,6 +72,18 @@ struct sysv_object *sysv_find_index(enum sysv_kind kind, int index)
 	return ERR2PTR(-EINVAL);
 }
 
+int sysv_table_info_locked(enum sysv_kind kind, unsigned int *count)
+{
+	struct sysv_object *object;
+	int highest = 0;
+
+	*count = id_counts[kind];
+	uk_list_for_each_entry(object, &objects, link)
+		if (object->kind == kind)
+			highest = MAX(highest, object->id % SYSV_IPC_MAX_IDS);
+	return highest;
+}
+
 int sysv_insert(struct sysv_object *object, enum sysv_kind kind,
 		int key, int flags)
 {

@@ -43,8 +43,10 @@ UK_LLSYSCALL_R_DEFINE(int, rt_sigtimedwait,
 			return -EINVAL;
 		now = ukplat_monotonic_clock();
 		limit = (__NSEC_MAX >> 1) - now;
-		deadline = (__u64)timeout->tv_sec > limit / 1000000000ULL ?
-			limit : MIN(uk_time_spec_to_nsec(timeout), limit);
+		deadline = (__u64)timeout->tv_sec > limit / 1000000000ULL
+				   ? limit
+				   : MIN((__nsec)uk_time_spec_to_nsec(timeout),
+					 limit);
 		deadline += now;
 	}
 	uk_sigcopyset(&wait_set, set);

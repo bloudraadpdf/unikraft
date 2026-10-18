@@ -5,6 +5,9 @@
 #include <uk/file-lock.h>
 #include <uk/mutex.h>
 #include <uk/wait.h>
+#if CONFIG_LIBUKFS
+#include <uk/fs.h>
+#endif
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 #include <uk/posix-signal-wait.h>
 #endif
@@ -28,6 +31,12 @@ static int same_file(const struct uk_file *a, const struct uk_file *b)
 	if (a->ops->getstat == uk_file_anon_getstat &&
 	    b->ops->getstat == uk_file_anon_getstat)
 		return 1;
+#if CONFIG_LIBUKFS
+	a = uk_fs_inode(a);
+	b = uk_fs_inode(b);
+	if (uk_fs_isfs(a) || uk_fs_isfs(b))
+		return uk_fs_isfs(a) && uk_fs_isfs(b) && a->state == b->state;
+#endif
 	return a->vol == b->vol && a->node == b->node;
 }
 

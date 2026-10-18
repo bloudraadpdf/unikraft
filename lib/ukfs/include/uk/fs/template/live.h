@@ -32,6 +32,7 @@
 #include <uk/errptr.h>
 #include <uk/fs.h>
 #include <uk/fs/common-ops.h>
+#include <uk/fs/device.h>
 #include <uk/fs/pathutil.h>
 #include <uk/refcount.h>
 #include <uk/rwlock.h>
@@ -185,6 +186,7 @@ struct sname {								\
 	/* Driver ops */						\
 	drv##LIVEOP_VOPEN live_vopen;					\
 	/* File ops */							\
+	uk_file_open_func live_open;					\
 	drv##LIVEOP_IO live_read;					\
 	drv##LIVEOP_IO live_write;					\
 	drv##LIVEOP_MEM live_mem;					\
@@ -216,9 +218,11 @@ struct sname {								\
  * @param nodecmp Node comparison function (int cmp(nodetype, nodetype))
  * @param ops_table Table of live operations (see live ops above)
  * @param mode_constraints Open file mode constraints
+ * @param cache_lookup Lookup and symlink data need no backing-store access
  */
 #define UK_FS_TMPL_LIVE_GENERATE_STATIC(drv, nodetype, nodecmp,		\
-					ops_table, mode_constraints, follow_op) \
+					ops_table, mode_constraints,	\
+					follow_op, cache_lookup)	\
 UK_FS_TMPL_LIVE_DECL_COMMON_STATIC(drv, nodetype);			\
 \
 UK_FS_TMPL_LIVE_GEN_COMMON_STATIC(drv, nodecmp, (ops_table).live_nodekind,\
@@ -232,7 +236,15 @@ UK_FS_TMPL_LIVE_GEN_MEM_STATIC(drv, (ops_table).live_mem);		\
 UK_FS_TMPL_LIVE_GEN_GETSTAT_STATIC(drv, (ops_table).live_getstat);	\
 UK_FS_TMPL_LIVE_GEN_SETSTAT_STATIC(drv, (ops_table).live_setstat);	\
 UK_FS_TMPL_LIVE_GEN_CTL_STATIC(drv, (ops_table).live_ctl);		\
-UK_FS_TMPL_LIVE_GEN_FILEOPS_STATIC(drv);				\
+static const struct uk_file *drv##_OPEN(const struct uk_file *f,	\
+					unsigned int mode)		\
+{									\
+	if ((ops_table).live_open)					\
+		return (ops_table).live_open(f, mode);			\
+	uk_file_acquire(f);						\
+	return f;							\
+}									\
+UK_FS_TMPL_LIVE_GEN_FILEOPS_STATIC(drv);	\
 \
 UK_FS_TMPL_LIVE_GEN_FS_STAT_STATIC(drv, (ops_table).live_fs_stat);	\
 UK_FS_TMPL_LIVE_GEN_FS_SYNC_STATIC(drv, (ops_table).live_fs_sync);	\
@@ -249,7 +261,8 @@ UK_FS_TMPL_LIVE_GEN_FS_UNLINK_STATIC(drv, (ops_table).live_fs_unlink);	\
 UK_FS_TMPL_LIVE_GEN_FS_RENAME_STATIC(drv, (ops_table).live_fs_rename);	\
 UK_FS_TMPL_LIVE_GEN_FS_GRAFT_STATIC(drv);				\
 UK_FS_TMPL_LIVE_GEN_FS_READLINK_STATIC(drv, (ops_table).live_fs_readlink);\
-UK_FS_TMPL_LIVE_GEN_FSOPS_STATIC(drv, mode_constraints, follow_op);		\
+UK_FS_TMPL_LIVE_GEN_FSOPS_STATIC(drv, mode_constraints, follow_op,	\
+				cache_lookup);			\
 \
 UK_FS_TMPL_LIVE_GEN_VOPEN_STATIC(drv, (ops_table).live_vopen,		\
 				 (ops_table).live_errnode,		\
@@ -404,6 +417,7 @@ struct drv##_ISTATE {							\
 	struct uk_rwlock lock;						\
 	unsigned long mntflags;						\
 	struct uk_alloc *al;						\
+	struct uk_fs_device *device;					\
 	__atomic refcnt;						\
 };									\
 \
@@ -413,7 +427,8 @@ struct drv##_ISTATE *drv##_FILE_ISTATE(const struct uk_file *f)	\
 	return (struct drv##_ISTATE *)f->vol;				\
 }									\
 \
-attr struct drv##_ISTATE *drv##_ISTATE_NEW(struct uk_alloc *al);	\
+attr struct drv##_ISTATE *drv##_ISTATE_NEW(struct uk_alloc *al,		\
+					 struct uk_fs_device *device);	\
 attr void drv##_ISTATE_RELEASE(struct drv##_ISTATE *istate);		\
 \
 attr const struct uk_file *drv##_FILE_GET(struct drv##_ISTATE *s,	\
@@ -488,19 +503,30 @@ UK_FS_TMPL_LIVE_NODETYPE(drv) drv##_FILEMAP_KEY(struct drv##_FILE_ALLOC *node)\
 UK_RB_KEY_GENERATE_STATIC(drv##_FILEMAP, drv##_FILE_ALLOC, rb_entry,	\
 			  nodecmp, drv##_FILEMAP_KEY);			\
 \
-attr struct drv##_ISTATE *drv##_ISTATE_NEW(struct uk_alloc *al)		\
+attr struct drv##_ISTATE *drv##_ISTATE_NEW(struct uk_alloc *al,		\
+					 struct uk_fs_device *device)	\
 {									\
 	struct drv##_ISTATE *istate = uk_malloc(al, sizeof(*istate));	\
 									\
-	if (istate) {							\
-		UK_RB_INIT(&istate->map);				\
-		uk_rwlock_init(&istate->lock);				\
-		istate->al = al;					\
-		uk_refcount_init(&istate->refcnt, 1);			\
+	if (!istate)							\
+		return ERR2PTR(-ENOMEM);				\
+	if (device) {							\
+		uk_fs_device_acquire(device);				\
+	} else {							\
+		device = uk_fs_device_new(al);				\
+		if (PTRISERR(device)) {					\
+			uk_free(al, istate);				\
+			return (void *)device;				\
+		}							\
 	}								\
+	UK_RB_INIT(&istate->map);					\
+	uk_rwlock_init(&istate->lock);					\
+	istate->al = al;						\
+	istate->device = device;					\
+	uk_refcount_init(&istate->refcnt, 1);				\
 	return istate;							\
 }									\
-\
+									\
 static void drv##_ISTATE_ACQUIRE(struct drv##_ISTATE *istate)		\
 {									\
 	uk_refcount_acquire(&istate->refcnt);				\
@@ -510,6 +536,7 @@ attr void drv##_ISTATE_RELEASE(struct drv##_ISTATE *istate)		\
 {									\
 	if (uk_refcount_release(&istate->refcnt)) {			\
 		UK_ASSERT(UK_RB_EMPTY(&istate->map));			\
+		uk_fs_device_release(istate->device);			\
 		uk_free(istate->al, istate);				\
 	}								\
 }									\
@@ -698,9 +725,11 @@ attr UK_FS_TMPL_LIVE_DECL_READ(drv)					\
  * @param drv Driver name
  */
 #define UK_FS_TMPL_LIVE_DECL_WRITE(drv)					\
-ssize_t UK_FS_TMPL_LIVE_OP_WRITE(drv)(const struct uk_file *f,		\
+struct uk_file_io_result						\
+UK_FS_TMPL_LIVE_OP_WRITE(drv)(const struct uk_file *f,		\
 				      const struct iovec *iov, size_t iovcnt,\
-				      size_t off, long flags)
+				      size_t off, long flags,	\
+				      enum uk_file_write_kind kind __unused)
 
 /**
  * Generate the ukfile write operation with regular linkage.
@@ -736,8 +765,9 @@ ssize_t UK_FS_TMPL_LIVE_OP_WRITE(drv)(const struct uk_file *f,		\
 #define UK_FS_TMPL_LIVE_GEN_WRITE_ATTR(drv, live_write, attr)		\
 attr UK_FS_TMPL_LIVE_DECL_WRITE(drv)					\
 {									\
-	return (live_write)(drv##_FILE_NODE(f), iov, iovcnt, off, flags,\
-			    drv##_FILE_ISTATE(f)->mntflags);		\
+	return uk_file_io_status((live_write)(drv##_FILE_NODE(f),	\
+			iov, iovcnt, off, flags, \
+			drv##_FILE_ISTATE(f)->mntflags)); \
 }
 
 /* mem */
@@ -839,8 +869,13 @@ int UK_FS_TMPL_LIVE_OP_GETSTAT(drv)(const struct uk_file *f,		\
 #define UK_FS_TMPL_LIVE_GEN_GETSTAT_ATTR(drv, live_getstat, attr)	\
 attr UK_FS_TMPL_LIVE_DECL_GETSTAT(drv)					\
 {									\
-	return (live_getstat)(drv##_FILE_NODE(f), mask, arg,		\
-			      drv##_FILE_ISTATE(f)->mntflags);		\
+	struct drv##_ISTATE *state = drv##_FILE_ISTATE(f);		\
+	int ret = (live_getstat)(drv##_FILE_NODE(f), mask, arg,		\
+				state->mntflags);			\
+									\
+	if (!ret && !arg->stx_dev_major && !arg->stx_dev_minor)		\
+		arg->stx_dev_minor = uk_fs_device_minor(state->device);	\
+	return ret;							\
 }
 
 /* setstat */
@@ -976,6 +1011,7 @@ attr UK_FS_TMPL_LIVE_DECL_CTL(drv)					\
  */
 #define UK_FS_TMPL_LIVE_GEN_FILEOPS_ATTR(drv, attr)			\
 attr const struct uk_file_ops UK_FS_TMPL_LIVE_FILEOPS(drv) = {		\
+	.open = drv##_OPEN,						\
 	.read = UK_FS_TMPL_LIVE_OP_READ(drv),				\
 	.write = UK_FS_TMPL_LIVE_OP_WRITE(drv),				\
 	.mem = UK_FS_TMPL_LIVE_OP_MEM(drv),				\
@@ -1029,7 +1065,11 @@ int UK_FS_TMPL_LIVE_OP_FS_STAT(drv)(const struct uk_file *f, struct statfs *buf)
 #define UK_FS_TMPL_LIVE_GEN_FS_STAT_ATTR(drv, live_fs_stat, attr)	\
 attr UK_FS_TMPL_LIVE_DECL_FS_STAT(drv)					\
 {									\
-	return (live_fs_stat)(drv##_FILE_NODE(f), buf);			\
+	int result = (live_fs_stat)(drv##_FILE_NODE(f), buf);		\
+									\
+	if (!result)							\
+		buf->f_flags |= drv##_FILE_ISTATE(f)->mntflags & MS_RDONLY;\
+	return result;							\
 }
 
 /* fs sync */
@@ -1635,7 +1675,6 @@ attr UK_FS_TMPL_LIVE_DECL_FS_CREATE(drv)				\
 		break;							\
 	case S_IFCHR:							\
 	case S_IFBLK:							\
-	case S_IFIFO:							\
 		live_target.ukfs.special = target.special;		\
 		break;							\
 	default:							\
@@ -1650,7 +1689,6 @@ attr UK_FS_TMPL_LIVE_DECL_FS_CREATE(drv)				\
 	case 0:								\
 	case S_IFCHR:							\
 	case S_IFBLK:							\
-	case S_IFIFO:							\
 		/* NULL is returned on success */			\
 		return NULL;						\
 	default:							\
@@ -1823,11 +1861,12 @@ attr UK_FS_TMPL_LIVE_DECL_FS_REBIND(drv)				\
 {									\
 	UK_FS_TMPL_LIVE_NODETYPE(drv) node = drv##_FILE_NODE(f);	\
 	struct drv##_ISTATE *istate = drv##_FILE_ISTATE(f);		\
-	struct drv##_ISTATE *newstate = drv##_ISTATE_NEW(istate->al);	\
+	struct drv##_ISTATE *newstate =					\
+		drv##_ISTATE_NEW(istate->al, istate->device);		\
 	struct drv##_FILE_ALLOC *newf;					\
 									\
-	if (unlikely(!newstate))					\
-		return ERR2PTR(-ENOMEM);				\
+	if (unlikely(PTRISERR(newstate)))				\
+		return (void *)newstate;				\
 	newstate->mntflags = flags;					\
 	newf = drv##_FILE_FROMNODE(node, newstate);			\
 	drv##_ISTATE_RELEASE(newstate);					\
@@ -1846,9 +1885,12 @@ attr UK_FS_TMPL_LIVE_DECL_FS_REBIND(drv)				\
  *
  * @param drv Driver name
  * @param mode_constraints Open file mode constraints
+ * @param cache_lookup Lookup and symlink data need no backing-store access
  */
-#define UK_FS_TMPL_LIVE_GEN_FSOPS(drv, mode_constraints, follow_op) \
-	UK_FS_TMPL_LIVE_GEN_FSOPS_ATTR(drv, mode_constraints, follow_op,	\
+#define UK_FS_TMPL_LIVE_GEN_FSOPS(drv, mode_constraints,		\
+				 follow_op, cache_lookup)	\
+	UK_FS_TMPL_LIVE_GEN_FSOPS_ATTR(drv, mode_constraints, follow_op, \
+				    cache_lookup,		\
 				    )
 
 /**
@@ -1858,9 +1900,12 @@ attr UK_FS_TMPL_LIVE_DECL_FS_REBIND(drv)				\
  *
  * @param drv Driver name
  * @param mode_constraints Open file mode constraints
+ * @param cache_lookup Lookup and symlink data need no backing-store access
  */
-#define UK_FS_TMPL_LIVE_GEN_FSOPS_STATIC(drv, mode_constraints, follow_op) \
-	UK_FS_TMPL_LIVE_GEN_FSOPS_ATTR(drv, mode_constraints, follow_op, static)
+#define UK_FS_TMPL_LIVE_GEN_FSOPS_STATIC(drv, mode_constraints,	\
+					follow_op, cache_lookup)	\
+	UK_FS_TMPL_LIVE_GEN_FSOPS_ATTR(drv, mode_constraints, follow_op, \
+				    cache_lookup, static)
 
 /**
  * INTERNAL. Generate the ukfs ops tables of `drv` with custom attributes.
@@ -1869,10 +1914,13 @@ attr UK_FS_TMPL_LIVE_DECL_FS_REBIND(drv)				\
  *
  * @param drv Driver name
  * @param mode_constraints Open file mode constraints
+ * @param cache_lookup Lookup and symlink data need no backing-store access
  * @param attr Ops table attributes
  */
-#define UK_FS_TMPL_LIVE_GEN_FSOPS_ATTR(drv, mode_constraints, follow_op, attr)	\
+#define UK_FS_TMPL_LIVE_GEN_FSOPS_ATTR(drv, mode_constraints,	\
+				     follow_op, cache_lookup, attr)	\
 attr const struct uk_fs_ops UK_FS_TMPL_LIVE_FSOPS_REG(drv) = {		\
+	.cached_lookup = (cache_lookup),				\
 	.lookup = UK_FS_TMPL_LIVE_OP_FS_LOOKUP(drv),			\
 	.readlink = NULL,						\
 	.listdir = NULL,						\
@@ -1888,6 +1936,7 @@ attr const struct uk_fs_ops UK_FS_TMPL_LIVE_FSOPS_REG(drv) = {		\
 };									\
 \
 attr const struct uk_fs_ops UK_FS_TMPL_LIVE_FSOPS_SYM(drv) = {		\
+	.cached_lookup = (cache_lookup),				\
 	.lookup = UK_FS_TMPL_LIVE_OP_FS_LOOKUP(drv),			\
 	.readlink = UK_FS_TMPL_LIVE_OP_FS_READLINK(drv),		\
 	.follow_link = (follow_op),					\
@@ -1904,6 +1953,7 @@ attr const struct uk_fs_ops UK_FS_TMPL_LIVE_FSOPS_SYM(drv) = {		\
 };									\
 \
 attr const struct uk_fs_ops UK_FS_TMPL_LIVE_FSOPS_DIR(drv) = {		\
+	.cached_lookup = (cache_lookup),				\
 	.lookup = UK_FS_TMPL_LIVE_OP_FS_LOOKUP(drv),			\
 	.readlink = NULL,						\
 	.listdir = UK_FS_TMPL_LIVE_OP_FS_LISTDIR(drv),			\
@@ -1919,6 +1969,7 @@ attr const struct uk_fs_ops UK_FS_TMPL_LIVE_FSOPS_DIR(drv) = {		\
 };									\
 \
 attr const struct uk_fs_ops UK_FS_TMPL_LIVE_FSOPS_RODIR(drv) = {	\
+	.cached_lookup = (cache_lookup),				\
 	.lookup = UK_FS_TMPL_LIVE_OP_FS_LOOKUP(drv),			\
 	.readlink = NULL,						\
 	.listdir = UK_FS_TMPL_LIVE_OP_FS_LISTDIR(drv),			\
@@ -1999,15 +2050,15 @@ attr UK_FS_TMPL_LIVE_DECL_VOPEN(drv)					\
 	if (unlikely((err = (live_errnode)(rootnode))))			\
 		return ERR2PTR(err);					\
 									\
-	istate = drv##_ISTATE_NEW(uk_alloc_get_default());		\
-	if (istate) {							\
+	istate = drv##_ISTATE_NEW(uk_alloc_get_default(), NULL);	\
+	if (!PTRISERR(istate)) {					\
 		istate->mntflags = flags;				\
 		ret = drv##_FILE_IOPEN(istate, rootnode);		\
 		drv##_ISTATE_RELEASE(istate);				\
 		if (!ret)						\
 			ret = ERR2PTR(-ENOMEM);				\
 	} else {							\
-		ret = ERR2PTR(-ENOMEM);					\
+		ret = (void *)istate;					\
 	}								\
 	(live_release)(rootnode);					\
 	return ret;							\

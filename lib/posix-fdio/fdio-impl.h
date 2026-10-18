@@ -15,8 +15,11 @@
 /* Open file helpers */
 
 /* Stable, will not ever change on an open file */
-#define _CAN_READ(m)    (!((m) & O_WRONLY))
-#define _CAN_WRITE(m)  (!!((m) & (O_WRONLY|O_RDWR)))
+#define _CAN_READ(m)    (!((m) & (O_WRONLY | O_PATH)))
+static inline bool fdio_can_write(unsigned int mode)
+{
+	return !(mode & O_PATH) && (mode & (O_WRONLY | O_RDWR));
+}
 #define _IS_SEEKABLE(m) (!((m) & UKFD_O_NOSEEK))
 #define _IS_SYNC(m)    (!!((m) & O_SYNC))
 #define _IS_DSYNC(m)   (!!((m) & O_DSYNC))

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include <errno.h>
-#include <limits.h>
+#include <stdint.h>
 #include <string.h>
 #include <uk/alloc.h>
 #include "vfs-path.h"
@@ -8,6 +8,26 @@
 struct uk_mutex vfs_namespace_lock = UK_MUTEX_INITIALIZER(vfs_namespace_lock);
 static struct uk_mutex path_lock = UK_MUTEX_INITIALIZER(path_lock);
 static UK_LIST_HEAD(paths);
+
+void vfs_mount_acquire(struct vfs_mount *mount)
+{
+	if (mount)
+		uk_refcount_acquire(&mount->references);
+}
+
+void vfs_mount_release(struct vfs_mount *mount)
+{
+	struct vfs_mount *parent;
+
+	while (mount && uk_refcount_release(&mount->references)) {
+		parent = mount->parent;
+		uk_file_release(mount->root);
+		if (mount->point)
+			uk_file_release(mount->point);
+		uk_free(uk_alloc_get_default(), mount);
+		mount = parent;
+	}
+}
 
 struct vfs_path_move {
 	struct vfs_path_move *next;
@@ -51,20 +71,24 @@ void uk_posix_vfs_path_release(struct uk_vfs_path *path)
 	uk_mutex_unlock(&path_lock);
 	uk_list_for_each_entry_safe(path, next, &dead, link) {
 		uk_file_release(path->file);
+		vfs_mount_release(path->mount);
 		uk_free(uk_alloc_get_default(), path->name);
 		uk_free(uk_alloc_get_default(), path);
 	}
 }
 
 struct uk_vfs_path *vfs_path_get(struct uk_vfs_path *parent,
-				 const struct uk_file *file, const char *name, size_t length)
+				 struct vfs_mount *mount,
+				 const struct uk_file *file, const char *name,
+				 size_t length)
 {
 	struct uk_vfs_path *path;
 
 	uk_mutex_lock(&path_lock);
 	uk_list_for_each_entry(path, &paths, link) {
 		if (!path->deleted && path->parent == parent &&
-		    path->file->state == file->state && path->length == length &&
+		    path->mount == mount && path->file->state == file->state &&
+		    path->length == length &&
 		    !memcmp(path->name, name, length)) {
 			path->references++;
 			goto out;
@@ -85,6 +109,8 @@ struct uk_vfs_path *vfs_path_get(struct uk_vfs_path *parent,
 	path->parent = parent;
 	if (parent)
 		parent->references++;
+	path->mount = mount;
+	vfs_mount_acquire(mount);
 	path->file = file;
 	uk_file_acquire(file);
 	path->references = 1;
@@ -100,6 +126,9 @@ struct uk_vfs_path *vfs_path_parent(struct uk_vfs_path *path)
 
 	uk_mutex_lock(&path_lock);
 	parent = path->parent ? path->parent : path;
+	if (path->mount && !path->mount->attached &&
+	    path->file->state == path->mount->root->state)
+		parent = path;
 	parent->references++;
 	uk_mutex_unlock(&path_lock);
 	return parent;
@@ -121,11 +150,10 @@ static struct uk_fs_path path_name_locked(struct uk_vfs_path *path,
 	size_t length = 0, offset;
 	char *buffer;
 
-	if (!uk_fs_isfs(path->file))
+	if (!path->parent && !uk_fs_isfs(path->file))
 		return uk_fs_path_copy(path->name, path->length, allocator);
 	for (position = path; position->parent; position = position->parent) {
-		if (position->length >= PATH_MAX ||
-		    length > PATH_MAX - position->length - 1)
+		if (position->length >= SIZE_MAX - length - 1)
 			return (struct uk_fs_path){.s = ERR2PTR(-ENAMETOOLONG)};
 		length += position->length + 1;
 		deleted |= position->deleted;
@@ -134,8 +162,11 @@ static struct uk_fs_path path_name_locked(struct uk_vfs_path *path,
 		return (struct uk_fs_path){.s = ERR2PTR(-ENOENT)};
 	if (!length)
 		length = 1;
-	if (deleted)
+	if (deleted) {
+		if (length > SIZE_MAX - sizeof(suffix))
+			return (struct uk_fs_path){.s = ERR2PTR(-ENAMETOOLONG)};
 		length += sizeof(suffix) - 1;
+	}
 	buffer = uk_malloc(allocator, length + 1);
 	if (!buffer)
 		return (struct uk_fs_path){.s = ERR2PTR(-ENOMEM)};
@@ -177,34 +208,6 @@ struct uk_fs_path vfs_path_cwd_name(struct uk_vfs_path *path)
 	return name;
 }
 
-struct uk_vfs_path *vfs_path_find(const struct uk_file *file,
-				  const struct uk_fs_path *name)
-{
-	struct uk_vfs_path *path, *found = NULL;
-	struct uk_fs_path candidate;
-
-	uk_mutex_lock(&path_lock);
-	uk_list_for_each_entry(path, &paths, link) {
-		if (path->file->state != file->state)
-			continue;
-		candidate = path_name_locked(path, true);
-		if (PTRISERR(candidate.s))
-			continue;
-		if (candidate.len == name->len &&
-		    !memcmp(candidate.s, name->s, name->len))
-			found = path;
-		uk_fs_path_release(candidate);
-		if (found) {
-			found->references++;
-			break;
-		}
-	}
-	uk_mutex_unlock(&path_lock);
-	if (!found && !uk_fs_isfs(file))
-		return vfs_path_get(NULL, file, name->s, name->len);
-	return found ? found : ERR2PTR(-ENOENT);
-}
-
 void vfs_path_unlinked(const struct uk_file *parent,
 		       const char *name, size_t length)
 {
@@ -231,6 +234,8 @@ struct vfs_path_move *vfs_path_move_prepare(struct uk_vfs_path *source,
 
 	uk_mutex_lock(&path_lock);
 	uk_list_for_each_entry(path, &paths, link) {
+		if (path->mount != source->mount)
+			continue;
 		if (path_matches(path, source->file, name, length)) {
 			parent = destination;
 			target = newname;

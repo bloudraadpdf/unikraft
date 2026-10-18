@@ -19,12 +19,13 @@
 #include <uk/paging.h>
 #endif /* CONFIG_LIBUKPAGING */
 #include <uk/isr/string.h>
+#include "vma_stack.h"
 
 static bool in_top_guard_pages_range(struct uk_vma *vma, __vaddr_t vaddr)
 {
 	UK_ASSERT(vma);
-	return IN_RANGE(vaddr,
-			vma->end - UK_VMA_STACK_TOP_GUARD_SIZE,
+	return IN_RANGE(vaddr, vmem_stack_context(vma)->end -
+			UK_VMA_STACK_TOP_GUARD_SIZE,
 			UK_VMA_STACK_TOP_GUARD_SIZE);
 }
 
@@ -33,7 +34,8 @@ static bool in_bottom_guard_pages_range(struct uk_vma *vma,
 {
 	UK_ASSERT(vma);
 	return IN_RANGE(vaddr,
-			vma->start, UK_VMA_STACK_BOTTOM_GUARD_SIZE);
+			vmem_stack_context(vma)->start,
+			UK_VMA_STACK_BOTTOM_GUARD_SIZE);
 }
 
 static bool in_guard_pages_range(struct uk_vma *vma, __vaddr_t vaddr)
@@ -97,20 +99,86 @@ static int vma_op_stack_fault(struct uk_vma *vma, struct uk_vm_fault *fault)
 	return 0;
 }
 
-/* We deny splits and merges so that the guard page is preserved */
+static int vma_op_stack_new(struct uk_vas *vas, __vaddr_t address, __sz length,
+			    void *data __unused, unsigned long attr __unused,
+			    unsigned long *flags __unused,
+			    struct uk_vma **output)
+{
+	struct uk_vma_stack *vma = uk_malloc(vas->a, sizeof(*vma));
+	struct uk_vma_stack_context *stack;
+
+	if (!vma)
+		return -ENOMEM;
+	stack = uk_malloc(vas->a, sizeof(*stack));
+	if (!stack) {
+		uk_free(vas->a, vma);
+		return -ENOMEM;
+	}
+	*stack = (struct uk_vma_stack_context){
+		.start = address, .end = address + length, .references = 1
+	};
+	vma->stack = stack;
+	vma->vma.name = NULL;
+	*output = &vma->vma;
+	return 0;
+}
+
+static void vma_op_stack_destroy(struct uk_vma *vma)
+{
+	struct uk_vma_stack_context *stack = vmem_stack_context(vma);
+
+	vmem_stack_release(vma->vas, stack);
+}
+
+static int vma_op_stack_split(struct uk_vma *vma, __vaddr_t address,
+			      struct uk_vma **output)
+{
+	struct uk_vma_stack_context *stack = vmem_stack_context(vma);
+	struct uk_vma_stack *next;
+
+	if (address < stack->start + UK_VMA_STACK_BOTTOM_GUARD_SIZE ||
+	    address > stack->end - UK_VMA_STACK_TOP_GUARD_SIZE)
+		return -EPERM;
+	next = uk_malloc(vma->vas->a, sizeof(*next));
+	if (!next)
+		return -ENOMEM;
+	next->stack = stack;
+	stack->references++;
+	*output = &next->vma;
+	return 0;
+}
+
+static int vma_op_stack_merge(struct uk_vma *vma, struct uk_vma *next)
+{
+	return vmem_stack_context(vma) == vmem_stack_context(next) ? 0 : -EPERM;
+}
+
+int uk_vma_stack_bounds(const struct uk_vma *vma, __vaddr_t *start,
+			__vaddr_t *end)
+{
+	struct uk_vma_stack_context *stack;
+
+	if (!vma || vma->ops != &uk_vma_stack_ops)
+		return -EINVAL;
+	stack = vmem_stack_context(vma);
+	*start = stack->start;
+	*end = stack->end;
+	return 0;
+}
+
 const struct uk_vma_ops uk_vma_stack_ops = {
 #ifdef CONFIG_LIBUKVMEM_STACK_BASE
 	.get_base	= vma_op_stack_get_base,
 #else /* CONFIG_LIBUKVMEM_STACK_BASE */
 	.get_base	= __NULL,
 #endif /* !CONFIG_LIBUKVMEM_STACK_BASE */
-	.new		= __NULL,
-	.destroy	= __NULL,
+	.new		= vma_op_stack_new,
+	.destroy	= vma_op_stack_destroy,
 	.fault		= vma_op_stack_fault,
 	.fault_discard	= uk_vma_op_fault_discard,
 	.unmap		= uk_vma_op_unmap,	/* default */
-	.split		= uk_vma_op_deny,	/* deny */
-	.merge		= uk_vma_op_deny,	/* deny */
+	.split		= vma_op_stack_split,
+	.merge		= vma_op_stack_merge,
 	.set_attr	= uk_vma_op_set_attr,	/* default */
 	.advise		= uk_vma_op_advise,	/* default */
 };

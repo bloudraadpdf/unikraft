@@ -3,14 +3,15 @@ menuconfig LIBPOSIX_PROCESS
 	select LIBNOLIBC if !HAVE_LIBC
 	select LIBUKLCPU
 	select LIBUKNOFAULT
+	select LIBPOSIX_USER
+	select LIBUKLOCK
+	select LIBUKLOCK_MUTEX
 
 if LIBPOSIX_PROCESS
 
 menuconfig LIBPOSIX_PROCESS_MULTITHREADING
 	bool "Multithreading support"
 	select LIBUKBITOPS
-	select LIBUKLOCK
-	select LIBUKLOCK_MUTEX
 	select LIBUKNOFAULT
 
 if LIBPOSIX_PROCESS_MULTITHREADING
@@ -74,6 +75,7 @@ config LIBPOSIX_PROCESS_MULTIPROCESS
 
 config LIBPOSIX_PROCESS_SIGNAL
 	bool "POSIX signals (EXPERIMENTAL)"
+	select LIBPOSIX_TIME
 	select LIBPOSIX_PROCESS_MULTITHREADING
 	select LIBPOSIX_PROCESS_EXECVE
 	select LIBUKLOCK
@@ -95,6 +97,7 @@ config LIBPOSIX_PROCESS_SIGNALFD
 	bool "signalfd4() and signalfd() syscalls"
 	depends on LIBPOSIX_PROCESS_SIGNAL
 	select LIBUKFILE_POLLED
+	select LIBUKFILE_CHAINUPDATE
 
 config LIBPOSIX_PROCESS_SYSV_IPC
 	bool
@@ -121,6 +124,28 @@ config LIBPOSIX_PROCESS_SYSV_MSG
 	depends on ARCH_X86_64 || ARCH_ARM_64
 	depends on LIBPOSIX_PROCESS_SIGNAL
 	select LIBPOSIX_PROCESS_SYSV_IPC
+
+config LIBPOSIX_PROCESS_CAPABILITIES_TEST
+	bool "Test capability syscalls"
+	depends on LIBUKTEST
+
+config LIBPOSIX_PROCESS_TASK_TEST
+	bool "Test task attachment and metadata"
+	depends on LIBUKTEST
+
+config LIBPOSIX_PROCESS_VM_LIFETIME_TEST
+	bool "Test process VM retirement lifetime"
+	depends on LIBUKTEST && LIBPOSIX_PROCESS_MULTITHREADING && LIBUKVMEM
+	default n
+
+config LIBPOSIX_PROCESS_TIMER_TEST
+	bool "Test process timer state"
+	depends on LIBUKTEST && LIBPOSIX_PROCESS_SIGNAL
+
+config LIBPOSIX_PROCESS_SIGNAL_LIFETIME_TEST
+	bool "Test signal construction and clone ownership"
+	depends on LIBUKTEST && LIBPOSIX_PROCESS_SIGNAL
+	depends on LIBPOSIX_PROCESS_MULTITHREADING
 
 config LIBPOSIX_PROCESS_DEBUG
 	bool "Enable debug messages"

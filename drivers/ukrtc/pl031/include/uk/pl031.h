@@ -39,6 +39,8 @@
 
 #include <uk/rtc.h>
 
+__u64 pl031_wall_clock_offset(void);
+
 /**
  * Read time from device and store in RTC structure.
  *

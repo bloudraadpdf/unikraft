@@ -36,5 +36,16 @@ getgrgid
 getgrgid_r
 getgrouplist
 
-capget
-capset
+
+pu_credentials_identity
+pu_credentials_privileges
+pu_credentials_group_count
+pu_credentials_group_ids
+pu_credentials_has_group
+pu_credentials_acquire
+pu_credentials_retain
+pu_no_new_privs_set
+pu_credentials_release
+pu_credentials_copy
+pu_credentials_capabilities
+pu_credentials_exchange

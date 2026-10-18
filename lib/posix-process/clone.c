@@ -297,6 +297,7 @@ int uk_clone(struct clone_args *cl_args, size_t cl_args_len,
 		ret = (PTR2ERR(child) != 0) ? PTR2ERR(child) : -ENOMEM;
 		goto err_out;
 	}
+	uk_sched_thread_inherit_affinity(child, t);
 #ifdef CONFIG_LIBUKDEBUG_ENABLE_ASSERT
 	/* Sanity check that the UKTLS of the child is really a Unikraft TLS:
 	 * Do we find our magic on the TLS, is Bobo's banana there?
@@ -340,7 +341,7 @@ int uk_clone(struct clone_args *cl_args, size_t cl_args_len,
 	UK_ASSERT(pprocess);
 
 	if (cl_args->flags & CLONE_THREAD) {
-		pthread = pprocess_create_pthread(pprocess, child);
+		pthread = pprocess_create_pthread(pprocess, child, t);
 		if (unlikely(PTRISERR(pthread))) {
 			ret = PTR2ERR(pthread);
 			uk_pr_err("Could not create pthread (%d)\n", ret);
@@ -391,7 +392,7 @@ int uk_clone(struct clone_args *cl_args, size_t cl_args_len,
 			      uk_lcpu_sysctx_get(execenv->sysctx, TLSP));
 
 	/* Assign the child to the scheduler */
-	ret = uk_sched_thread_add(uk_sched_select(), child);
+	ret = uk_sched_thread_add(uk_sched_select(child), child);
 	if (unlikely(ret)) {
 		uk_pr_err("Unable to add tid %d to scheduler (%d)\n",
 			  child_tid, ret);

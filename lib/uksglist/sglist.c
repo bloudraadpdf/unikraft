@@ -110,7 +110,8 @@ static inline int _sglist_append_buf(struct uk_sglist *sg, void *buf,
 	size_t left = len;
 
 	while (left) {
-		error = uk_vma_populate_page(uk_vas_get_active(), next);
+		error = uk_vma_populate_page(uk_vas_get_active(), next,
+					     UK_VMA_FAULT_READ);
 		if (unlikely(error))
 			return error;
 		seglen = MIN(left, __PAGE_SIZE - page_off(next));

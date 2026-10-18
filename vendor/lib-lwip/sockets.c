@@ -33,7 +33,13 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <stdint.h>
+#include <string.h>
+
 #include <uk/config.h>
+#include <uk/alloc.h>
+#include <uk/mutex.h>
+#include <uk/atomic.h>
 #include <uk/assert.h>
 #include <uk/print.h>
 #include <uk/essentials.h>
@@ -47,7 +53,35 @@
 #include <lwip/api.h>
 #include <lwip/sys.h>
 #include <lwip/tcp.h>
+#include <lwip/tcpip.h>
 #include <lwip/tcpbase.h>
+#include <lwip/err.h>
+#include <lwip/priv/tcpip_priv.h>
+#include <net/if.h>
+
+static void lwip_posix_socket_poll_setup(posix_sock *file);
+
+struct lwip_socket_data {
+	struct uk_alloc *allocator;
+	struct uk_mutex receive;
+	struct uk_mutex send;
+	int fd;
+};
+
+static void *lwip_socket_data_create(struct uk_alloc *allocator, int fd)
+{
+	struct lwip_socket_data *data = uk_malloc(allocator, sizeof(*data));
+
+	if (!data) {
+		lwip_close(fd);
+		return ERR2PTR(-ENOMEM);
+	}
+	data->allocator = allocator;
+	data->fd = fd;
+	uk_mutex_init(&data->receive);
+	uk_mutex_init(&data->send);
+	return data;
+}
 
 static inline
 int _lwip_ignore_noncrit_msgflags(int flags)
@@ -58,7 +92,9 @@ int _lwip_ignore_noncrit_msgflags(int flags)
 static inline
 int _lwip_getfd(posix_sock *sock)
 {
-	return (intptr_t)posix_sock_get_data(sock);
+	struct lwip_socket_data *data = posix_sock_get_data(sock);
+
+	return data->fd;
 }
 
 static int
@@ -99,7 +135,7 @@ lwip_posix_socket_create(struct posix_socket_driver *d, int family, int type,
 		return ERR2PTR(rc);
 	}
 
-	return (void *)(intptr_t)lwip_fd;
+	return lwip_socket_data_create(d->allocator, lwip_fd);
 }
 
 static void *
@@ -123,7 +159,8 @@ lwip_posix_socket_accept4(posix_sock *file,
 		return ERR2PTR(rc);
 	}
 
-	return (void *)(intptr_t)new_fd;
+	return lwip_socket_data_create(posix_sock_get_driver(file)->allocator,
+				       new_fd);
 }
 
 static int
@@ -156,7 +193,8 @@ lwip_posix_socket_shutdown(posix_sock *file, int how)
 	ret = lwip_shutdown(lwip_fd, how);
 	if (unlikely(ret < 0))
 		ret = -errno;
-	else if (how != SHUT_WR)
+	lwip_posix_socket_poll_setup(file);
+	if (!ret && how != SHUT_WR)
 		posix_sock_event_set(file, EPOLLIN | EPOLLRDNORM | EPOLLRDHUP |
 				     (how == SHUT_RDWR ? EPOLLHUP : 0));
 
@@ -298,61 +336,72 @@ lwip_posix_socket_listen(posix_sock *file, int backlog)
 	return ret;
 }
 
+static struct lwip_socket_data *
+lwip_socket_io_begin(posix_sock *file, bool write)
+{
+	struct lwip_socket_data *data = posix_sock_get_data(file);
+
+	UK_ASSERT(data->fd >= 0);
+	uk_mutex_lock(write ? &data->send : &data->receive);
+	return data;
+}
+
+static void lwip_receive_state_publish(posix_sock *file,
+				       struct lwip_socket_data *data)
+{
+	struct lwip_sock *sock = lwip_socket_dbg_get_socket(data->fd);
+
+	uk_store_n(&sock->pending_read, !!sock->lastdata.pointer);
+	lwip_posix_socket_poll_setup(file);
+}
+
+static ssize_t
+lwip_socket_io_end(posix_sock *file, struct lwip_socket_data *data,
+		   ssize_t result, bool write)
+{
+	if (unlikely(result < 0))
+		result = -errno;
+	if (!write)
+		lwip_receive_state_publish(file, data);
+	uk_mutex_unlock(write ? &data->send : &data->receive);
+	return result;
+}
+
 static ssize_t
 lwip_posix_socket_recvfrom(posix_sock *file, void *restrict buf,
 			   size_t len, int flags, struct sockaddr *from,
 			   socklen_t *restrict fromlen)
 {
-	int lwip_fd;
-	ssize_t ret;
+	struct lwip_socket_data *data;
 
 	flags = _lwip_ignore_noncrit_msgflags(flags);
-
-	lwip_fd = _lwip_getfd(file);
-	UK_ASSERT(lwip_fd >= 0);
-
-	ret = lwip_recvfrom(lwip_fd, buf, len, flags, from, fromlen);
-	if (unlikely(ret < 0))
-		ret = -errno;
-
-	return ret;
+	data = lwip_socket_io_begin(file, false);
+	return lwip_socket_io_end(file, data,
+		lwip_recvfrom(data->fd, buf, len, flags, from, fromlen), false);
 }
 
 static ssize_t
 lwip_posix_socket_recvmsg(posix_sock *file, struct msghdr *msg,
 			  int flags)
 {
-	int lwip_fd;
-	ssize_t ret;
+	struct lwip_socket_data *data;
 
 	flags = _lwip_ignore_noncrit_msgflags(flags);
-
-	lwip_fd = _lwip_getfd(file);
-	UK_ASSERT(lwip_fd >= 0);
-
-	ret = lwip_recvmsg(lwip_fd, msg, flags);
-	if (unlikely(ret < 0))
-		ret = -errno;
-
-	return ret;
+	data = lwip_socket_io_begin(file, false);
+	return lwip_socket_io_end(file, data,
+		lwip_recvmsg(data->fd, msg, flags), false);
 }
 
 static ssize_t
 lwip_posix_socket_sendmsg(posix_sock *file,
 			  const struct msghdr *msg, int flags)
 {
-	int lwip_fd;
-	ssize_t ret;
+	struct lwip_socket_data *data;
 
 	flags = _lwip_ignore_noncrit_msgflags(flags);
-
-	lwip_fd = _lwip_getfd(file);
-	UK_ASSERT(lwip_fd >= 0);
-	ret = lwip_sendmsg(lwip_fd, msg, flags);
-	if (unlikely(ret < 0))
-		ret = -errno;
-
-	return ret;
+	data = lwip_socket_io_begin(file, true);
+	return lwip_socket_io_end(file, data,
+		lwip_sendmsg(data->fd, msg, flags), true);
 }
 
 static ssize_t
@@ -361,59 +410,45 @@ lwip_posix_socket_sendto(posix_sock *file, const void *buf,
 			 const struct sockaddr *dest_addr,
 			 socklen_t addrlen)
 {
-	int lwip_fd;
-	ssize_t ret;
+	struct lwip_socket_data *data;
 
 	flags = _lwip_ignore_noncrit_msgflags(flags);
-
-	lwip_fd = _lwip_getfd(file);
-	UK_ASSERT(lwip_fd >= 0);
-
-	ret = lwip_sendto(lwip_fd, buf, len, flags,
-			  dest_addr, addrlen);
-	if (unlikely(ret < 0))
-		ret = -errno;
-
-	return ret;
+	data = lwip_socket_io_begin(file, true);
+	return lwip_socket_io_end(file, data,
+		lwip_sendto(data->fd, buf, len, flags,
+			    dest_addr, addrlen), true);
 }
 
-static ssize_t
-lwip_posix_socket_read(posix_sock *file, const struct iovec *iov,
-		       size_t iovcnt)
+static ssize_t lwip_posix_socket_read(posix_sock *file, const struct iovec *iov,
+				      size_t iovcnt, int flags)
 {
-	int lwip_fd;
-	ssize_t ret;
+	struct lwip_socket_data *data;
+	struct msghdr message = {
+		.msg_iov = (struct iovec *)iov,
+		.msg_iovlen = iovcnt,
+	};
 
-	lwip_fd = _lwip_getfd(file);
-	UK_ASSERT(lwip_fd >= 0);
-
-	ret = lwip_readv(lwip_fd, iov, iovcnt);
-	if (unlikely(ret < 0))
-		ret = -errno;
-
-	return ret;
+	data = lwip_socket_io_begin(file, false);
+	return lwip_socket_io_end(file, data,
+				  lwip_recvmsg(data->fd, &message, flags),
+				  false);
 }
 
 static ssize_t
 lwip_posix_socket_write(posix_sock *file, const struct iovec *iov,
 			size_t iovcnt)
 {
-	int lwip_fd;
-	ssize_t ret;
+	struct lwip_socket_data *data;
 
-	lwip_fd = _lwip_getfd(file);
-	UK_ASSERT(lwip_fd >= 0);
-
-	ret = lwip_writev(lwip_fd, iov, iovcnt);
-	if (unlikely(ret < 0))
-		ret = -errno;
-
-	return ret;
+	data = lwip_socket_io_begin(file, true);
+	return lwip_socket_io_end(file, data,
+		lwip_writev(data->fd, iov, iovcnt), true);
 }
 
 static int
 lwip_posix_socket_close(posix_sock *file)
 {
+	struct lwip_socket_data *data = posix_sock_get_data(file);
 	int lwip_fd;
 	int ret;
 
@@ -424,22 +459,85 @@ lwip_posix_socket_close(posix_sock *file)
 	if (unlikely(ret < 0))
 		ret = -errno;
 
+	uk_free(data->allocator, data);
 	return ret;
+}
+
+struct lwip_interface_query {
+	struct tcpip_api_call_data call;
+	struct ifreq request;
+	int command, result;
+};
+
+static err_t lwip_interface_query(struct tcpip_api_call_data *call)
+{
+	struct lwip_interface_query *query =
+		__containerof(call, struct lwip_interface_query, call);
+	struct ifreq *request = &query->request;
+	struct netif *interface;
+
+	query->result = -ENODEV;
+	if (query->command == SIOCGIFNAME) {
+		if (request->ifr_ifindex <= 0 ||
+		    request->ifr_ifindex > (int)UINT8_MAX)
+			return ERR_OK;
+		interface = netif_get_by_index((u8_t)request->ifr_ifindex);
+		if (interface) {
+			memset(request->ifr_name, 0, sizeof(request->ifr_name));
+			netif_index_to_name(netif_get_index(interface),
+					    request->ifr_name);
+			query->result = 0;
+		}
+	} else {
+		request->ifr_name[sizeof(request->ifr_name) - 1] = '\0';
+		NETIF_FOREACH(interface) {
+			char name[NETIF_NAMESIZE];
+
+			netif_index_to_name(netif_get_index(interface), name);
+			if (strcmp(request->ifr_name, name))
+				continue;
+			request->ifr_ifindex = netif_get_index(interface);
+			query->result = 0;
+			break;
+		}
+	}
+	return ERR_OK;
+}
+
+static int lwip_interface_ioctl(int command, void *user)
+{
+	struct lwip_interface_query query = {.command = command};
+	err_t error;
+
+	if (!uk_nofault_try_read(query.request, (const struct ifreq *)user))
+		return -EFAULT;
+	error = tcpip_api_call(lwip_interface_query, &query.call);
+	if (error != ERR_OK)
+		return -err_to_errno(error);
+	if (query.result)
+		return query.result;
+	return uk_nofault_try_write(query.request, (struct ifreq *)user)
+		       ? 0
+		       : -EFAULT;
 }
 
 static int
 lwip_posix_socket_ioctl(posix_sock *file, int request, void *argp)
 {
+	struct lwip_socket_data *data = posix_sock_get_data(file);
 	int lwip_fd;
 	int ret;
 
 	lwip_fd = _lwip_getfd(file);
 	UK_ASSERT(lwip_fd >= 0);
 
+	uk_mutex_lock(&data->receive);
 	ret = lwip_ioctl(lwip_fd, request, argp);
 	if (unlikely(ret < 0))
 		ret = -errno;
+	lwip_receive_state_publish(file, data);
 
+	uk_mutex_unlock(&data->receive);
 	return ret;
 }
 
@@ -459,6 +557,7 @@ get_lwip_socket_events(struct lwip_sock *sock)
 
 	UK_ASSERT(sock);
 
+#if LWIP_TCP
 	if ((NETCONNTYPE_GROUP(sock->conn->type) == NETCONN_TCP)) {
 		/* A TCP connection may be in not-connected state. Don't report it as
 		 * readable or writeable.
@@ -481,7 +580,18 @@ get_lwip_socket_events(struct lwip_sock *sock)
 			events |= EPOLLRDHUP;
 	}
 
-	if (sock->lastdata.pbuf || sock->rcvevent > 0)
+#endif
+
+	if (NETCONNTYPE_GROUP(sock->conn->type) == NETCONN_UDP) {
+		unsigned int shutdown = uk_load_n(&sock->shutdown);
+
+		if (shutdown & LWIP_SOCKET_SHUT_RD)
+			events |= EPOLLIN | EPOLLRDNORM | EPOLLRDHUP;
+		if (shutdown == (LWIP_SOCKET_SHUT_RD | LWIP_SOCKET_SHUT_WR))
+			events |= EPOLLHUP;
+	}
+
+	if (uk_load_n(&sock->pending_read) || sock->rcvevent > 0)
 		events |= EPOLLIN | EPOLLRDNORM;
 	if (sock->sendevent != 0)
 		events |= EPOLLOUT | EPOLLWRNORM;
@@ -510,32 +620,70 @@ lwip_posix_socket_event_callback(struct lwip_sock *sock,
 	posix_sock_event_assign(sockobj, events);
 }
 
-static void
-lwip_posix_socket_poll_setup(posix_sock *file)
+struct lwip_socket_state_query {
+	struct tcpip_api_call_data call;
+	posix_sock *file;
+	enum posix_socket_timeout direction;
+	__u64 milliseconds;
+	bool set_timeout;
+};
+
+static err_t lwip_socket_state_query(struct tcpip_api_call_data *call)
 {
-	int lwip_fd;
-	unsigned revents;
+	struct lwip_socket_state_query *query =
+		__containerof(call, struct lwip_socket_state_query, call);
+	posix_sock *file = query->file;
 	struct lwip_sock *sock;
 	SYS_ARCH_DECL_PROTECT(lev);
 
-	lwip_fd = _lwip_getfd(file);
-
 	SYS_ARCH_PROTECT(lev);
-	/* This is a bit hacky but lwip does not provide a different public
-	 * interface to get a reference to the socket. Furthermore, this
-	 * function does not increase the reference count which is good
-	 * as we do not hold the reference longer than the lock anyways. Since
-	 * we need to hold the lock for evaluating the socket state this fits
-	 * in well.
-	 */
-	sock = lwip_socket_dbg_get_socket(lwip_fd);
-	revents = get_lwip_socket_events(sock);
+	sock = lwip_socket_dbg_get_socket(_lwip_getfd(file));
+	if (query->set_timeout) {
+		if (query->direction == POSIX_SOCKET_TIMEOUT_RECEIVE)
+			sock->conn->socket_receive_timeout_ms =
+				query->milliseconds;
+		else
+			sock->conn->socket_send_timeout_ms =
+				query->milliseconds;
+	}
 	sock->sock_data = (void *)file;
+	posix_sock_get_node(file)->receive_timeout_ms =
+		sock->conn->socket_receive_timeout_ms;
+	posix_sock_get_node(file)->send_timeout_ms =
+		sock->conn->socket_send_timeout_ms;
+	posix_sock_event_assign(file, get_lwip_socket_events(sock));
 	SYS_ARCH_UNPROTECT(lev);
-	posix_sock_event_assign(file, revents);
+	return ERR_OK;
+}
+
+static int
+lwip_posix_socket_timeout_update(posix_sock *file,
+				 enum posix_socket_timeout direction,
+				 __u64 milliseconds)
+{
+	struct lwip_socket_state_query query = {
+		.file = file,
+		.direction = direction,
+		.milliseconds = milliseconds,
+		.set_timeout = true,
+	};
+
+	return -err_to_errno(
+		tcpip_api_call(lwip_socket_state_query, &query.call));
+}
+
+static void
+lwip_posix_socket_poll_setup(posix_sock *file)
+{
+	struct lwip_socket_state_query query = {.file = file};
+
+	if (tcpip_api_call(lwip_socket_state_query, &query.call) != ERR_OK)
+		posix_sock_event_set(file, EPOLLERR);
 }
 
 static struct posix_socket_ops lwip_posix_socket_ops = {
+	.nofault_io = true,
+	.interface_ioctl = lwip_interface_ioctl,
 	/* POSIX interfaces */
 	.create		= lwip_posix_socket_create,
 	.accept4	= lwip_posix_socket_accept4,
@@ -557,6 +705,7 @@ static struct posix_socket_ops lwip_posix_socket_ops = {
 	.close		= lwip_posix_socket_close,
 	.ioctl		= lwip_posix_socket_ioctl,
 	.poll_setup	= lwip_posix_socket_poll_setup,
+	.timeout_update = lwip_posix_socket_timeout_update,
 };
 
 POSIX_SOCKET_FAMILY_REGISTER(AF_INET, &lwip_posix_socket_ops);

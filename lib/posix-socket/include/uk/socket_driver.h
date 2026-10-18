@@ -407,11 +407,12 @@ typedef ssize_t (*posix_socket_write_func_t)(posix_sock *sock,
  * @param iov Pointer to an array of iovec structures describing the buffers to
  *    store received data from the socket
  * @param iovcnt The number of iovec structures in the iovec array
+ * @param flags Message flags, including MSG_DONTWAIT for nonblocking reads
  *
  * @return The number of bytes read on success, -errno otherwise
  */
 typedef ssize_t (*posix_socket_read_func_t)(posix_sock *sock,
-		const struct iovec *iov, size_t iovcnt);
+		const struct iovec *iov, size_t iovcnt, int flags);
 
 /**
  * Close the socket.
@@ -465,10 +466,23 @@ typedef unsigned int (*posix_socket_poll_func_t)(posix_sock *sock,
  */
 typedef void (*posix_socket_poll_setup_func_t)(posix_sock *sock);
 
+enum posix_socket_timeout {
+	POSIX_SOCKET_TIMEOUT_RECEIVE,
+	POSIX_SOCKET_TIMEOUT_SEND
+};
+
+typedef int
+(*posix_socket_timeout_update_func_t)(posix_sock *sock,
+				      enum posix_socket_timeout direction,
+				      __u64 milliseconds);
+
 /**
  * A structure containing the functions exported by a Unikraft socket driver
  */
+
 struct posix_socket_ops {
+	bool nofault_io;
+	int (*interface_ioctl)(int request, void *argp);
 	/* The initialization function on socket registration. */
 	posix_socket_driver_init_func_t	init;
 	/* POSIX socket interface */
@@ -497,6 +511,7 @@ struct posix_socket_ops {
 	posix_socket_poll_func_t	poll;
 #endif /* CONFIG_LIBPOSIX_SOCKET_POLLED */
 	posix_socket_poll_setup_func_t	poll_setup;
+	posix_socket_timeout_update_func_t timeout_update;
 };
 
 static inline void *
@@ -673,12 +688,12 @@ posix_socket_write(posix_sock *sock, const struct iovec *iov,
 
 static inline ssize_t
 posix_socket_read(posix_sock *sock, const struct iovec *iov,
-		  size_t iovcnt)
+		  size_t iovcnt, int flags)
 {
 	struct posix_socket_driver *d = posix_sock_get_driver(sock);
 
 	UK_ASSERT(d->ops->read);
-	return d->ops->read(sock, iov, iovcnt);
+	return d->ops->read(sock, iov, iovcnt, flags);
 }
 
 static inline int

@@ -3,6 +3,10 @@ menuconfig LIBPOSIX_FDTAB
 	select LIBUKATOMIC
 	select LIBUKBITOPS
 	select LIBUKFILE
+	select LIBUKNOFAULT
+	select LIBUKLOCK
+	select LIBUKLOCK_MUTEX
+	select LIBPOSIX_FDTAB_MULTITAB
 	select LIBPOSIX_FD
 	select LIBPOSIX_FD_HEAPOFD
 
@@ -20,5 +24,10 @@ if LIBPOSIX_FDTAB
 	# Hidden, selected by core components when needed
 	config LIBPOSIX_FDTAB_LEGACY_SHIM
 	bool
+
+config LIBPOSIX_FDTAB_RESERVATION_TEST
+	bool "Test descriptor reservation publication"
+	default n
+	select LIBUKTEST
 
 endif

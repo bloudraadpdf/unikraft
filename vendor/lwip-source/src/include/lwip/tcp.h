@@ -324,6 +324,7 @@ struct tcp_pcb {
   tcpwnd_size_t snd_wnd_max; /* the maximum sender window announced by the remote host */
 
   tcpwnd_size_t snd_buf;   /* Available buffer space for sending (in bytes). */
+  u32_t snd_buf_limit;
 #define TCP_SNDQUEUELEN_OVERFLOW (0xffffU-3)
   u16_t snd_queuelen; /* Number of pbufs currently in the send buffer. */
 
@@ -431,7 +432,21 @@ void             tcp_poll    (struct tcp_pcb *pcb, tcp_poll_fn poll, u8_t interv
 #define          tcp_mss(pcb)             ((pcb)->mss)
 #endif /* LWIP_TCP_TIMESTAMPS */
 /** @ingroup tcp_raw */
-#define          tcp_sndbuf(pcb)          (TCPWND16((pcb)->snd_buf))
+static inline u16_t
+tcp_sndbuf(const struct tcp_pcb *pcb)
+{
+  u32_t outstanding = TCP_SND_BUF - pcb->snd_buf;
+  u32_t available = pcb->snd_buf_limit > outstanding ?
+    pcb->snd_buf_limit - outstanding : 0;
+
+  return (u16_t)LWIP_MIN(LWIP_MIN(available, pcb->snd_buf), 0xffff);
+}
+
+static inline u16_t
+tcp_sndlowat(const struct tcp_pcb *pcb)
+{
+  return (u16_t)LWIP_MIN(TCP_SNDLOWAT, LWIP_MAX(1, pcb->snd_buf_limit / 2));
+}
 /** @ingroup tcp_raw */
 #define          tcp_sndqueuelen(pcb)     ((pcb)->snd_queuelen)
 /** @ingroup tcp_raw */

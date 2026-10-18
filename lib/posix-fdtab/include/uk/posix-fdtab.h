@@ -10,10 +10,14 @@
 #define __UK_POSIX_FDTAB_H__
 
 #include <uk/config.h>
+#include <uk/bitops.h>
 #include <uk/posix-fd.h>
 
 #define UK_LIBPOSIX_FDTAB_INIT_PRIO	UK_PRIO_EARLIEST
 #define UK_FD_MAX INT_MAX
+
+#define UK_CLOSE_RANGE_UNSHARE UK_BIT(1)
+#define UK_CLOSE_RANGE_CLOEXEC UK_BIT(2)
 
 const void *uk_fdtab_lock_owner(void);
 
@@ -22,8 +26,19 @@ struct uk_thread;
 /* Keep thread allocated through this call; release the result with uk_fdtab_put. */
 struct uk_fdtab *uk_fdtab_get_thread(struct uk_thread *thread);
 void uk_fdtab_put(struct uk_fdtab *table);
+void uk_fdtab_execve_commit(struct uk_thread *thread);
 struct uk_ofile *uk_fdtab_get_from(struct uk_fdtab *table, int fd);
 int uk_fdtab_next(struct uk_fdtab *table, int start);
+
+struct uk_fdtab_reservation;
+/* Owner thread must install or cancel; teardown cancels outstanding handles. */
+struct uk_fdtab_reservation *uk_fdtab_reserve(unsigned int mode);
+void uk_fdtab_cancel(struct uk_fdtab_reservation *reservation);
+/* Copies user_fd before publication; consumes ofile only on success.
+ * Consumes the reservation on every return. NULL skips copyout.
+ */
+int uk_fdtab_install(struct uk_fdtab_reservation *reservation,
+		     struct uk_ofile *ofile, int *user_fd);
 
 /**
  * Opens the file `f` with `mode` and associates it with a file descriptor.
@@ -163,6 +178,8 @@ int uk_fdtab_shim_get(int fd, union uk_shim_file *out);
  *   < 0, failure
  */
 int uk_sys_close(int fd);
+int uk_sys_close_range(unsigned int first, unsigned int last,
+		       unsigned int flags);
 
 /**
  * Allocates a new file descriptor that refers to the same

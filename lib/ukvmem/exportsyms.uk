@@ -9,9 +9,14 @@ uk_vma_unmap
 uk_vma_set_attr
 uk_vma_advise
 uk_vma_populate_page
+uk_vmem_arch_fault_type
 uk_vma_stack_resize
+uk_vma_stack_bounds
+uk_vma_stack_unmap
 
 uk_vma_anon_ops
+uk_vma_anon_identity_acquire
+uk_vma_anon_identity_release
 uk_vma_dma_ops
 uk_vma_rsvd_ops
 uk_vma_stack_ops

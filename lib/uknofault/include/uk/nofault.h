@@ -8,6 +8,7 @@
 #define __UKNOFAULT_NOFAULT_H__
 
 #include <uk/arch/types.h>
+#include <errno.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -23,10 +24,23 @@ extern "C" {
  */
 #define UK_NOFAULTF_NOPAGING	0x02
 
+struct uk_lcpu_regs;
+
+/* Returns 0 after redirecting a registered fault to its recovery instruction,
+ * or -EFAULT when the instruction has no registered recovery.
+ */
+int uk_nofault_fixup(struct uk_lcpu_regs *regs);
+
 /* Returns 0 after a fault-safe atomic comparison, or -EFAULT. Updates
  * expected with the observed value, as a normal compare-exchange does.
  */
-int uk_nofault_cmpxchg32(__u32 *address, __u32 *expected, __u32 desired);
+int uk_nofault_cmpxchg32(__u32 *address, __u32 *expected, __u32 desired,
+			 unsigned long flags);
+
+/* Word addresses are aligned; output pointers are kernel memory. Atomic word
+ * operations accept only NOPAGING, which applies to their tagged instructions.
+ */
+int uk_nofault_read32(const __u32 *address, __u32 *value, unsigned long flags);
 
 /**
  * Probes the specified address range for read access. If the address
@@ -150,6 +164,23 @@ __sz uk_nofault_memcpy(char *dst, const char *src, __sz len,
 	({ typeof(value) _v = (value);					\
 	   (uk_nofault_memcpy((char *)(ptr), (const char *)&_v, sizeof(_v),\
 			      UK_NOFAULTF_NOPAGING) == sizeof(_v)); })
+
+/* Destination is kernel memory. Returns zero or a negative errno. */
+static inline int uk_nofault_copy_string(char *destination, const char *source,
+					 __sz capacity)
+{
+	for (__sz offset = 0; offset < capacity; offset++) {
+		__uptr address = (__uptr)source + offset;
+
+		if (address < (__uptr)source ||
+		    !uk_nofault_try_read(destination[offset],
+					 (const char *)address))
+			return -EFAULT;
+		if (!destination[offset])
+			return 0;
+	}
+	return -ENAMETOOLONG;
+}
 
 #ifdef __cplusplus
 }

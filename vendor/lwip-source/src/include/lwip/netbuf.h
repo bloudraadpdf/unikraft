@@ -66,6 +66,9 @@ struct netbuf {
   u16_t toport_chksum;
 #if LWIP_NETBUF_RECVINFO
   ip_addr_t toaddr;
+#if LWIP_IPV4
+  ip4_addr_t spec_dst;
+#endif
 #endif /* LWIP_NETBUF_RECVINFO */
 #endif /* LWIP_NETBUF_RECVINFO || LWIP_CHECKSUM_ON_COPY */
 };

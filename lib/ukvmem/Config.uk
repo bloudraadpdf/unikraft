@@ -25,14 +25,17 @@ config LIBUKVMEM_DEMAND_PAGE_IN_SIZE
 		a page size.
 
 config LIBUKVMEM_PAGEFAULT_HANDLER_PRIO
-	int "Fault handler priority [0-9]"
+	int "Fault handler priority"
 	default 4
-	range 0 9
+	range 1 9 if LIBUKNOFAULT
+	range 0 9 if !LIBUKNOFAULT
 	help
 		Priority of the page fault handler. Determines the order in
 		which the handler is called with respect to other handlers,
 		0 (earliest) to 9 (latest). Faults handled by ukvmem are not
 		propagated.
+		Priority 0 is reserved for atomic nofault fixups when uknofault
+		is enabled.
 
 config LIBUKVMEM_DEFAULT_BASE
 	hex "Default base address"
@@ -91,5 +94,21 @@ config LIBUKVMEM_TEST
 	default n
 	select LIBUKTEST
 	select LIBUKNOFAULT
+
+config LIBUKVMEM_STACK_TEST
+	bool "Enable stack lifetime tests"
+	default n
+	select LIBUKTEST
+	select LIBUKNOFAULT
+
+config LIBUKVMEM_ANON_TEST
+	bool "Enable anonymous mapping identity tests"
+	default n
+	select LIBUKTEST
+
+config LIBUKVMEM_ACCESS_TEST
+	bool "Enable mapping access tests"
+	default n
+	select LIBUKTEST
 
 endif

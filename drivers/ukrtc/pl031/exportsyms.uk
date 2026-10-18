@@ -1,4 +1,5 @@
 pl031_read_time
+pl031_wall_clock_offset
 pl031_write_time
 pl031_write_alarm
 pl031_read_alarm

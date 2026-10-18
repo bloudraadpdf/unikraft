@@ -4,3 +4,7 @@ mprotect
 madvise
 mlock
 msync
+
+#if CONFIG_LIBPOSIX_FDIO
+uk_posix_mmap_file
+#endif

@@ -7,6 +7,11 @@ config LIBUKFS
 
 if LIBUKFS
 
+config LIBUKFS_TEST
+	bool "Test filesystem device identities"
+	depends on LIBUKTEST
+	default n
+
 # Hidden, selected by higher levels if required
 
 # Whether permissions are checked at the filesystem level

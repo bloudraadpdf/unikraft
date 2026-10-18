@@ -213,7 +213,7 @@ static void timerfd_release(const struct uk_file *f, int what)
 
 static const struct uk_file_ops timerfd_ops = {
 	.read = timerfd_read,
-	.write = uk_file_anon_noio,
+	.write = uk_file_anon_write,
 	.mem = uk_file_nop_mem,
 	.getstat = uk_file_anon_getstat,
 	.setstat = uk_file_nop_setstat,

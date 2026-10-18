@@ -3,6 +3,7 @@ menuconfig LIBPOSIX_VFS
 	select LIBPOSIX_FD
 	select LIBPOSIX_FD_HEAPOFD
 	select LIBPOSIX_FDIO
+	select LIBPOSIX_PIPE
 	select LIBUKFS
 	select LIBUKATOMIC
 	select LIBUKLOCK

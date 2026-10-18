@@ -44,6 +44,7 @@
 #include <uk/essentials.h>
 
 struct uk_vfs_path;
+struct uk_binfmt_source;
 
 struct elf_prog {
 	struct uk_alloc *a;
@@ -115,13 +116,17 @@ struct elf_prog *elf_load_img(struct uk_alloc *a, void *img_base,
  *   application that is loaded.
  *   The actual c-strings should not be released/modified while the returned
  *   elf_prog is in use.
+ * @param source:
+ *   Borrowed open image, or NULL to open path. The caller retains it
+ *   until this function returns.
  * @return:
  *   On success an elf_prog instance is returned. Such a program
  *   can be prepared to be started with elf_ctx_init(). On errors,
- *   NULL is returned and `errno` is set accordingly.
+ *   an error pointer is returned.
  */
 struct elf_prog *elf_load_vfs(struct uk_alloc *a, const char *path,
-			      const char *progname);
+			      const char *progname,
+			      const struct uk_binfmt_source *source);
 #endif /* CONFIG_HAVE_VFS */
 
 /**

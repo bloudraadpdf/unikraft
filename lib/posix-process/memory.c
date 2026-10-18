@@ -2,6 +2,9 @@
 #include <errno.h>
 #include <uk/arch/limits.h>
 #include <uk/process.h>
+#if CONFIG_LIBPOSIX_FUTEX
+#include <uk/futex.h>
+#endif
 #include <uk/vmem.h>
 #include <uk/vmem/vma_ops.h>
 #if CONFIG_LIBPOSIX_FDIO_VMA_COPY
@@ -16,14 +19,15 @@ struct memory_pages {
 
 static void memory_lock(struct uk_vas *vas)
 {
-	uk_mutex_lock(&pprocess_mutex);
+	UK_ASSERT(!uk_mutex_is_locked(&pprocess_mutex));
 	uk_mutex_lock(&vas->mutation_lock);
+	uk_mutex_lock(&pprocess_mutex);
 }
 
 static void memory_unlock(struct uk_vas *vas)
 {
-	uk_mutex_unlock(&vas->mutation_lock);
 	uk_mutex_unlock(&pprocess_mutex);
+	uk_mutex_unlock(&vas->mutation_lock);
 }
 
 static struct posix_vm_context *memory_current(void)
@@ -41,24 +45,25 @@ static struct posix_vm_context *memory_current(void)
 
 static bool memory_mapping(const struct uk_vma *vma,
 			   const struct posix_vm_context *state,
-			   struct uk_posix_process_mapping *map)
+			   struct uk_posix_vm_mapping *map)
 {
-	*map = (struct uk_posix_process_mapping){
-		.start = vma->start, .end = vma->end, .attr = vma->attr,
-		.private = !!(vma->flags & UK_VMA_FLAG_PRIVATE)
-	};
+	*map = (struct uk_posix_vm_mapping){
+	    .start = vma->start,
+	    .end = vma->end,
+	    .attr = vma->attr,
+	    .private = !!(vma->flags & UK_VMA_FLAG_PRIVATE)};
 	if (vma->owner == state) {
 #if CONFIG_LIBPOSIX_PROCESS_BRK
 		if (vma->start >= (__vaddr_t)state->brk.base &&
 		    vma->end - (__vaddr_t)state->brk.base <=
-		    UK_PAGING_PAGE_ALIGN_UP(state->brk.pos))
+			UK_PAGING_PAGE_ALIGN_UP(state->brk.pos))
 			map->name = "[heap]";
 #endif
 		return true;
 	}
 #if CONFIG_LIBPOSIX_PROCESS_EXECVE
-	if (vma->ops == &uk_vma_stack_ops &&
-	    vma->start < state->stack_top && vma->end > state->stack_base) {
+	if (vma->ops == &uk_vma_stack_ops && vma->start < state->stack_top &&
+	    vma->end > state->stack_base) {
 		map->start = MAX(vma->start, state->stack_base);
 		map->end = MIN(vma->end, state->stack_top);
 		map->private = true;
@@ -69,53 +74,83 @@ static bool memory_mapping(const struct uk_vma *vma,
 	return false;
 }
 
-int uk_posix_process_maps(struct posix_process *process,
-			  struct uk_posix_process_mapping **output,
-			  size_t *count)
+#if CONFIG_LIBPOSIX_FUTEX
+bool uk_posix_futex_mapping_owned(const struct uk_vma *vma,
+				  struct posix_vm_context *state)
+{
+	struct uk_posix_vm_mapping map;
+
+	return state && memory_mapping(vma, state, &map);
+}
+#endif
+
+int uk_posix_vm_maps(struct uk_posix_vm_view *view,
+		     struct uk_posix_vm_mapping **output, size_t *count)
 {
 	struct uk_vas *vas = uk_vas_get_active();
 	struct posix_vm_context *state;
-	struct uk_posix_process_mapping entry, *maps = NULL;
+	struct uk_posix_vm_mapping entry, *maps = NULL, *replacement;
 	const struct uk_vma *vma;
-	size_t length = 0, index = 0;
+	size_t capacity = 0, length = 0, index;
+	const size_t maximum = __SZ_MAX / sizeof(*maps);
 	int rc = 0;
 
-	memory_lock(vas);
-	state = process->vm_context;
-	if (!state)
-		goto out;
-	for (vma = uk_vma_first(vas); vma; vma = uk_vma_next(vma))
-		if (memory_mapping(vma, state, &entry))
-			length++;
-	if (length > __SZ_MAX / sizeof(*maps)) {
-		rc = -ENOMEM;
-		goto out;
-	}
-	if (length) {
-		maps = uk_malloc(uk_alloc_get_default(),
-				 length * sizeof(*maps));
-		if (!maps) {
-			rc = -ENOMEM;
-			goto out;
+	*output = NULL;
+	*count = 0;
+	if (!view)
+		return 0;
+	state = view->context;
+	for (;;) {
+		memory_lock(vas);
+		length = 0;
+		if (!state->users) {
+			memory_unlock(vas);
+			break;
 		}
-	}
-	for (vma = uk_vma_first(vas); vma; vma = uk_vma_next(vma)) {
-		if (!memory_mapping(vma, state, &entry))
+		for (vma = uk_vma_first(vas); vma; vma = uk_vma_next(vma))
+			if (memory_mapping(vma, state, &entry))
+				length++;
+		if (length > capacity) {
+			memory_unlock(vas);
+			if (length > maximum) {
+				rc = -ENOMEM;
+				break;
+			}
+			capacity =
+			    MAX(length, capacity <= maximum / 2 ? 2 * capacity
+								: maximum);
+			replacement = uk_malloc(uk_alloc_get_default(),
+						capacity * sizeof(*maps));
+			if (!replacement) {
+				rc = -ENOMEM;
+				break;
+			}
+			uk_free(uk_alloc_get_default(), maps);
+			maps = replacement;
 			continue;
+		}
+		index = 0;
+		for (vma = uk_vma_first(vas); vma; vma = uk_vma_next(vma)) {
+			if (!memory_mapping(vma, state, &entry))
+				continue;
 #if CONFIG_LIBPOSIX_FDIO_VMA_COPY
-		entry.file = uk_fdio_vma_file(vma, &entry.offset);
+			entry.file = uk_fdio_vma_file(vma, &entry.offset);
 #endif
-		maps[index++] = entry;
+			maps[index++] = entry;
+		}
+		memory_unlock(vas);
+		break;
 	}
-out:
-	memory_unlock(vas);
+	if (rc) {
+		uk_free(uk_alloc_get_default(), maps);
+		return rc;
+	}
 	*output = maps;
-	*count = rc ? 0 : length;
-	return rc;
+	*count = length;
+	return 0;
 }
 
-void uk_posix_process_maps_release(struct uk_posix_process_mapping *maps,
-				   size_t count)
+void uk_posix_vm_maps_release(struct uk_posix_vm_mapping *maps, size_t count)
 {
 #if CONFIG_LIBPOSIX_FDIO_VMA_COPY
 	for (size_t index = 0; index < count; index++)
@@ -130,12 +165,12 @@ void uk_posix_process_maps_release(struct uk_posix_process_mapping *maps,
 static bool memory_is_data(bool private, unsigned long attr)
 {
 	return private && (attr & UK_PAGING_PAGE_ATTR_PROT_WRITE) &&
-		!(attr & UK_PAGING_PAGE_ATTR_PROT_EXEC);
+	       !(attr & UK_PAGING_PAGE_ATTR_PROT_EXEC);
 }
 
 static __sz memory_overlap(const struct uk_vma *vma,
-			   struct posix_vm_context *state,
-			   __vaddr_t start, __vaddr_t end)
+			   struct posix_vm_context *state, __vaddr_t start,
+			   __vaddr_t end)
 {
 	__vaddr_t left = MAX(vma->start, start);
 	__vaddr_t right = MIN(vma->end, end);
@@ -168,8 +203,8 @@ static struct memory_pages memory_usage(struct uk_vas *vas,
 	struct memory_pages pages = memory_ranges(vas, state, 0, __VADDR_MAX);
 
 #if CONFIG_LIBPOSIX_PROCESS_EXECVE
-	pages.address += UK_PAGING_PAGE_ALIGN_UP(state->stack_size) >>
-		UK_PAGING_PAGE_SHIFT;
+	pages.address +=
+	    UK_PAGING_PAGE_ALIGN_UP(state->stack_size) >> UK_PAGING_PAGE_SHIFT;
 #endif
 	return pages;
 }
@@ -187,8 +222,8 @@ static rlim_t memory_data_limit(struct posix_process *process)
 	return limit.rlim_cur ? limit.rlim_cur : limit.rlim_max;
 }
 
-int uk_posix_process_vm_map(struct uk_vas *vas, __vaddr_t *address,
-			    __sz length, unsigned long attr, unsigned long flags,
+int uk_posix_process_vm_map(struct uk_vas *vas, __vaddr_t *address, __sz length,
+			    unsigned long attr, unsigned long flags,
 			    const struct uk_vma_ops *ops, void *args)
 {
 	struct posix_vm_context *state;
@@ -222,10 +257,14 @@ int uk_posix_process_vm_map(struct uk_vas *vas, __vaddr_t *address,
 #if CONFIG_LIBPOSIX_PROCESS_BRK
 	if (state && *address == UK_PAGING_VADDR_ANY &&
 	    (__vaddr_t)state->brk.base <= __VADDR_MAX - PPROCESS_BRK_LEN) {
-		__vaddr_t preferred = (__vaddr_t)state->brk.base + PPROCESS_BRK_LEN;
+		__vaddr_t preferred =
+		    (__vaddr_t)state->brk.base + PPROCESS_BRK_LEN;
 
+		uk_mutex_unlock(&pprocess_mutex);
 		rc = uk_vma_map(vas, &preferred, length, attr,
-				flags | UK_VMA_MAP_SEARCH, NULL, ops, args, state);
+				flags | UK_VMA_MAP_SEARCH, NULL, ops, args,
+				state);
+		uk_mutex_lock(&pprocess_mutex);
 		if (!rc) {
 			*address = preferred;
 			goto out;
@@ -234,24 +273,30 @@ int uk_posix_process_vm_map(struct uk_vas *vas, __vaddr_t *address,
 			goto out;
 	}
 #endif
-	rc = uk_vma_map(vas, address, length, attr, flags, NULL, ops, args, state);
+	uk_mutex_unlock(&pprocess_mutex);
+	rc = uk_vma_map(vas, address, length, attr, flags, NULL, ops, args,
+			state);
+	uk_mutex_lock(&pprocess_mutex);
 out:
 	memory_unlock(vas);
 	return rc;
 }
 
-int uk_posix_process_vm_unmap(struct uk_vas *vas, __vaddr_t address, __sz length)
+int uk_posix_process_vm_unmap(struct uk_vas *vas, __vaddr_t address,
+			      __sz length)
 {
 	int rc;
 
 	memory_lock(vas);
+	uk_mutex_unlock(&pprocess_mutex);
 	rc = uk_vma_unmap(vas, address, length, 0);
+	uk_mutex_lock(&pprocess_mutex);
 	memory_unlock(vas);
 	return rc;
 }
 
 int uk_posix_process_vm_protect(struct uk_vas *vas, __vaddr_t address,
-				__sz length, unsigned long attr)
+				__sz length, unsigned long attr, bool grow_down)
 {
 	struct posix_vm_context *state;
 	struct posix_process *process;
@@ -264,11 +309,42 @@ int uk_posix_process_vm_protect(struct uk_vas *vas, __vaddr_t address,
 		return -ENOMEM;
 	memory_lock(vas);
 	state = memory_current();
+	if (grow_down) {
+		__vaddr_t end = address + length;
+
+		for (vma = uk_vma_first(vas); vma; vma = uk_vma_next(vma)) {
+			if (vma->end <= address)
+				continue;
+#if CONFIG_LIBPOSIX_PROCESS_EXECVE
+			if (state && vma->ops == &uk_vma_stack_ops &&
+			    vma->end <= state->stack_base)
+				continue;
+#endif
+			break;
+		}
+		if (!vma || vma->start >= end) {
+			rc = -ENOMEM;
+			goto out;
+		}
+		rc = -EINVAL;
+#if CONFIG_LIBPOSIX_PROCESS_EXECVE
+		if (!state || vma->ops != &uk_vma_stack_ops ||
+		    !(vma->flags & UK_VMA_STACK_GROWABLE) ||
+		    vma->end <= state->stack_base ||
+		    vma->start >= state->stack_top)
+			goto out;
+		address = vma->start;
+		length = end - address;
+#else
+		goto out;
+#endif
+	}
 	if (state) {
 		process = uk_pprocess_current();
 		usage = memory_usage(vas, state);
 		for (vma = uk_vma_first(vas); vma; vma = uk_vma_next(vma)) {
-			pages = memory_overlap(vma, state, address, address + length);
+			pages = memory_overlap(vma, state, address,
+					       address + length);
 			if (!pages || !(vma->flags & UK_VMA_FLAG_PRIVATE) ||
 			    !memory_is_data(true, attr) ||
 			    memory_is_data(true, vma->attr))
@@ -283,8 +359,10 @@ int uk_posix_process_vm_protect(struct uk_vas *vas, __vaddr_t address,
 			usage.data += pages;
 		}
 	}
+	uk_mutex_unlock(&pprocess_mutex);
 	rc = uk_vma_set_attr(vas, address, length, attr,
 			     UK_VMA_FLAG_STRICT_VMA_CHECK);
+	uk_mutex_lock(&pprocess_mutex);
 out:
 	memory_unlock(vas);
 	return rc;
@@ -296,8 +374,10 @@ int uk_posix_process_vm_advise(struct uk_vas *vas, __vaddr_t address,
 	int rc;
 
 	memory_lock(vas);
+	uk_mutex_unlock(&pprocess_mutex);
 	rc = uk_vma_advise(vas, address, length, advice,
 			   UK_VMA_FLAG_STRICT_VMA_CHECK);
+	uk_mutex_lock(&pprocess_mutex);
 	memory_unlock(vas);
 	return rc;
 }
@@ -307,7 +387,9 @@ int uk_posix_process_vm_sync(struct uk_vas *vas, __vaddr_t address, __sz length)
 	int rc;
 
 	memory_lock(vas);
+	uk_mutex_unlock(&pprocess_mutex);
 	rc = uk_vma_sync(vas, address, length);
+	uk_mutex_lock(&pprocess_mutex);
 	memory_unlock(vas);
 	return rc;
 }
@@ -356,9 +438,11 @@ int pprocess_memory_brk(struct posix_vm_context *state, __sz position)
 			goto out;
 		}
 		address = (__vaddr_t)state->brk.base + old_size;
+		uk_mutex_unlock(&pprocess_mutex);
 		rc = uk_vma_map(vas, &address, new_size - old_size,
 				UK_PAGING_PAGE_ATTR_PROT_RW, UK_VMA_MAP_PRIVATE,
 				"brk", &uk_vma_anon_ops, NULL, state);
+		uk_mutex_lock(&pprocess_mutex);
 	} else if (new_size < old_size) {
 		address = (__vaddr_t)state->brk.base + new_size;
 		end = (__vaddr_t)state->brk.base + old_size;
@@ -370,7 +454,9 @@ int pprocess_memory_brk(struct posix_vm_context *state, __sz position)
 				goto out;
 			}
 		}
+		uk_mutex_unlock(&pprocess_mutex);
 		rc = uk_vma_unmap(vas, address, old_size - new_size, 0);
+		uk_mutex_lock(&pprocess_mutex);
 	}
 out:
 	memory_unlock(vas);
@@ -387,16 +473,19 @@ int pprocess_stack_executable(__vaddr_t address)
 
 	memory_lock(vas);
 	vma = uk_vma_find(vas, address);
-	if (vma && vma->ops == &uk_vma_stack_ops)
+	if (vma && vma->ops == &uk_vma_stack_ops) {
+		uk_mutex_unlock(&pprocess_mutex);
 		rc = uk_vma_set_attr(vas, vma->start, vma->end - vma->start,
 				     UK_PAGING_PAGE_ATTR_PROT_RWX,
 				     UK_VMA_FLAG_STRICT_VMA_CHECK);
+		uk_mutex_lock(&pprocess_mutex);
+	}
 	memory_unlock(vas);
 	return rc;
 }
 
-int pprocess_stack_trim(struct posix_vm_context *state,
-			__vaddr_t *bottom, __vaddr_t top, __vaddr_t sp)
+int pprocess_stack_trim(struct posix_vm_context *state, __vaddr_t *bottom,
+			__vaddr_t top, __vaddr_t sp)
 {
 #if CONFIG_LIBUKALLOCSTACK_PAGE_GUARDS
 	struct uk_vas *vas = uk_vas_get_active();
@@ -430,6 +519,7 @@ int pprocess_memory_stack(__vaddr_t address)
 	struct memory_pages usage;
 	const struct uk_vma *vma;
 	__vaddr_t bottom = UK_PAGING_PAGE_ALIGN_DOWN(address);
+	__vaddr_t start, end;
 	__sz length, pages;
 	int rc = -EFAULT;
 
@@ -438,8 +528,8 @@ int pprocess_memory_stack(__vaddr_t address)
 	if (!state || !state->stack_base || bottom >= state->stack_top)
 		goto out;
 	vma = uk_vma_find(vas, state->stack_base);
-	if (!vma || vma->ops != &uk_vma_stack_ops ||
-	    bottom >= vma->start + UK_VMA_STACK_BOTTOM_GUARD_SIZE)
+	if (uk_vma_stack_bounds(vma, &start, &end) ||
+	    bottom >= start + UK_VMA_STACK_BOTTOM_GUARD_SIZE)
 		goto out;
 	length = state->stack_top - bottom;
 	process = uk_pprocess_current();
@@ -450,11 +540,16 @@ int pprocess_memory_stack(__vaddr_t address)
 	if (!memory_fits(usage.address, pages,
 			 process->limits[RLIMIT_AS].rlim_cur))
 		goto out;
+	uk_mutex_unlock(&pprocess_mutex);
 	rc = uk_vma_stack_resize(vas, state->stack_base, bottom);
+	uk_mutex_lock(&pprocess_mutex);
 	if (rc)
 		goto out;
 	state->stack_size = length;
-	rc = uk_vma_populate_page(vas, address);
+	state->stack_base = bottom;
+	uk_mutex_unlock(&pprocess_mutex);
+	rc = uk_vma_populate_page(vas, address, UK_VMA_FAULT_WRITE);
+	uk_mutex_lock(&pprocess_mutex);
 out:
 	memory_unlock(vas);
 	return rc;

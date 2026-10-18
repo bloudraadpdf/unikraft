@@ -81,13 +81,13 @@ void _uk_waitq_block_until(struct uk_thread *thread, __snsec deadline)
 /**
  * INTERNAL. Acquire lock on `wq`, using `flags` to store irqflags.
  */
-#define _uk_waitq_lock(wq, flags) \
+#define _uk_waitq_lock(wq, flags)					\
 	ukplat_spin_lock_irqsave(&((wq)->lock), (flags))
 
 /**
  * INTERNAL. Release lock on `wq`, restoring irqflags from `flags`.
  */
-#define _uk_waitq_unlock(wq, flags) \
+#define _uk_waitq_unlock(wq, flags)					\
 	ukplat_spin_unlock_irqrestore(&((wq)->lock), (flags))
 
 /**
@@ -107,10 +107,12 @@ void _uk_waitq_block_until(struct uk_thread *thread, __snsec deadline)
 #define _uk_waitq_wait_until(wq, condition, deadline, clock_expr,	\
 			     lock_fn, unlock_fn, lock)			\
 ({									\
+	__typeof__(lock) _uk_waitq_lock_arg = (lock);			\
+	__nsec _uk_waitq_deadline_arg = (deadline);			\
 	int _uk_waitq_timedout = 0;					\
 									\
 	while (unlikely(!(condition))) {				\
-		struct uk_thread *_uk_waitq_current = uk_thread_current();\
+		struct uk_thread *_uk_waitq_current = uk_thread_current(); \
 		unsigned long _uk_waitq_flags;				\
 									\
 		_uk_waitq_lock((wq), _uk_waitq_flags);			\
@@ -122,21 +124,23 @@ void _uk_waitq_block_until(struct uk_thread *thread, __snsec deadline)
 		/* Need to wait; add self to waitqueue & block */	\
 		for (;;) {						\
 			_uk_waitq_add((wq), _uk_waitq_current);		\
-			_uk_waitq_block_until(_uk_waitq_current, (deadline));\
+			_uk_waitq_block_until(_uk_waitq_current,	\
+					      (_uk_waitq_deadline_arg)); \
 			_uk_waitq_unlock((wq), _uk_waitq_flags);	\
-			if ((lock))					\
-				unlock_fn((lock));			\
+			if ((_uk_waitq_lock_arg))			\
+				unlock_fn((_uk_waitq_lock_arg));	\
 			uk_sched_yield();				\
 			/* Awoken */					\
 			_uk_waitq_lock((wq), _uk_waitq_flags);		\
 			_uk_waitq_remove(_uk_waitq_current);		\
 			_uk_waitq_unlock((wq), _uk_waitq_flags);	\
-			if ((lock))					\
-				lock_fn((lock));			\
+			if ((_uk_waitq_lock_arg))			\
+				lock_fn((_uk_waitq_lock_arg));		\
 			_uk_waitq_lock((wq), _uk_waitq_flags);		\
 			if ((condition))				\
 				break;					\
-			if ((deadline) && ((clock_expr) >= (deadline))) {\
+			if ((_uk_waitq_deadline_arg) &&			\
+			    ((clock_expr) >= (_uk_waitq_deadline_arg))) { \
 				_uk_waitq_timedout = 1;			\
 				break;					\
 			}						\
@@ -160,9 +164,11 @@ void _uk_waitq_block_until(struct uk_thread *thread, __snsec deadline)
  * If `lock` evaluates true, it will be released before sleeping with
  * `unlock_fn` and re-acquired after wakeup with `lock_fn`.
  */
-#define _uk_waitq_wait(wq, condition, deadline, clock_expr,\
+#define _uk_waitq_wait(wq, condition, deadline, clock_expr,		\
 			     lock_fn, unlock_fn, lock)			\
 ({									\
+	__typeof__(lock) _uk_waitq_lock_arg = (lock);			\
+	__nsec _uk_waitq_deadline_arg = (deadline);			\
 	struct uk_thread *_uk_waitq_current = uk_thread_current();	\
 	int _uk_waitq_timedout = 0;					\
 	unsigned long _uk_waitq_flags;					\
@@ -171,32 +177,35 @@ void _uk_waitq_block_until(struct uk_thread *thread, __snsec deadline)
 	if (condition) {						\
 		_uk_waitq_unlock((wq), _uk_waitq_flags);		\
 	} else {							\
-		_uk_waitq_add((wq), _uk_waitq_current);				\
-		_uk_waitq_block_until(_uk_waitq_current, (deadline));		\
-		_uk_waitq_unlock((wq), _uk_waitq_flags);			\
-		if ((lock))							\
-			unlock_fn((lock));					\
-		uk_sched_yield();						\
-		/* Awoken */							\
-		_uk_waitq_lock((wq), _uk_waitq_flags);				\
-		_uk_waitq_remove(_uk_waitq_current);				\
-		_uk_waitq_unlock((wq), _uk_waitq_flags);			\
-		if ((lock))							\
-			lock_fn((lock));					\
+		_uk_waitq_add((wq), _uk_waitq_current);			\
+		_uk_waitq_block_until(_uk_waitq_current,		\
+				      (_uk_waitq_deadline_arg));	\
+		_uk_waitq_unlock((wq), _uk_waitq_flags);		\
+		if ((_uk_waitq_lock_arg))				\
+			unlock_fn((_uk_waitq_lock_arg));		\
+		uk_sched_yield();					\
+		/* Awoken */						\
+		_uk_waitq_lock((wq), _uk_waitq_flags);			\
+		_uk_waitq_remove(_uk_waitq_current);			\
+		_uk_waitq_unlock((wq), _uk_waitq_flags);		\
+		if ((_uk_waitq_lock_arg))				\
+			lock_fn((_uk_waitq_lock_arg));			\
 	}								\
-	if ((deadline) && ((clock_expr) >= (deadline)))			\
+	if ((_uk_waitq_deadline_arg) &&					\
+	    ((clock_expr) >= (_uk_waitq_deadline_arg)))			\
 		_uk_waitq_timedout = 1;					\
 									\
 	_uk_waitq_timedout;						\
 })
 
 /* The condition must not block. */
-#define uk_waitq_wait_deadline_unless_locked(wq, condition, deadline, \
-					     lock_fn, unlock_fn, lock) \
-	_uk_waitq_wait((wq), (condition), (deadline), \
-			     ukplat_monotonic_clock(), lock_fn, unlock_fn, (lock))
+#define uk_waitq_wait_deadline_unless_locked(wq, condition, deadline,	\
+					     lock_fn, unlock_fn, lock)	\
+	_uk_waitq_wait((wq), (condition), (deadline),			\
+			     ukplat_monotonic_clock(),			\
+			     lock_fn, unlock_fn, (lock))
 
-#define uk_waitq_wait_locked(wq, lock_fn, unlock_fn, lock) \
+#define uk_waitq_wait_locked(wq, lock_fn, unlock_fn, lock)		\
 	_uk_waitq_wait((wq), 0, 0, 0, lock_fn, unlock_fn, (lock))
 
 #define uk_waitq_wait_deadline_locked(wq, deadline, lock_fn, unlock_fn, lock) \
@@ -310,10 +319,10 @@ do {									\
 	_uk_waitq_unlock((wq), _uk_waitq_flags);			\
 } while (0)
 
-#define uk_waitq_wake_up_if(wq, ticket, condition) \
+#define uk_waitq_wake_up_if(wq, ticket, condition)			\
 	_uk_waitq_wake_up_if_then((wq), (ticket), (condition), (void)0)
 
-#define uk_waitq_wake_up_one_if(wq, ticket, condition) \
+#define uk_waitq_wake_up_one_if(wq, ticket, condition)			\
 	_uk_waitq_wake_up_if_then((wq), (ticket), (condition), break)
 
 #ifdef __cplusplus

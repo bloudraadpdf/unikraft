@@ -5,6 +5,7 @@
  */
 
 #include <uk/process.h>
+#include <uk/credentials.h>
 #include <uk/refcount.h>
 #include <string.h>
 #include <uk/plat/time.h>
@@ -14,6 +15,7 @@
 #include "sigset.h"
 #include "siginfo.h"
 #include "signal.h"
+#include "timer.h"
 
 /* Check permissions to signal target process.
  *
@@ -51,9 +53,8 @@ static void signal_notify_thread(struct posix_thread *thread)
  * Setting pthread to NULL signifies that the signal
  * targets the process.
  */
-static int pprocess_signal_enqueue(struct posix_process *pproc,
-				   struct posix_thread *pthread,
-				   struct uk_signal *sig)
+int pprocess_signal_enqueue(struct posix_process *pproc,
+			    struct posix_thread *pthread, struct uk_signal *sig)
 {
 	struct uk_signal_queue *queue;
 	struct posix_thread *thread, *next;
@@ -63,14 +64,18 @@ static int pprocess_signal_enqueue(struct posix_process *pproc,
 	UK_ASSERT(!pthread || pthread->process == pproc);
 	queue = pthread ? &pthread->signal->sigqueue : &pproc->signal->sigqueue;
 	uk_mutex_lock(&pprocess_mutex);
-	if (signum < UK_SIGNAL_RTMIN && IS_PENDING(*queue, signum)) {
-		uk_signal_free(pthread ? pthread->_a : pproc->_a, sig);
-	} else if (pproc->signal->queued_count >= pproc->signal->queued_max) {
+	if ((!sig->ops || sig->ops->coalesce_standard) &&
+	    signum < UK_SIGNAL_RTMIN && IS_PENDING(*queue, signum)) {
+		uk_signal_free(sig);
+	} else if ((!sig->ops || !sig->ops->bypass_limit) &&
+		   pprocess_signal_quota_full_locked(pproc->signal)) {
 		rc = -EAGAIN;
 	} else {
 		uk_list_add_tail(&sig->list_head, &queue->list_head[signum]);
 		SET_PENDING(*queue, signum);
 		pproc->signal->queued_count++;
+		if (sig->ops && sig->ops->reserved_quota)
+			pproc->signal->reserved_pending++;
 	}
 	if (!rc) {
 		if (pthread) {
@@ -84,41 +89,84 @@ static int pprocess_signal_enqueue(struct posix_process *pproc,
 	return rc;
 }
 
-static struct uk_signal *signal_dequeue_locked(struct posix_process *pproc,
-					  struct posix_thread *pthread,
-					  int signum)
+static struct uk_signal_queue *
+signal_queue_locked(struct posix_process *process, struct posix_thread *thread)
 {
-	struct uk_signal_queue *sigqueue;
-	struct uk_signal *sig;
+	UK_ASSERT(uk_mutex_is_locked(&pprocess_mutex));
+	UK_ASSERT(process && process->signal);
+	UK_ASSERT(!thread || (thread->process == process && thread->signal));
+	return thread ? &thread->signal->sigqueue : &process->signal->sigqueue;
+}
 
-	UK_ASSERT(pproc);
+static void signal_remove_locked(struct posix_process *process,
+				 struct uk_signal_queue *queue,
+				 struct uk_signal *signal,
+				 enum uk_signal_dequeue_reason reason)
+{
+	int signum = signal->siginfo.si_signo;
 
-	if (pthread) {
-		UK_ASSERT(pthread->process == pproc);
-		sigqueue = &pthread->signal->sigqueue;
-	} else {
-		sigqueue = &pproc->signal->sigqueue;
+	UK_ASSERT(uk_mutex_is_locked(&pprocess_mutex));
+	UK_ASSERT(process->signal->queued_count);
+	uk_list_del(&signal->list_head);
+	if (uk_list_empty(&queue->list_head[signum]))
+		RESET_PENDING(*queue, signum);
+	process->signal->queued_count--;
+	if (signal->ops && signal->ops->reserved_quota) {
+		UK_ASSERT(process->signal->reserved_pending);
+		process->signal->reserved_pending--;
 	}
+	if (signal->ops && signal->ops->dequeue_locked)
+		signal->ops->dequeue_locked(signal, reason);
+	if (reason == UK_SIGNAL_CONSUME)
+		pprocess_timers_signal_consumed_locked(process, signum);
+}
 
-	sig = uk_list_first_entry_or_null(&sigqueue->list_head[signum],
-					  struct uk_signal,
-					  list_head);
-	if (!sig)
-		return sig;
+static int signal_submit(struct posix_process *process,
+			 struct posix_thread *thread, struct uk_signal *signal)
+{
+	int rc = pprocess_signal_enqueue(process, thread, signal);
 
-	uk_list_del(&sig->list_head);
-
-	/* Reset pending bit if the signal queue is empty */
-	if (uk_list_empty(&sigqueue->list_head[signum])) {
-		if (pthread)
-			RESET_PENDING(pthread->signal->sigqueue, signum);
-		else
-			RESET_PENDING(pproc->signal->sigqueue, signum);
+	if (unlikely(rc)) {
+		uk_pr_warn("Could not queue signal\n");
+		uk_signal_free(signal);
 	}
+	return rc;
+}
 
-	pproc->signal->queued_count--;
+static struct uk_signal *
+signal_dequeue_locked(struct posix_process *process,
+		      struct posix_thread *thread, int signum,
+		      enum uk_signal_dequeue_reason reason)
+{
+	struct uk_signal_queue *queue = signal_queue_locked(process, thread);
+	struct uk_signal *signal =
+		uk_list_first_entry_or_null(&queue->list_head[signum],
+					    struct uk_signal, list_head);
 
-	return sig;
+	if (signal)
+		signal_remove_locked(process, queue, signal, reason);
+	return signal;
+}
+
+bool pprocess_signal_withdraw_locked(struct posix_process *process,
+				     struct posix_thread *thread,
+				     struct uk_signal *signal,
+				     struct pprocess_retired *retired)
+{
+	struct uk_signal_queue *queue = signal_queue_locked(process, thread);
+	struct uk_signal *pending;
+	int signum = signal->siginfo.si_signo;
+
+	UK_ASSERT(IS_VALID(signum));
+	uk_list_for_each_entry(pending, &queue->list_head[signum], list_head) {
+		if (pending != signal)
+			continue;
+		signal_remove_locked(process, queue, signal, UK_SIGNAL_DISCARD);
+		signal->retired_next = retired->signals;
+		retired->signals = signal;
+		return true;
+	}
+	return false;
 }
 
 struct uk_signal *pprocess_signal_dequeue(struct posix_process *pproc,
@@ -128,7 +176,7 @@ struct uk_signal *pprocess_signal_dequeue(struct posix_process *pproc,
 	struct uk_signal *sig;
 
 	uk_mutex_lock(&pprocess_mutex);
-	sig = signal_dequeue_locked(pproc, pthread, signum);
+	sig = signal_dequeue_locked(pproc, pthread, signum, UK_SIGNAL_CONSUME);
 	uk_mutex_unlock(&pprocess_mutex);
 	return sig;
 }
@@ -147,12 +195,13 @@ int pprocess_signal_take_locked(struct posix_thread *thread,
 			if (set ? !uk_sigismember(set, signum) :
 			    !pprocess_signal_is_deliverable(thread, signum))
 				continue;
-			sig = signal_dequeue_locked(proc, target, signum);
+			sig = signal_dequeue_locked(proc, target, signum,
+						    UK_SIGNAL_CONSUME);
 			if (!sig)
 				continue;
 			if (info)
 				*info = sig->siginfo;
-			uk_signal_free(target ? thread->_a : proc->_a, sig);
+			uk_signal_free(sig);
 			return signum;
 		}
 	}
@@ -188,7 +237,7 @@ int uk_posix_signal_wait_init(struct uk_posix_signal_wait *wait,
 	return 0;
 }
 
-int uk_posix_signal_wait_check(struct uk_posix_signal_wait *wait)
+int pprocess_signal_wait_check_locked(struct uk_posix_signal_wait *wait)
 {
 	struct uk_signal_tdesc *td;
 	int rc = 0;
@@ -196,7 +245,6 @@ int uk_posix_signal_wait_check(struct uk_posix_signal_wait *wait)
 	if (!wait->thread)
 		return 0;
 	td = wait->thread->signal;
-	uk_mutex_lock(&pprocess_mutex);
 	uk_store_n(&wait->interrupted, 0);
 	if (pprocess_thread_exit_requested(wait->thread)) {
 		rc = -EINTR;
@@ -204,6 +252,17 @@ int uk_posix_signal_wait_check(struct uk_posix_signal_wait *wait)
 		td->wait_pending = true;
 		rc = -EINTR;
 	}
+	return rc;
+}
+
+int uk_posix_signal_wait_check(struct uk_posix_signal_wait *wait)
+{
+	int rc;
+
+	if (!wait->thread)
+		return 0;
+	uk_mutex_lock(&pprocess_mutex);
+	rc = pprocess_signal_wait_check_locked(wait);
 	uk_mutex_unlock(&pprocess_mutex);
 	return rc;
 }
@@ -265,21 +324,25 @@ int pprocess_signal_wait_locked(struct posix_thread *thread,
 	return rc;
 }
 
-void pprocess_signal_clear_pending(struct posix_process *proc, int signum)
+void pprocess_signal_clear_pending(struct posix_process *proc, int signum,
+				   struct pprocess_retired *retired)
 {
-	struct posix_thread *thread, *threadn;
+	struct posix_thread *thread, *next;
 	struct uk_signal *sig;
 
-	if (IS_PENDING(proc->signal->sigqueue, signum)) {
-		while ((sig = pprocess_signal_dequeue(proc, NULL, signum)))
-			uk_signal_free(proc->_a, sig);
+	UK_ASSERT(uk_mutex_is_locked(&pprocess_mutex));
+	while ((sig = signal_dequeue_locked(proc, NULL, signum,
+					    UK_SIGNAL_DISCARD))) {
+		sig->retired_next = retired->signals;
+		retired->signals = sig;
 	}
-
-	uk_pprocess_foreach_pthread(proc, thread, threadn) {
-		if (!IS_PENDING(thread->signal->sigqueue, signum))
-			continue;
-		while ((sig = pprocess_signal_dequeue(proc, thread, signum)))
-			uk_signal_free(thread->_a, sig);
+	uk_pprocess_foreach_pthread(proc, thread, next)
+	{
+		while ((sig = signal_dequeue_locked(proc, thread, signum,
+						    UK_SIGNAL_DISCARD))) {
+			sig->retired_next = retired->signals;
+			retired->signals = sig;
+		}
 	}
 }
 
@@ -311,8 +374,10 @@ void pprocess_signal_exec(struct uk_sigaction *actions)
 	struct posix_process *process = thread->process;
 	struct uk_sigaction *previous;
 	int signum;
+	struct pprocess_retired retired = {0};
 
 	uk_mutex_lock(&pprocess_mutex);
+	pprocess_timers_stop_locked(process, false, &retired);
 	previous = process->signal->sigaction;
 	pprocess_signal_foreach(signum) {
 		pprocess_signal_sigaction_clear(&actions->ks[signum]);
@@ -321,8 +386,9 @@ void pprocess_signal_exec(struct uk_sigaction *actions)
 	}
 	process->signal->sigaction = actions;
 	thread->signal->altstack = (stack_t){ .ss_flags = SS_DISABLE };
-	pprocess_signal_sigaction_release(previous);
 	uk_mutex_unlock(&pprocess_mutex);
+	pprocess_signal_sigaction_release(previous);
+	pprocess_retired_release(&retired);
 }
 #endif
 
@@ -348,13 +414,9 @@ int pprocess_signal_send(struct posix_process *proc, int signum,
 	else
 		set_siginfo_kill(signum, &sig->siginfo);
 
-	rc = pprocess_signal_enqueue(proc, NULL, sig);
-	if (unlikely(rc)) {
-		/* issue a warning as this may be temporary */
-		uk_pr_warn("Could not queue signal\n");
-		uk_signal_free(proc->_a, sig);
+	rc = signal_submit(proc, NULL, sig);
+	if (unlikely(rc))
 		return -EAGAIN;
-	}
 
 #if CONFIG_LIBPOSIX_PROCESS_SIGNALFD
 	pprocess_signal_files_notify(proc, signum);
@@ -473,13 +535,9 @@ static int signal_thread_locked(int tgid, int tid, int signum,
 		sig->siginfo.si_code = SI_TKILL;
 	}
 
-	rc = pprocess_signal_enqueue(pproc, pthread, sig);
-	if (unlikely(rc)) {
-		/* issue a warning as this may be temporary */
-		uk_pr_warn("Could not queue signal\n");
-		uk_signal_free(pthread->_a, sig);
+	rc = signal_submit(pproc, pthread, sig);
+	if (unlikely(rc))
 		return rc;
-	}
 
 #if CONFIG_LIBPOSIX_PROCESS_SIGNALFD
 	pthread_signal_files_notify(pproc, pthread, signum);
@@ -498,17 +556,38 @@ int pprocess_signal_thread_do(int tgid, int tid, int signum, siginfo_t *siginfo)
 	return rc;
 }
 
+int uk_posix_signal_current(int signum)
+{
+	struct pu_credentials *credentials;
+	siginfo_t info = { .si_signo = signum, .si_code = SI_USER };
+
+	if (!IS_VALID(signum))
+		return -EINVAL;
+	if (!uk_pthread_current())
+		return -ESRCH;
+	credentials = pu_credentials_acquire(uk_thread_current(), NULL);
+	if (!credentials)
+		return -ENOMEM;
+	info.si_uid = pu_credentials_identity(credentials)->real_uid;
+	pu_credentials_release(credentials);
+	info.si_pid = uk_sys_getpid();
+	return pprocess_signal_thread_do(0, uk_sys_gettid(), signum, &info);
+}
+
 int pprocess_signal_pdesc_alloc(struct posix_process *process)
 {
 	UK_ASSERT(process);
 
-	process->signal = uk_malloc(process->_a,
-				    sizeof(struct uk_signal_pdesc));
+	UK_ASSERT(!process->signal);
+	process->signal =
+		uk_zalloc(process->_a, sizeof(struct uk_signal_pdesc));
 	if (unlikely(!process->signal)) {
 		uk_pr_err("Could not allocate memory\n");
 		return -ENOMEM;
 	}
 
+	process->signal->allocator = process->_a;
+	uk_refcount_init(&process->signal->references, 1);
 	return 0;
 }
 
@@ -516,6 +595,7 @@ int pprocess_signal_tdesc_alloc(struct posix_thread *thread)
 {
 	UK_ASSERT(thread);
 
+	UK_ASSERT(!thread->signal);
 	thread->signal = uk_malloc(thread->_a, sizeof(struct uk_signal_tdesc));
 	if (unlikely(!thread->signal)) {
 		uk_pr_err("Could not allocate memory\n");
@@ -537,12 +617,19 @@ int pprocess_signal_pdesc_init(struct posix_process *process)
 
 	pd->queued_count = 0;
 	pd->queued_max = _POSIX_SIGQUEUE_MAX;
+	pd->reserved_count = 0;
+	pd->reserved_pending = 0;
+	pprocess_timers_init(process);
 
 	uk_sigemptyset(&pd->sigqueue.pending);
 
 	pprocess_signal_foreach(signum)
 		UK_INIT_LIST_HEAD(&pd->sigqueue.list_head[signum]);
 
+#if CONFIG_LIBPOSIX_PROCESS_SIGNALFD
+	uk_signal_files_ctx_init(&pd->sigfiles_ctx);
+#endif
+	UK_ASSERT(!pd->sigaction);
 	pd->sigaction = pprocess_signal_sigaction_alloc(process->_a);
 	if (unlikely(!pd->sigaction))
 		return -ENOMEM;
@@ -550,14 +637,10 @@ int pprocess_signal_pdesc_init(struct posix_process *process)
 	pprocess_signal_foreach(signum)
 		pprocess_signal_sigaction_clear(KERN_SIGACTION(process, signum));
 
-#if CONFIG_LIBPOSIX_PROCESS_SIGNALFD
-	uk_signal_files_ctx_init(&pd->sigfiles_ctx);
-#endif /* CONFIG_LIBPOSIX_PROCESS_SIGNALFD */
-
 	return 0;
 }
 
-int pprocess_signal_tdesc_init(struct posix_thread *thread)
+void pprocess_signal_tdesc_init(struct posix_thread *thread)
 {
 	struct uk_signal_tdesc *td;
 	int signum;
@@ -582,47 +665,112 @@ int pprocess_signal_tdesc_init(struct posix_thread *thread)
 		UK_INIT_LIST_HEAD(&td->sigqueue.list_head[signum]);
 
 	uk_waitq_init(&td->waitq);
-
-	return 0;
 }
 
-void pprocess_signal_pdesc_free(struct posix_process *process)
+void pprocess_signal_pdesc_detach_locked(struct posix_process *process,
+					 struct pprocess_retired *retired)
 {
 	struct uk_signal *sig;
 	int signum;
 
-	UK_ASSERT(process);
-	UK_ASSERT(process->signal);
-
+	UK_ASSERT(uk_mutex_is_locked(&pprocess_mutex));
+	if (!process->signal)
+		return;
+	pprocess_timers_stop_locked(process, true, retired);
 	pprocess_signal_foreach(signum)
-		while ((sig = pprocess_signal_dequeue(process, NULL, signum)))
-			uk_signal_free(process->_a, sig);
-
+	{
+		while ((sig = signal_dequeue_locked(process, NULL, signum,
+						    UK_SIGNAL_DISCARD))) {
+			sig->retired_next = retired->signals;
+			retired->signals = sig;
+		}
+	}
 #if CONFIG_LIBPOSIX_PROCESS_SIGNALFD
-	uk_mutex_lock(&pprocess_mutex);
 	uk_signal_files_ctx_clear(&process->signal->sigfiles_ctx);
-	uk_mutex_unlock(&pprocess_mutex);
 #endif
-	pprocess_signal_sigaction_release(process->signal->sigaction);
-
-	uk_free(process->_a, process->signal);
 }
 
-void pprocess_signal_tdesc_free(struct posix_thread *thread)
+void pprocess_signal_tdesc_detach_locked(struct posix_thread *thread,
+					 struct pprocess_retired *retired)
 {
-	struct posix_process *pproc;
 	struct uk_signal *sig;
 	int signum;
 
-	UK_ASSERT(thread);
-	UK_ASSERT(thread->signal);
-
-	pproc = tid2pprocess(thread->tid);
-	UK_ASSERT(pproc);
-
+	UK_ASSERT(uk_mutex_is_locked(&pprocess_mutex));
+	if (!thread->signal)
+		return;
+	UK_ASSERT(thread->process);
 	pprocess_signal_foreach(signum)
-		while ((sig = pprocess_signal_dequeue(pproc, thread, signum)))
-			uk_signal_free(thread->_a, sig);
+	{
+		while ((sig = signal_dequeue_locked(thread->process, thread,
+						    signum,
+						    UK_SIGNAL_DISCARD))) {
+			sig->retired_next = retired->signals;
+			retired->signals = sig;
+		}
+	}
+}
 
-	uk_signal_free(thread->process->_a, thread->signal);
+static void signal_queue_assert_empty(struct uk_signal_queue *queue)
+{
+	int signum;
+
+	UK_ASSERT(uk_sigisempty(&queue->pending));
+	pprocess_signal_foreach(signum)
+		UK_ASSERT(uk_list_empty(&queue->list_head[signum]));
+}
+
+void pprocess_signal_pdesc_acquire(struct uk_signal_pdesc *descriptor)
+{
+	uk_refcount_acquire(&descriptor->references);
+}
+
+void pprocess_signal_pdesc_put(struct uk_signal_pdesc *descriptor)
+{
+	UK_ASSERT(!uk_mutex_is_locked(&pprocess_mutex));
+	if (!uk_refcount_release(&descriptor->references))
+		return;
+	signal_queue_assert_empty(&descriptor->sigqueue);
+	UK_ASSERT(!descriptor->queued_count);
+	UK_ASSERT(!descriptor->reserved_count && !descriptor->reserved_pending);
+	UK_ASSERT(!descriptor->timers.attached &&
+		  !descriptor->timers.real.loaned);
+	UK_ASSERT(uk_list_empty(&descriptor->timers.active));
+	UK_ASSERT(uk_list_empty(&descriptor->timers.retired));
+#if CONFIG_LIBPOSIX_PROCESS_SIGNALFD
+	UK_ASSERT(uk_list_empty(&descriptor->sigfiles_ctx.sigfiles));
+#if CONFIG_LIBUKFILE_CHAINUPDATE
+	UK_ASSERT(uk_list_empty(&descriptor->sigfiles_ctx.polls));
+#endif
+#endif
+	if (descriptor->sigaction)
+		pprocess_signal_sigaction_release(descriptor->sigaction);
+	uk_free(descriptor->allocator, descriptor);
+}
+
+void pprocess_signal_pdesc_destroy(struct posix_process *process)
+{
+	struct uk_signal_pdesc *descriptor = process->signal;
+
+	UK_ASSERT(!uk_mutex_is_locked(&pprocess_mutex));
+	process->signal = NULL;
+	if (descriptor)
+		pprocess_signal_pdesc_put(descriptor);
+}
+
+void pprocess_signal_tdesc_reset_locked(struct posix_thread *thread,
+					struct pprocess_retired *retired)
+{
+	pprocess_signal_tdesc_detach_locked(thread, retired);
+	pprocess_signal_tdesc_init(thread);
+}
+
+void pprocess_signal_tdesc_destroy(struct posix_thread *thread)
+{
+	UK_ASSERT(!uk_mutex_is_locked(&pprocess_mutex));
+	if (!thread->signal)
+		return;
+	signal_queue_assert_empty(&thread->signal->sigqueue);
+	uk_free(thread->_a, thread->signal);
+	thread->signal = NULL;
 }

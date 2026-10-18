@@ -21,6 +21,8 @@ ifeq ($(CHECKSUM_SEED),1)
 endif
 	$(BUILD)/extents $(BUILD)/extents.ext4 create
 	e2fsck -fn $(BUILD)/extents.ext4
+	$(BUILD)/extents $(BUILD)/extents.ext4 range-writeback
+	e2fsck -fn $(BUILD)/extents.ext4
 	$(BUILD)/extents $(BUILD)/extents.ext4 truncate
 	e2fsck -fn $(BUILD)/extents.ext4
 	$(BUILD)/extents $(BUILD)/extents.ext4 clear

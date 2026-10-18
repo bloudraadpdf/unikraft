@@ -5,6 +5,7 @@
 #include <uk/syscall.h>
 #include <uk/sched.h>
 #include "process.h"
+#include "scheduling.h"
 
 #define SCHED_OTHER 0
 #define SCHED_RR 2
@@ -24,6 +25,9 @@ static int schedule_update(pid_t tid, int policy, const struct sched_param *para
 {
 	struct posix_thread *thread;
 	struct sched_param value;
+#if CONFIG_LIBPOSIX_USER
+	struct pu_credentials *caller = NULL, *credentials = NULL;
+#endif
 	int result = 0;
 
 	if (tid < 0)
@@ -48,11 +52,35 @@ static int schedule_update(pid_t tid, int policy, const struct sched_param *para
 		result = -EINVAL;
 		goto out;
 	}
+#if CONFIG_LIBPOSIX_USER
+	result = pprocess_schedule_authorize(thread->thread, &caller,
+					     &credentials);
+	if (result)
+		goto out;
+	if (policy == SCHED_RR &&
+	    !(pu_credentials_privileges(caller)->effective & PU_CAP_SYS_NICE)) {
+		rlim_t limit = thread->process->limits[RLIMIT_RTPRIO].rlim_cur;
+		int previous = thread->thread->sched_policy == SCHED_RR ?
+			thread->thread->sched_priority : 0;
+
+		if (value.sched_priority > previous &&
+		    (rlim_t)value.sched_priority > limit) {
+			result = -EPERM;
+			goto out;
+		}
+	}
+#endif
 	thread->thread->sched_policy = policy;
 	thread->thread->sched_priority = value.sched_priority;
 	pprocess_pi_update(thread->thread);
 out:
 	uk_mutex_unlock(&pprocess_mutex);
+#if CONFIG_LIBPOSIX_USER
+	if (credentials)
+		pu_credentials_release(credentials);
+	if (caller)
+		pu_credentials_release(caller);
+#endif
 	if (!result)
 		uk_sched_yield();
 	return result;

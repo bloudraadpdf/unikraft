@@ -39,6 +39,7 @@ uk_sys_mount
 uk_sys_umount
 # Open
 uk_sys_openat
+uk_sys_openat2
 
 # libc API
 # FS-wide ops
@@ -124,3 +125,8 @@ uk_posix_vfs_path_file
 uk_posix_vfs_ofile_name
 
 uk_posix_vfs_socket_create
+
+uk_posix_vfs_open_validate
+uk_posix_vfs_open_how
+
+uk_posix_vfs_ofile_path

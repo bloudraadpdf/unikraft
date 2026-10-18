@@ -347,7 +347,7 @@ int main(int argc, const char *argv[])
 	uk_pr_debug("%s: Load executable (%s)...\n",
 		    progname, realpath ? realpath : path);
 	prog = elf_load_vfs(uk_alloc_get_default(),
-			    realpath ? realpath : path, progname);
+			    realpath ? realpath : path, progname, NULL);
 
 #endif /* CONFIG_APPELFLOADER_VFSEXEC */
 	if (unlikely(PTRISERR(prog) || !prog)) {
@@ -392,14 +392,13 @@ int main(int argc, const char *argv[])
 
 	app_thread->flags |= UK_THREADF_RUNNABLE;
 
-#if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
-	/* Add application thread to process */
-	ret = uk_posix_process_create_pthread(app_thread);
+#if CONFIG_LIBPOSIX_PROCESS
+	ret = uk_posix_process_attach_application(app_thread, progname);
 	if (unlikely(ret)) {
-		uk_pr_err("Could not create pthread\n");
+		uk_pr_err("Could not attach application\n");
 		goto out_free_thread;
 	}
-#endif /* CONFIG_LIBPOSIX_PROCESS_MULTITHREADING */
+#endif /* CONFIG_LIBPOSIX_PROCESS */
 
 	uk_pr_debug("%s: Application stack at %p - %p, pointer: %p\n",
 		    progname,

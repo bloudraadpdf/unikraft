@@ -40,6 +40,15 @@
 #include <uk/atomic.h>
 #include "schedcoop.h"
 
+static __nsec schedcoop_current_exec_time(struct uk_sched *s)
+{
+	struct schedcoop *scheduler = uksched2schedcoop(s);
+
+	UK_ASSERT(s->current == uk_thread_current());
+	return s->current->exec_time +
+	       (ukplat_monotonic_clock() - scheduler->ts_prev_switch);
+}
+
 static void schedcoop_schedule(struct uk_sched *s)
 {
 	struct schedcoop *c = uksched2schedcoop(s);
@@ -93,9 +102,11 @@ static void schedcoop_schedule(struct uk_sched *s)
 	    uk_load_n(&prev->effective_priority) >
 	    uk_load_n(&next->effective_priority))
 		next = NULL;
-	if (!UK_TAILQ_EMPTY(&s->stop_requests)) {
+	if (!UK_TAILQ_EMPTY(&s->stop_requests) ||
+	    !UK_TAILQ_EMPTY(&s->affinity_requests)) {
 		next = &c->idle;
-		if (prev != &c->idle && uk_thread_is_runnable(prev))
+		if (prev != &c->idle && uk_thread_is_runnable(prev) &&
+		    !uk_thread_is_exited(prev))
 			UK_TAILQ_INSERT_TAIL(&c->run_queue, prev, queue);
 	} else if (next) {
 		UK_ASSERT(next != prev);
@@ -110,8 +121,7 @@ static void schedcoop_schedule(struct uk_sched *s)
 		    && !uk_thread_is_exited(prev))
 			UK_TAILQ_INSERT_TAIL(&c->run_queue, prev,
 					     queue);
-	} else if (uk_thread_is_runnable(prev)
-		   && !uk_thread_is_exited(prev)) {
+	} else if (uk_thread_is_runnable(prev) && !uk_thread_is_exited(prev)) {
 		next = prev;
 	} else {
 		/*
@@ -119,7 +129,6 @@ static void schedcoop_schedule(struct uk_sched *s)
 		 * We select the idle thread only if we do not have anything
 		 * else to execute
 		 */
-		c->idle_return_time = min_wakeup_time;
 		next = &c->idle;
 		uk_sched_stats_idle_count_incr(s);
 	}
@@ -136,6 +145,8 @@ static void schedcoop_schedule(struct uk_sched *s)
 
 	uk_sched_stats_sched_count_incr(s);
 
+	if (next == &c->idle)
+		c->idle_return_time = min_wakeup_time;
 	s->current = next;
 	ukplat_spin_unlock_irqrestore(&s->lock, flags);
 
@@ -167,6 +178,8 @@ static int schedcoop_thread_add(struct uk_sched *s, struct uk_thread *t)
 		uk_thread_clear_queueable(t);
 	} else {
 		uk_thread_set_queueable(t);
+		if (t->wakeup_time > 0)
+			UK_TAILQ_INSERT_TAIL(&c->sleep_queue, t, queue);
 	}
 
 	return 0;
@@ -210,9 +223,11 @@ static __noreturn void idle_thread_fn(void *argp)
 		flags = uk_lcpu_save_irqf();
 
 		runnable = uk_sched_process_stop_requests(&c->sched) > 0;
+		runnable |= uk_sched_process_affinity_requests(&c->sched) > 0;
 		ukarch_spin_lock(&c->sched.lock);
 		runnable |= UK_TAILQ_FIRST(&c->run_queue) != NULL;
 		runnable |= !UK_TAILQ_EMPTY(&c->sched.stop_requests);
+		runnable |= !UK_TAILQ_EMPTY(&c->sched.affinity_requests);
 		ukarch_spin_unlock(&c->sched.lock);
 		if (runnable) {
 			uk_lcpu_restore_irqf(flags);
@@ -331,6 +346,7 @@ struct uk_sched *uk_schedcoop_create(struct uk_alloc *a,
 			schedcoop_thread_woken_isr,
 			schedcoop_thread_woken_isr,
 			schedcoop_idle_thread,
+			schedcoop_current_exec_time,
 			a, sa, auxsa, tls_a);
 
 	/* Add idle thread to the scheduler's thread list */

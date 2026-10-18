@@ -453,6 +453,14 @@ uk_testsuite_run(struct uk_testsuite *suite);
 	}								\
 	UK_CTOR_PRIO(_UK_TESTSUITE_RUN_NAME(suite), prio)
 
+/* Runs after init calls and secondary CPU startup, in the app init array. */
+#define UK_TESTSUITE_AT_APPINIT(suite, initfn)				\
+	_UK_TESTSUITE(suite, initfn);					\
+	static void __constructor _UK_TESTSUITE_RUN_NAME(suite)(void)	\
+	{								\
+		uk_testsuite_run(&_UK_TESTSUITE_NAME(suite));		\
+	}
+
 
 /**
  * Add a test suite to inittab at a specific class and priority level.

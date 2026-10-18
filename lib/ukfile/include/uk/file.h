@@ -9,6 +9,7 @@
 #ifndef __UKFILE_FILE_H__
 #define __UKFILE_FILE_H__
 
+#include <errno.h>
 #include <fcntl.h>
 #include <sys/uio.h>
 
@@ -36,7 +37,8 @@ struct uk_file;
  *   This requires special support and may not be implemented by all files.
  */
 
-/* I/O functions are non-blocking & return -EAGAIN when unable to perform.
+/* I/O functions are non-blocking. Reads return -EAGAIN when unable to perform.
+ * Writes report committed bytes and a stopping error, including -EAGAIN.
  * The behavior of concurrent calls to these functions is driver-dependent and
  * no general assumptions can be made about their ordering and/or interleaving.
  * Callers should themselves use the state->iolock (and/or other locks)
@@ -44,9 +46,31 @@ struct uk_file;
  */
 
 /* Traditional I/O; read/write */
-typedef ssize_t (*uk_file_io_func)(const struct uk_file *f,
+typedef ssize_t (*uk_file_read_func)(const struct uk_file *f,
 				   const struct iovec *iov, size_t iovcnt,
 				   size_t off, long flags);
+
+enum uk_file_write_kind { UK_FILE_WRITE_VECTOR, UK_FILE_WRITE_SCALAR };
+
+enum uk_file_write_position { UK_FILE_WRITE_ADVANCE, UK_FILE_WRITE_KEEP };
+
+struct uk_file_io_result {
+	size_t count;
+	/* A stopping error can accompany committed bytes. */
+	int error;
+	enum uk_file_write_position position;
+};
+
+static inline struct uk_file_io_result uk_file_io_status(ssize_t value)
+{
+	return value < 0 ? (struct uk_file_io_result){.error = value} :
+		(struct uk_file_io_result){.count = value};
+}
+
+typedef struct uk_file_io_result
+(*uk_file_write_func)(const struct uk_file *f, const struct iovec *iov,
+		      size_t iovcnt, size_t off, long flags,
+		      enum uk_file_write_kind kind);
 
 /* Memory mapping */
 enum uk_file_mem_op {
@@ -183,15 +207,33 @@ typedef int (*uk_file_setstat_func)(const struct uk_file *f,
  * Linux-compatible fadvise operations.
  */
 #define UKFILE_CTL_FILE_FADVISE 3
+#define UKFILE_CTL_FILE_TOUCH 4
+
+/* MAXSIZE((__off *)size, void, void): Largest supported file size. */
+#define UKFILE_CTL_FILE_MAXSIZE 5
+
+/* SYNC_RANGE(const struct uk_file_sync_range *, void, void) */
+#define UKFILE_CTL_FILE_SYNC_RANGE 6
+
+struct uk_file_sync_range {
+	__off start;
+	__off end;
+	unsigned int flags;
+};
+
+enum uk_file_touch {
+	UK_FILE_TOUCH_READ,
+	UK_FILE_TOUCH_WRITE
+};
 
 typedef int (*uk_file_ctl_func)(const struct uk_file *f, int fam, int req,
 				uintptr_t arg1, uintptr_t arg2, uintptr_t arg3);
 
-/* Reopen an anonymous inode with POSIX access flags. Return a counted file
+/* Open an inode with POSIX access flags. Return a counted file
  * reference or a negative error pointer. The operation must not block.
  */
-typedef const struct uk_file *(*uk_file_reopen_func)(const struct uk_file *f,
-						  unsigned int mode);
+typedef const struct uk_file *(*uk_file_open_func)(const struct uk_file *f,
+						   unsigned int mode);
 
 int uk_file_anon_getstat(const struct uk_file *f, unsigned int mask,
 			 struct uk_statx *arg);
@@ -206,14 +248,23 @@ int uk_file_anon_getstat(const struct uk_file *f, unsigned int mask,
 
 typedef void (*uk_file_release_func)(const struct uk_file *f, int what);
 
+/* Returns a relative duration, or __NSEC_MAX for an untimed operation. */
+typedef __nsec (*uk_file_io_timeout_func)(const struct uk_file *f,
+					uk_pollevent events);
+
+typedef off_t (*uk_file_seek_func)(const struct uk_file *f, off_t offset,
+				   int whence, off_t current);
+
 struct uk_file_ops {
-	uk_file_io_func read;
-	uk_file_io_func write;
+	uk_file_read_func read;
+	uk_file_write_func write;
 	uk_file_mem_func mem;
 	uk_file_getstat_func getstat;
 	uk_file_setstat_func setstat;
 	uk_file_ctl_func ctl;
-	uk_file_reopen_func reopen;
+	uk_file_io_timeout_func io_timeout;
+	uk_file_open_func open;
+	uk_file_seek_func seek;
 };
 
 /* File struct */
@@ -368,6 +419,10 @@ struct uk_file {
 	void *node; /* Driver-private file data */
 	/* Ops table */
 	const struct uk_file_ops *ops;
+	bool write_sigpipe;
+	/* I/O methods handle payload faults and their queue effects. */
+	bool nofault_io;
+	bool no_pwrite;
 #if CONFIG_LIBUKFS
 	/* Filesystem ops table; must be NULL for non-filesystem files */
 	const struct uk_fs_ops *fsops;
@@ -388,12 +443,11 @@ ssize_t uk_file_read(const struct uk_file *f,
 	return f->ops->read(f, iov, iovcnt, off, flags);
 }
 
-static inline
-ssize_t uk_file_write(const struct uk_file *f,
-		      const struct iovec *iov, size_t iovcnt,
-		      size_t off, long flags)
+static inline struct uk_file_io_result
+uk_file_write(const struct uk_file *f, const struct iovec *iov, size_t iovcnt,
+	      size_t off, long flags, enum uk_file_write_kind kind)
 {
-	return f->ops->write(f, iov, iovcnt, off, flags);
+	return f->ops->write(f, iov, iovcnt, off, flags, kind);
 }
 
 static inline
@@ -422,6 +476,27 @@ int uk_file_ctl(const struct uk_file *f, int fam, int req,
 		uintptr_t arg1, uintptr_t arg2, uintptr_t arg3)
 {
 	return f->ops->ctl(f, fam, req, arg1, arg2, arg3);
+}
+
+static inline
+int uk_file_max_size(const struct uk_file *file, __off *maximum)
+{
+	if (!maximum)
+		return -EINVAL;
+	return uk_file_ctl(file, UKFILE_CTL_FILE, UKFILE_CTL_FILE_MAXSIZE,
+			   (uintptr_t)maximum, 0, 0);
+}
+
+static inline
+int uk_file_touch(const struct uk_file *f, enum uk_file_touch operation,
+		  unsigned int flags)
+{
+	if ((operation != UK_FILE_TOUCH_READ &&
+	     operation != UK_FILE_TOUCH_WRITE) ||
+	    (flags & ~O_NOATIME))
+		return -EINVAL;
+	return uk_file_ctl(f, UKFILE_CTL_FILE, UKFILE_CTL_FILE_TOUCH,
+			   operation, flags, 0);
 }
 
 /* Refcounting & destruction */

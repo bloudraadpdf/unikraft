@@ -470,8 +470,16 @@ int erofs_ilookupat(struct erofs_inode *directory, const char *name,
                    unsigned int length, struct erofs_inode *inode);
 
 /* data.c */
-static inline void erofs_unmap_metabuf(struct erofs_buf *buf) {}
-static inline void erofs_put_metabuf(struct erofs_buf *buf) {}
+static inline void erofs_unmap_metabuf(struct erofs_buf *buf)
+{
+	(void)buf;
+}
+
+static inline void erofs_put_metabuf(struct erofs_buf *buf)
+{
+	(void)buf;
+}
+
 void *erofs_bread(struct erofs_buf *buf, erofs_off_t offset, bool need_kmap);
 void erofs_init_metabuf(struct erofs_buf *buf, struct erofs_sb_info *sbi,
 			bool in_mbox);

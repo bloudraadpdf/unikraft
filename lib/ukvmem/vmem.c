@@ -8,6 +8,7 @@
 #include <errno.h>
 
 #include "vmem.h"
+#include "vma_stack.h"
 
 #include <uk/essentials.h>
 #include <uk/arch/limits.h>
@@ -185,42 +186,6 @@ const struct uk_vma *uk_vma_find(struct uk_vas *vas, __vaddr_t vaddr)
 	vma = vmem_vma_find(vas, vaddr, 0);
 	uk_mutex_unlock(&vas->mutation_lock);
 	return vma;
-}
-
-int uk_vma_stack_resize(struct uk_vas *vas, __vaddr_t address,
-			__vaddr_t bottom)
-{
-	struct uk_vma *vma;
-	__vaddr_t start;
-	unsigned long previous;
-	int rc = -EINVAL;
-
-	if (!UK_PAGING_PAGE_ALIGNED(bottom) ||
-	    bottom < UK_VMA_STACK_BOTTOM_GUARD_SIZE)
-		return -EINVAL;
-	start = bottom - UK_VMA_STACK_BOTTOM_GUARD_SIZE;
-	previous = vmem_mutation_begin(vas);
-	vma = vmem_vma_find(vas, address, 0);
-	if (!vma || vma->ops != &uk_vma_stack_ops ||
-	    bottom >= vma->end - UK_VMA_STACK_TOP_GUARD_SIZE ||
-	    !uk_paging_vaddr_range_isvalid(start, vma->end - start))
-		goto out;
-	if (start < vma->start) {
-		if (vmem_vma_find(vas, start, vma->start - start)) {
-			rc = -EEXIST;
-			goto out;
-		}
-	} else if (start > vma->start) {
-		rc = vma->ops->unmap(vma, vma->start, bottom - vma->start);
-		if (rc)
-			goto out;
-	}
-	vma->start = start;
-	vma->flags |= UK_VMA_STACK_GROWABLE;
-	rc = 0;
-out:
-	vmem_mutation_end(vas, previous);
-	return rc;
 }
 
 static int vmem_vma_find_range(struct uk_vas *vas, __vaddr_t *vaddr, __sz *len,
@@ -682,26 +647,50 @@ static __vaddr_t vmem_first_fit(struct uk_vas *vas, __vaddr_t base, __sz align,
 	return ALIGN_UP(vaddr, align);
 }
 
+static int vmem_access_allowed(unsigned long attr, unsigned int faulttype);
+
+struct vmem_populate_context {
+	struct uk_vma *vma;
+	unsigned int access;
+	bool resolve_present;
+};
+
 static int vmem_mapx_populate(struct uk_pagetable *pt __unused,
 			      __vaddr_t vaddr, __vaddr_t pt_vaddr,
 			      unsigned int level, __pte_t *pte, void *user)
 {
-	struct uk_vma *vma = (struct uk_vma *)user;
+	struct vmem_populate_context *context = user;
+	struct uk_vma *vma = context->vma;
+	__pte_t original;
+	int rc;
+
+	rc = uk_paging_pte_read(pt_vaddr, level,
+				UK_PAGING_PT_Lx_IDX(vaddr, level), &original);
+	if (rc)
+		return rc;
+	bool present = UK_PAGING_PT_Lx_PTE_PRESENT(original, level);
+
+	if (present &&
+	    (!context->resolve_present ||
+	     vmem_access_allowed(uk_pal_attr_from_pte(original, level),
+				 context->access)))
+		return UK_PAGING_PAGE_MAPX_ESKIP;
 	struct uk_vm_fault fault = {
 		.vaddr = vaddr,
 		.vbase = vaddr,
 		.len   = UK_PAGING_PAGE_Lx_SIZE(level),
 		.paddr = UK_PAGING_PT_Lx_PTE_PADDR(*pte, level),
-		.type  = UK_VMA_FAULT_SOFT | UK_VMA_FAULT_NONPRESENT,
+		.type  = UK_VMA_FAULT_SOFT | context->access |
+			 (present ? 0 : UK_VMA_FAULT_NONPRESENT),
 		.pte   = *pte,
 		.level = level,
 		.regs  = __NULL,
 	};
 	__pte_t current;
-	int rc;
 
 	UK_ASSERT(vma->ops);
-	UK_ASSERT(vma->ops->fault);
+	if (!vma->ops->fault)
+		return -EFAULT;
 
 	vmem_mutation_pause(vma->vas);
 	rc = vma->ops->fault(vma, &fault);
@@ -718,9 +707,15 @@ static int vmem_mapx_populate(struct uk_pagetable *pt __unused,
 	 */
 	rc = uk_paging_pte_read(pt_vaddr, level,
 				UK_PAGING_PT_Lx_IDX(vaddr, level), &current);
-	if (rc || UK_PAGING_PT_Lx_PTE_PRESENT(current, level)) {
-		if (vma->ops->fault_discard)
+	bool raced = !rc && !present &&
+		UK_PAGING_PT_Lx_PTE_PRESENT(current, level);
+
+	if (rc || raced) {
+		if (!present && vma->ops->fault_discard) {
+			vmem_mutation_pause(vma->vas);
 			vma->ops->fault_discard(vma, &fault);
+			vmem_mutation_resume(vma->vas);
+		}
 		if (rc)
 			return rc;
 		return UK_PAGING_PAGE_Lx_IS(current, level) ?
@@ -893,6 +888,8 @@ static int vmem_map(struct uk_vas *vas, __vaddr_t *vaddr, __sz len,
 		vma->flags |= UK_VMA_FLAG_UNINITIALIZED;
 
 	if (flags & UK_VMA_MAP_POPULATE) {
+		struct vmem_populate_context context = {.vma = vma};
+
 		UK_ASSERT(vma->ops->fault);
 
 		if (vma->page_lvl >= 0) {
@@ -908,7 +905,7 @@ static int vmem_map(struct uk_vas *vas, __vaddr_t *vaddr, __sz len,
 					 vma->attr, flgs,
 					 &(struct uk_paging_page_mapx){
 						.map = vmem_mapx_initial_populate,
-						.ctx = vma,
+						.ctx = &context,
 					 });
 		if (unlikely(rc)) {
 			/* If the address range replaces existing mappings, we
@@ -1036,6 +1033,112 @@ int uk_vma_set_attr(struct uk_vas *vas, __vaddr_t vaddr, __sz len,
 	return rc;
 }
 
+int uk_vma_stack_resize(struct uk_vas *vas, __vaddr_t address,
+			__vaddr_t bottom)
+{
+	struct uk_vma_stack_context *stack;
+	struct uk_vma *vma, *first, *data, *entry;
+	__vaddr_t start, old_bottom;
+	unsigned long previous;
+	int rc = -EINVAL;
+
+	if (!UK_PAGING_PAGE_ALIGNED(bottom) ||
+	    bottom < UK_VMA_STACK_BOTTOM_GUARD_SIZE)
+		return -EINVAL;
+	start = bottom - UK_VMA_STACK_BOTTOM_GUARD_SIZE;
+	previous = vmem_mutation_begin(vas);
+	vma = vmem_vma_find(vas, address, 0);
+	if (!vma || vma->ops != &uk_vma_stack_ops)
+		goto out;
+	stack = vmem_stack_context(vma);
+	old_bottom = stack->start + UK_VMA_STACK_BOTTOM_GUARD_SIZE;
+	if (bottom >= stack->end - UK_VMA_STACK_TOP_GUARD_SIZE ||
+	    !uk_paging_vaddr_range_isvalid(start, stack->end - start))
+		goto out;
+	first = vmem_vma_find(vas, stack->start, 0);
+	data = vmem_vma_find(vas, old_bottom, 0);
+	if (!first || !data || first->ops != &uk_vma_stack_ops ||
+	    data->ops != &uk_vma_stack_ops ||
+	    vmem_stack_context(first) != stack ||
+	    vmem_stack_context(data) != stack)
+		goto out;
+	if (start < stack->start) {
+		if (vmem_vma_find(vas, start, stack->start - start)) {
+			rc = -EEXIST;
+			goto out;
+		}
+		rc = vmem_vma_set_attr(first, data->attr);
+		if (rc)
+			goto out;
+	} else if (start > stack->start) {
+		vma = vmem_vma_find(vas, bottom, 0);
+		if (!vma || vma->ops != &uk_vma_stack_ops ||
+		    vmem_stack_context(vma) != stack)
+			goto out;
+		uk_list_for_each_entry(entry, &vas->vma_list, vma_list) {
+			if (entry->start >= bottom)
+				break;
+			if (entry->end <= stack->start)
+				continue;
+			if (entry->ops != &uk_vma_stack_ops ||
+			    vmem_stack_context(entry) != stack)
+				goto out;
+		}
+		rc = vmem_unmap(vas, stack->start,
+				bottom - stack->start, 0);
+		if (rc)
+			goto out;
+		first = vmem_vma_find(vas, bottom, 0);
+		UK_ASSERT(first && vmem_stack_context(first) == stack);
+	}
+	first->start = start;
+	first->flags |= UK_VMA_STACK_GROWABLE;
+	stack->start = start;
+	vmem_vma_try_merge_with_next(first);
+	rc = 0;
+out:
+	vmem_mutation_end(vas, previous);
+	return rc;
+}
+
+int uk_vma_stack_unmap(struct uk_vas *vas, __vaddr_t address)
+{
+	struct uk_vma_stack_context *stack = NULL;
+	struct uk_vma *vma, *next;
+	unsigned long previous = vmem_mutation_begin(vas);
+	int rc = -EINVAL;
+
+	uk_list_for_each_entry(vma, &vas->vma_list, vma_list) {
+		if (vma->ops == &uk_vma_stack_ops) {
+			struct uk_vma_stack_context *candidate =
+				vmem_stack_context(vma);
+
+			if (address >= candidate->start &&
+			    address < candidate->end) {
+				stack = candidate;
+				break;
+			}
+		}
+	}
+	if (!stack)
+		goto out;
+	stack->references++;
+	uk_list_for_each_entry_safe(vma, next, &vas->vma_list, vma_list) {
+		if (vma->ops != &uk_vma_stack_ops ||
+		    vmem_stack_context(vma) != stack)
+			continue;
+		vmem_vma_unmap(vma, vma->start, uk_vma_len(vma));
+		vmem_vma_unlink_and_free(vma);
+	}
+	vmem_mutation_pause(vas);
+	vmem_stack_release(vas, stack);
+	vmem_mutation_resume(vas);
+	rc = 0;
+out:
+	vmem_mutation_end(vas, previous);
+	return rc;
+}
+
 static int vmem_mapx_advise(struct uk_pagetable *pt,
 			    __vaddr_t vaddr, __vaddr_t pt_vaddr,
 			    unsigned int level, __pte_t *pte, void *user)
@@ -1066,6 +1169,8 @@ int uk_vma_op_advise(struct uk_vma *vma, __vaddr_t vaddr, __sz len,
 
 	/* WILLNEED takes precedence over DONTNEED */
 	if (advice & UK_VMA_ADV_WILLNEED) {
+		struct vmem_populate_context context = {.vma = vma};
+
 		if (vma->page_lvl >= 0) {
 			flgs = UK_PAGING_PAGE_FLAG_SIZE(vma->page_lvl) |
 				UK_PAGING_PAGE_FLAG_FORCE_SIZE;
@@ -1080,7 +1185,7 @@ int uk_vma_op_advise(struct uk_vma *vma, __vaddr_t vaddr, __sz len,
 					 vma->attr, flgs,
 					 &(struct uk_paging_page_mapx){
 						.map = vmem_mapx_advise,
-						.ctx = vma,
+						.ctx = &context,
 					 });
 		if (unlikely(rc))
 			return rc;
@@ -1178,35 +1283,45 @@ out:
 	return rc;
 }
 
-int uk_vma_populate_page(struct uk_vas *vas, __vaddr_t vaddr)
+int uk_vma_populate_page(struct uk_vas *vas, __vaddr_t vaddr,
+			 unsigned int access)
 {
+	struct vmem_populate_context context = {
+		.access = access, .resolve_present = true
+	};
+	struct uk_paging_page_mapx mapx = {
+		.map = vmem_mapx_populate, .ctx = &context
+	};
 	struct uk_vma *vma;
-	unsigned long previous;
+	__vaddr_t base;
+	unsigned long previous, flags;
 	unsigned int level;
-	int rc = -ENOENT;
-#ifdef CONFIG_LIBUKPAGING
+	int rc = -EFAULT;
 	__pte_t entry;
-	unsigned long flags = uk_pal_save_irqf();
-	int present;
 
-	level = UK_PAGING_PAGE_LEVEL;
-	vmem_fault_lock(vas);
-	present = !uk_paging_pt_walk(vas->pt, vaddr, &level, NULL, &entry) &&
-		UK_PAGING_PT_Lx_PTE_PRESENT(entry, level) &&
-		UK_PAGING_PAGE_Lx_IS(entry, level);
-	uk_spin_unlock_irqrestore(&vas->fault_lock, flags);
-	if (present)
-		return 0;
-#endif
-
+	if (access > UK_VMA_FAULT_EXEC)
+		return -EINVAL;
 	previous = vmem_mutation_begin(vas);
 	vma = vmem_vma_find(vas, vaddr, 0);
-	if (vma) {
-		level = MAX(vma->page_lvl, UK_PAGING_PAGE_LEVEL);
-		rc = vmem_vma_advise(vma,
-			UK_PAGING_PAGE_Lx_ALIGN_DOWN(vaddr, level),
-			UK_PAGING_PAGE_Lx_SIZE(level), UK_VMA_ADV_WILLNEED);
+	if (vma && !vmem_access_allowed(vma->attr, access))
+		goto out;
+	level = UK_PAGING_PAGE_LEVEL;
+	if (!uk_paging_pt_walk(vas->pt, vaddr, &level, NULL, &entry) &&
+	    UK_PAGING_PT_Lx_PTE_PRESENT(entry, level) &&
+	    UK_PAGING_PAGE_Lx_IS(entry, level) &&
+	    vmem_access_allowed(uk_pal_attr_from_pte(entry, level), access)) {
+		rc = 0;
+		goto out;
 	}
+	if (!vma)
+		goto out;
+	level = MAX(vma->page_lvl, UK_PAGING_PAGE_LEVEL);
+	context.vma = vma;
+	flags = UK_PAGING_PAGE_FLAG_SIZE(level) |
+		UK_PAGING_PAGE_FLAG_FORCE_SIZE;
+	base = UK_PAGING_PAGE_Lx_ALIGN_DOWN(vaddr, level);
+	rc = uk_paging_page_mapx(vas->pt, base, 0, 1, vma->attr, flags, &mapx);
+out:
 	vmem_mutation_end(vas, previous);
 	return rc;
 }
@@ -1241,8 +1356,8 @@ static inline int vmem_largest_level(__vaddr_t vaddr, __sz len,
 	return lvl;
 }
 
-static inline int vmem_access_allowed(unsigned long attr,
-				      unsigned int faulttype)
+static int vmem_access_allowed(unsigned long attr,
+			       unsigned int faulttype)
 {
 	switch (faulttype & UK_VMA_FAULT_ACCESSTYPE) {
 	case UK_VMA_FAULT_READ:
@@ -1324,7 +1439,8 @@ static int vmem_pagefault_locked(struct uk_vas *vas, __vaddr_t vaddr,
 	unsigned long flags;
 	int rc;
 
-	if (unlikely(vas->flags & UK_VAS_FLAG_NO_PAGING))
+	if (unlikely((vas->flags & UK_VAS_FLAG_NO_PAGING) ||
+		     (type & UK_VMA_FAULT_MISCONFIG)))
 		return -EFAULT;
 
 	/* If the page fault was caused by an access to a region not covered by
@@ -1359,7 +1475,7 @@ static int vmem_pagefault_locked(struct uk_vas *vas, __vaddr_t vaddr,
 	}
 
 	if (ctx.vma->ops->fault_can_block)
-		return (type & UK_VMA_FAULT_NONPRESENT) ? -EAGAIN : -EFAULT;
+		return -EAGAIN;
 
 	/* Find the page level at which we want to page-in. If the VMA does not
 	 * enforce a specific page size and the configuration allows to page-in

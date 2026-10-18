@@ -14,6 +14,7 @@
 #include <uk/essentials.h>
 #include <uk/arch/limits.h>
 #include <uk/lcpu.h>
+#include <uk/posix-mmap.h>
 #include <uk/vmem.h>
 #if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
 #include <uk/process.h>
@@ -39,6 +40,14 @@
 
 #define VALID_PROT_MASK		(PROT_READ | PROT_WRITE | PROT_EXEC)
 
+static bool page_range(__vaddr_t address, size_t *length)
+{
+	if (*length > __SZ_MAX - (UK_PAGING_PAGE_SIZE - 1))
+		return false;
+	*length = UK_PAGING_PAGE_ALIGN_UP(*length);
+	return address <= __VADDR_MAX - *length;
+}
+
 static inline unsigned long prot_to_attr(int prot)
 {
 	unsigned long attr = UK_PAGING_PAGE_ATTR_PROT_NONE;
@@ -58,7 +67,7 @@ static inline unsigned long prot_to_attr(int prot)
 }
 
 static int do_mmap(void **addr, size_t len, int prot, int flags, int fd,
-		   off_t offset)
+		   off_t offset, struct uk_ofile *source)
 {
 	struct uk_vas *vas = uk_vas_get_active();
 	unsigned long vattr = prot_to_attr(prot);
@@ -77,11 +86,14 @@ static int do_mmap(void **addr, size_t len, int prot, int flags, int fd,
 	unsigned int order, lvl = UK_PAGING_PAGE_LEVEL;
 	int rc;
 
+#if !CONFIG_LIBPOSIX_FDIO
+	(void)source;
+#endif
 	if (unlikely(len == 0))
 		return -EINVAL;
 
 	/* len will overflow when aligning it to page size */
-	if (unlikely(len > __SZ_MAX - UK_PAGING_PAGE_SIZE))
+	if (unlikely(len > __SZ_MAX - (UK_PAGING_PAGE_SIZE - 1)))
 		return -ENOMEM;
 
 	if (unlikely(offset < 0 || !UK_PAGING_PAGE_ALIGNED(offset)))
@@ -117,6 +129,8 @@ static int do_mmap(void **addr, size_t len, int prot, int flags, int fd,
 
 		if (flags & MAP_UNINITIALIZED)
 			vflags |= UK_VMA_MAP_UNINITIALIZED;
+		if ((flags & MAP_TYPE) == MAP_SHARED)
+			vflags |= UK_VMA_ANON_SHARED;
 
 		if (flags & MAP_HUGETLB) {
 #ifdef UK_PAGING_PAGE_LARGE_SHIFT
@@ -140,6 +154,7 @@ static int do_mmap(void **addr, size_t len, int prot, int flags, int fd,
 	} else {
 #if CONFIG_LIBPOSIX_FDTAB
 		union uk_shim_file sf;
+		int kind;
 
 		if ((flags & MAP_TYPE) == MAP_SHARED ||
 		    (flags & MAP_TYPE) == MAP_SHARED_VALIDATE)
@@ -160,7 +175,18 @@ static int do_mmap(void **addr, size_t len, int prot, int flags, int fd,
 		if (unlikely(!UK_PAGING_PAGE_ALIGNED(offset)))
 			return -EINVAL;
 
-		switch (uk_fdtab_shim_get(fd, &sf)) {
+#if CONFIG_LIBPOSIX_FDIO
+		if (source) {
+			sf.ofile = source;
+			uk_ofile_acquire(source);
+			kind = UK_SHIM_OFILE;
+		} else {
+			kind = uk_fdtab_shim_get(fd, &sf);
+		}
+#else
+		kind = uk_fdtab_shim_get(fd, &sf);
+#endif
+		switch (kind) {
 		case UK_SHIM_LEGACY:
 #if CONFIG_LIBVFSCORE
 			vfscore_vma_args.fd = fd;
@@ -194,7 +220,22 @@ static int do_mmap(void **addr, size_t len, int prot, int flags, int fd,
 	}
 
 	/* Linux will always align len to the selected page size */
+	if (len > __SZ_MAX - (UK_PAGING_PAGE_Lx_SIZE(lvl) - 1)) {
+		rc = -ENOMEM;
+		goto out;
+	}
 	len = UK_PAGING_PAGE_Lx_ALIGN_UP(len, lvl);
+	if (vaddr != UK_PAGING_VADDR_ANY) {
+		if (!(flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)))
+			vaddr = UK_PAGING_PAGE_Lx_ALIGN_DOWN(vaddr, lvl);
+		if (vaddr > __VADDR_MAX - len) {
+			if (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) {
+				rc = -ENOMEM;
+				goto out;
+			}
+			vaddr = UK_PAGING_VADDR_ANY;
+		}
+	}
 
 	if (flags & MAP_POPULATE)
 		vflags |= UK_VMA_MAP_POPULATE;
@@ -218,7 +259,7 @@ static int do_mmap(void **addr, size_t len, int prot, int flags, int fd,
 			break;
 		vaddr = UK_PAGING_VADDR_ANY;
 	}
-
+out:
 #if CONFIG_LIBPOSIX_FDTAB && CONFIG_LIBPOSIX_FDIO
 	/* Return open file description after creation of VMAs */
 	if (vargs == &fdio_vma_args)
@@ -229,12 +270,22 @@ static int do_mmap(void **addr, size_t len, int prot, int flags, int fd,
 	return rc;
 }
 
+#if CONFIG_LIBPOSIX_FDIO
+int uk_posix_mmap_file(void **address, size_t length, int protection, int flags,
+		       struct uk_ofile *file, off_t offset)
+{
+	if (!file || (flags & MAP_ANONYMOUS))
+		return -EINVAL;
+	return do_mmap(address, length, protection, flags, -1, offset, file);
+}
+#endif
+
 UK_SYSCALL_DEFINE(void *, mmap, void *, addr, size_t, len, int, prot,
 		  int, flags, int, fd, off_t, offset)
 {
 	int rc;
 
-	rc = do_mmap(&addr, len, prot, flags, fd, offset);
+	rc = do_mmap(&addr, len, prot, flags, fd, offset, NULL);
 	if (unlikely(rc)) {
 		errno = -rc;
 		return MAP_FAILED;
@@ -249,13 +300,14 @@ UK_SYSCALL_R_DEFINE(int, munmap, void *, addr, size_t, len)
 	__vaddr_t vaddr = (__vaddr_t)addr;
 	int rc;
 
-	if (unlikely(len == 0))
+	if (unlikely(len == 0) || !UK_PAGING_PAGE_ALIGNED(vaddr) ||
+	    !page_range(vaddr, &len))
 		return -EINVAL;
 
 #if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
-	rc = uk_posix_process_vm_unmap(vas, vaddr, UK_PAGING_PAGE_ALIGN_UP(len));
+	rc = uk_posix_process_vm_unmap(vas, vaddr, len);
 #else
-	rc = uk_vma_unmap(vas, vaddr, UK_PAGING_PAGE_ALIGN_UP(len), 0);
+	rc = uk_vma_unmap(vas, vaddr, len, 0);
 #endif
 	if (unlikely(rc)) {
 		if (rc == -ENOENT)
@@ -272,17 +324,30 @@ UK_SYSCALL_R_DEFINE(int, mprotect, void *, addr, size_t, len, int, prot)
 	struct uk_vas *vas = uk_vas_get_active();
 	unsigned long vattr = prot_to_attr(prot);
 	__vaddr_t vaddr = (__vaddr_t)addr;
+	int grows = prot & (PROT_GROWSDOWN | PROT_GROWSUP);
 	int rc;
 
 	/* mprotect does not tolerate invalid prot values */
-	if (unlikely(prot & ~VALID_PROT_MASK))
+	if (grows == (PROT_GROWSDOWN | PROT_GROWSUP) ||
+	    !UK_PAGING_PAGE_ALIGNED(vaddr))
 		return -EINVAL;
+	if (!len)
+		return 0;
+	if (unlikely(prot & ~(VALID_PROT_MASK |
+			      PROT_GROWSDOWN | PROT_GROWSUP)) ||
+	    (grows & PROT_GROWSUP))
+		return -EINVAL;
+	if (!page_range(vaddr, &len))
+		return -ENOMEM;
 
 #if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
 	rc = uk_posix_process_vm_protect(vas, vaddr,
-					 UK_PAGING_PAGE_ALIGN_UP(len), vattr);
+					 len, vattr,
+					 grows & PROT_GROWSDOWN);
 #else
-	rc = uk_vma_set_attr(vas, vaddr, UK_PAGING_PAGE_ALIGN_UP(len), vattr,
+	if (grows)
+		return -EINVAL;
+	rc = uk_vma_set_attr(vas, vaddr, len, vattr,
 			     UK_VMA_FLAG_STRICT_VMA_CHECK);
 #endif
 	if (unlikely(rc)) {
@@ -302,6 +367,11 @@ UK_SYSCALL_R_DEFINE(int, madvise, void *, addr, size_t, len, int, advice)
 	__vaddr_t vaddr = (__vaddr_t)addr;
 	int rc;
 
+	if (!UK_PAGING_PAGE_ALIGNED(vaddr) || !page_range(vaddr, &len))
+		return -EINVAL;
+	if (!len)
+		return 0;
+
 	switch (advice) {
 	case MADV_DONTNEED:
 		vadvice |= UK_VMA_ADV_DONTNEED;
@@ -316,9 +386,9 @@ UK_SYSCALL_R_DEFINE(int, madvise, void *, addr, size_t, len, int, advice)
 
 #if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
 	rc = uk_posix_process_vm_advise(vas, vaddr,
-					UK_PAGING_PAGE_ALIGN_UP(len), vadvice);
+					len, vadvice);
 #else
-	rc = uk_vma_advise(vas, vaddr, UK_PAGING_PAGE_ALIGN_UP(len), vadvice,
+	rc = uk_vma_advise(vas, vaddr, len, vadvice,
 			   UK_VMA_FLAG_STRICT_VMA_CHECK);
 #endif
 	if (unlikely(rc)) {
@@ -337,10 +407,7 @@ UK_SYSCALL_R_DEFINE(int, msync, void*, addr, size_t, length, int, flags)
 	    (flags & ~(MS_ASYNC | MS_SYNC | MS_INVALIDATE)) ||
 	    ((flags & MS_ASYNC) && (flags & MS_SYNC)))
 		return -EINVAL;
-	if (length > __SZ_MAX - (UK_PAGING_PAGE_SIZE - 1))
-		return -ENOMEM;
-	length = UK_PAGING_PAGE_ALIGN_UP(length);
-	if ((__vaddr_t)addr > __VADDR_MAX - length)
+	if (!page_range((__vaddr_t)addr, &length))
 		return -ENOMEM;
 #if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
 	int rc = uk_posix_process_vm_sync(uk_vas_get_active(), (__vaddr_t)addr,

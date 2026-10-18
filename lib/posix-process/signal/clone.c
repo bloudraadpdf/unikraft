@@ -18,152 +18,65 @@
 
 #include "signal.h"
 
-static
-int uk_posix_clone_sighand(void *arg)
+int pprocess_signal_inherit_locked(struct posix_thread *child,
+				   struct posix_thread *parent, __u64 flags,
+				   struct uk_sigaction **previous)
 {
-	struct posix_process_clone_event_data *event_data;
-	const struct clone_args *cl_args;
-	struct posix_process *pp; /* parent process */
-	struct posix_process *cp; /* child process */
-	struct posix_thread *ct; /* child thread */
-	struct posix_thread *pt = NULL;
-	pid_t ppid; /* parent pid */
-	pid_t cpid; /* child pid */
-	int signum;
+	struct posix_process *process = child->process;
+
+	*previous = NULL;
+	if ((flags & (CLONE_SIGHAND | CLONE_CLEAR_SIGHAND)) ==
+	    (CLONE_SIGHAND | CLONE_CLEAR_SIGHAND))
+		return -EINVAL;
+	if ((flags & CLONE_SIGHAND) && !(flags & CLONE_VM))
+		return -EINVAL;
+	if ((flags & CLONE_THREAD) && !(flags & CLONE_SIGHAND))
+		return -EINVAL;
+	UK_ASSERT(child->signal && process && process->signal);
+	UK_ASSERT(process->signal->sigaction);
+	if (parent) {
+		UK_ASSERT(parent->signal);
+		child->signal->mask = parent->signal->mask;
+		if (!(flags & CLONE_VM) || (flags & CLONE_VFORK))
+			child->signal->altstack = parent->signal->altstack;
+	}
+	if (!(flags & CLONE_THREAD) && parent &&
+	    !(flags & CLONE_CLEAR_SIGHAND)) {
+		if (flags & CLONE_SIGHAND) {
+			*previous = process->signal->sigaction;
+			process->signal->sigaction =
+				parent->process->signal->sigaction;
+			pprocess_signal_sigaction_acquire(
+				process->signal->sigaction);
+		} else {
+			memcpy(process->signal->sigaction->ks,
+			       parent->process->signal->sigaction->ks,
+			       sizeof(process->signal->sigaction->ks));
+		}
+	}
+	return 0;
+}
+
+static int uk_posix_clone_sighand(void *arg)
+{
+	struct posix_process_clone_event_data *event = arg;
+	struct posix_thread *child, *parent = NULL;
+	struct uk_sigaction *previous;
 	int rc;
 
-	event_data = (struct posix_process_clone_event_data *)arg;
-	UK_ASSERT(event_data);
-	UK_ASSERT(event_data->cl_args);
-	UK_ASSERT(event_data->child);
-
-	cl_args = event_data->cl_args;
-
-	cpid = ukthread2pid(event_data->child);
-	cp = pid2pprocess(cpid);
-
-	if (event_data->parent) {
-		ppid = ukthread2pid(event_data->parent);
-		pp = pid2pprocess(ppid);
-		pt = tid2pthread(ukthread2tid(event_data->parent));
-		UK_ASSERT(pt);
-	} else {
-		pp = __NULL;
+	UK_ASSERT(event && event->cl_args && event->child);
+	uk_mutex_lock(&pprocess_mutex);
+	child = tid2pthread(ukthread2tid(event->child));
+	UK_ASSERT(child);
+	if (event->parent) {
+		parent = tid2pthread(ukthread2tid(event->parent));
+		UK_ASSERT(parent);
 	}
-
-	ct = tid2pthread(ukthread2tid(event_data->child));
-
-	/* CLONE_SIGHAND and CLONE_CLEAR_SIGHAND should not be together */
-	if (unlikely((cl_args->flags & (CLONE_SIGHAND | CLONE_CLEAR_SIGHAND))
-		     == (CLONE_SIGHAND | CLONE_CLEAR_SIGHAND)))
-		return -EINVAL;
-
-	/* CLONE_SIGHAND requires CLONE_VM */
-	if (unlikely((cl_args->flags & CLONE_SIGHAND) &&
-		     !(cl_args->flags & CLONE_VM)))
-		return -EINVAL;
-
-	/* CLONE_THREAD requires CLONE_SIGHAND */
-	if (unlikely((cl_args->flags & CLONE_THREAD) &&
-		     !(cl_args->flags & CLONE_SIGHAND)))
-		return -EINVAL;
-
-	/* Initialize the new thread's signal descriptor */
-	rc = pprocess_signal_tdesc_alloc(ct);
-	if (unlikely(rc)) {
-		uk_pr_err("Could not allocate signal descriptor\n");
-		return rc;
-	}
-	rc = pprocess_signal_tdesc_init(ct);
-	if (unlikely(rc)) {
-		uk_pr_err("Could not initialize signal descriptor\n");
-		return rc;
-	}
-
-	if (pt) {
-		ct->signal->mask = pt->signal->mask;
-		if (!(cl_args->flags & CLONE_VM) || (cl_args->flags & CLONE_VFORK))
-			ct->signal->altstack = pt->signal->altstack;
-	}
-
-	/* If CLONE_THREAD was passed, the child is assigned to the
-	 * calling process, so no further action is required.
-	 */
-	if (cl_args->flags & CLONE_THREAD)
-		return 0;
-
-	/* Initialize the new process' signal descriptor */
-	cp->signal = uk_malloc(cp->_a, sizeof(struct uk_signal_pdesc));
-	if (unlikely(!cp->signal)) {
-		uk_pr_err("Could not allocate memory\n");
-		rc = -ENOMEM;
-		goto fail_tdesc_alloc;
-	}
-
-	/* CLONE_CLEAR_SIGHAND: Reset child's signal dispositions to default. */
-	if (!pp || (cl_args->flags & CLONE_CLEAR_SIGHAND)) {
-		uk_pr_debug("CLONE_SIGHAND: pid %d gets default signal dispositions\n",
-			    cpid);
-
-		if (!(cl_args->flags & CLONE_THREAD)) {
-			cp->signal->sigaction = pprocess_signal_sigaction_alloc(cp->_a);
-			if (unlikely(!cp->signal->sigaction)) {
-				rc = -ENOMEM;
-				goto fail_malloc;
-			}
-		}
-
-		pprocess_signal_foreach(signum)
-			pprocess_signal_sigaction_clear(KERN_SIGACTION(cp, signum));
-
-	/* CLONE_SIGHAND: Inherit a reference of the parent's signal handler
-	 *                table.
-	 */
-	} else if (cl_args->flags & CLONE_SIGHAND) {
-		uk_pr_debug("CLONE_SIGHAND: pid %d gets a reference of the parent's handlers\n",
-			    cpid);
-		uk_mutex_lock(&pprocess_mutex);
-		pprocess_signal_sigaction_acquire(pp->signal->sigaction);
-		cp->signal->sigaction = pp->signal->sigaction;
-		uk_mutex_unlock(&pprocess_mutex);
-	/* Default: Iherit a copy of the parent's signal dispositions. */
-	} else {
-		uk_pr_debug("pid %d gets a copy of the parent's handlers\n",
-			    cpid);
-
-		cp->signal->sigaction = pprocess_signal_sigaction_alloc(cp->_a);
-		if (unlikely(!cp->signal->sigaction)) {
-			rc = -ENOMEM;
-			goto fail_malloc;
-		}
-
-		uk_mutex_lock(&pprocess_mutex);
-		memcpy(cp->signal->sigaction->ks, pp->signal->sigaction->ks,
-		       sizeof(cp->signal->sigaction->ks));
-		uk_mutex_unlock(&pprocess_mutex);
-	}
-
-	/* The child process has no pending signals */
-	cp->signal->queued_count = 0;
-	cp->signal->queued_max = _POSIX_SIGQUEUE_MAX;
-
-	uk_sigemptyset(&cp->signal->sigqueue.pending);
-	pprocess_signal_foreach(signum)
-		UK_INIT_LIST_HEAD(&cp->signal->sigqueue.list_head[signum]);
-
-
-#if CONFIG_LIBPOSIX_PROCESS_SIGNALFD
-	uk_signal_files_ctx_init(&cp->signal->sigfiles_ctx);
-#endif /* CONFIG_LIBPOSIX_PROCESS_SIGNALFD */
-
-	return 0;
-
-fail_malloc:
-	uk_free(cp->_a, cp->signal);
-
-fail_tdesc_alloc:
-	pprocess_signal_tdesc_free(ct);
-
+	rc = pprocess_signal_inherit_locked(child, parent,
+					    event->cl_args->flags, &previous);
+	uk_mutex_unlock(&pprocess_mutex);
+	if (previous)
+		pprocess_signal_sigaction_release(previous);
 	return rc;
 }
 #else /* !CONFIG_LIBPOSIX_PROCESS_SIGNAL */

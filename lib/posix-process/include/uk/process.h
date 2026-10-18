@@ -44,6 +44,14 @@
 #include <uk/config.h>
 #include <uk/essentials.h>
 
+#define UK_POSIX_TASK_NAME_SIZE 16
+
+struct uk_posix_vm_view;
+
+struct uk_thread;
+int uk_posix_process_attach_application(struct uk_thread *thread,
+					const char *path);
+
 #if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
 #include <arch/clone.h>
 #include <uk/event.h>
@@ -72,17 +80,64 @@ unsigned int uk_posix_nofile_limit(void);
 
 #if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING && CONFIG_LIBPOSIX_VFS
 struct posix_process;
+struct uk_posix_task;
 struct uk_vfs_path;
+
+enum uk_posix_task_state {
+	UK_POSIX_TASK_RUNNABLE,
+	UK_POSIX_TASK_BLOCKED,
+	UK_POSIX_TASK_ZOMBIE
+};
+
+struct pu_credentials;
+
+struct uk_posix_task_status {
+	char name[UK_POSIX_TASK_NAME_SIZE];
+	pid_t pid, tgid, ppid;
+	size_t threads;
+	enum uk_posix_task_state state;
+#if CONFIG_LIBPOSIX_USER
+	struct pu_credentials *credentials;
+	bool no_new_privs;
+#endif
+};
+
+int uk_posix_process_task_status(struct posix_process *process,
+				 struct uk_posix_task *task,
+				 struct uk_posix_task_status *status);
+void uk_posix_process_task_status_release(struct uk_posix_task_status *status);
 #if CONFIG_LIBPOSIX_FDTAB
 struct uk_fdtab;
-struct uk_fdtab *uk_posix_process_fdtable(struct posix_process *process);
+struct uk_fdtab *uk_posix_process_task_fdtable(struct posix_process *process,
+					       struct uk_posix_task *task);
 #endif
 struct posix_process *uk_posix_process_get(pid_t pid);
 void uk_posix_process_put(struct posix_process *process);
 bool uk_posix_process_attached(struct posix_process *process);
 pid_t uk_posix_process_next_pid(pid_t after);
+pid_t uk_posix_process_next_tid(struct posix_process *process, pid_t after);
+struct uk_posix_task *uk_posix_process_task_get(struct posix_process *process,
+						pid_t tid);
+__u64 uk_posix_process_task_serial(const struct uk_posix_task *task);
+void uk_posix_process_task_acquire(struct uk_posix_task *task);
+void uk_posix_process_task_put(struct uk_posix_task *task);
+bool uk_posix_process_task_attached(struct posix_process *process,
+				    struct uk_posix_task *task);
+int uk_posix_process_task_name(struct posix_process *process,
+			       struct uk_posix_task *task,
+			       char name[UK_POSIX_TASK_NAME_SIZE]);
+int uk_posix_process_task_set_name(struct posix_process *process,
+				   struct uk_posix_task *task,
+				   const char name[UK_POSIX_TASK_NAME_SIZE]);
+#if CONFIG_LIBUKVMEM
+struct uk_posix_vm_view *
+uk_posix_process_task_vm_view_get(struct posix_process *process,
+				  struct uk_posix_task *task);
+#endif
 #if CONFIG_LIBPOSIX_PROCESS_EXECVE
-struct uk_vfs_path *uk_posix_process_executable(struct posix_process *process);
+struct uk_vfs_path *
+uk_posix_process_task_executable(struct posix_process *process,
+				 struct uk_posix_task *task);
 #endif
 #endif
 
@@ -92,26 +147,21 @@ pid_t uk_sys_getpid(void);
 
 #if CONFIG_LIBPOSIX_PROCESS_MULTITHREADING
 
-/* Creates a pthread and attaches it to the current process
- *
- * DO NOT USE. This is only necessary when loading an ELF via initrd,
- * where we want to POSIXise the kernel thread, as initrd does not
- * support paths and therefore we cannot execve(). For more details
- * see the implementation of app-elfloader.
- */
-int uk_posix_process_create_pthread(struct uk_thread *thread);
+struct posix_vm_context;
+void uk_posix_vm_reference_put(struct posix_vm_context *state);
 bool uk_posix_process_exit_requested(void);
 #if CONFIG_LIBPOSIX_FUTEX
-int uk_posix_futex_lock(__u32 *address, __u32 *second);
+void uk_posix_futex_lock(void);
 void uk_posix_futex_unlock(void);
-int uk_posix_futex_pi(__u32 *address, int command, const __nsec *deadline,
-		       const unsigned int *interrupted);
+int uk_posix_futex_pi(__u32 *address, int command, bool private_key,
+		      const __nsec *deadline,
+		      const unsigned int *interrupted);
 #endif
 #if CONFIG_LIBUKVMEM
 struct uk_vas;
 struct uk_vma_ops;
 struct uk_ofile;
-struct uk_posix_process_mapping {
+struct uk_posix_vm_mapping {
 	__vaddr_t start, end;
 	unsigned long attr;
 	bool private;
@@ -120,20 +170,22 @@ struct uk_posix_process_mapping {
 	__off offset;
 };
 
-int uk_posix_process_maps(struct posix_process *process,
-			  struct uk_posix_process_mapping **output,
-			  size_t *count);
-void uk_posix_process_maps_release(struct uk_posix_process_mapping *maps,
-				   size_t count);
-int uk_posix_process_vm_map(struct uk_vas *vas, __vaddr_t *address,
-			    __sz length, unsigned long attr, unsigned long flags,
+void uk_posix_vm_view_put(struct uk_posix_vm_view *view);
+int uk_posix_vm_maps(struct uk_posix_vm_view *view,
+		     struct uk_posix_vm_mapping **output, size_t *count);
+void uk_posix_vm_maps_release(struct uk_posix_vm_mapping *maps, size_t count);
+int uk_posix_process_vm_map(struct uk_vas *vas, __vaddr_t *address, __sz length,
+			    unsigned long attr, unsigned long flags,
 			    const struct uk_vma_ops *ops, void *args);
-int uk_posix_process_vm_unmap(struct uk_vas *vas, __vaddr_t address, __sz length);
+int uk_posix_process_vm_unmap(struct uk_vas *vas, __vaddr_t address,
+			      __sz length);
 int uk_posix_process_vm_protect(struct uk_vas *vas, __vaddr_t address,
-				__sz length, unsigned long attr);
+				__sz length, unsigned long attr,
+				bool grow_down);
 int uk_posix_process_vm_advise(struct uk_vas *vas, __vaddr_t address,
 			       __sz length, unsigned long advice);
-int uk_posix_process_vm_sync(struct uk_vas *vas, __vaddr_t address, __sz length);
+int uk_posix_process_vm_sync(struct uk_vas *vas, __vaddr_t address,
+			     __sz length);
 #endif
 
 #endif /* CONFIG_LIBPOSIX_PROCESS_MULTITHREADING */
@@ -161,8 +213,8 @@ typedef __noreturn void (*uk_posix_process_mainlike_func)(void *argc,
  * @param argv    Arg vector
  * @return        Child pid to parent, or negative value on failure.
  */
-pid_t uk_posix_process_run(uk_posix_process_mainlike_func fn,
-			   int argc, const char **argv);
+pid_t uk_posix_process_run(uk_posix_process_mainlike_func fn, int argc,
+			   const char **argv);
 #endif /* CONFIG_LIBPOSIX_PROCESS_MULTIPROCESS */
 
 #endif /* __UK_PROCESS_H__ */

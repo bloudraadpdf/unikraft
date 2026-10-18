@@ -17,6 +17,11 @@ config LIBUKSCHED_TCB_INIT
 config LIBUKSCHED_DEBUG
 	bool "Enable debug messages"
 
+config LIBUKSCHED_AFFINITY_TEST
+	bool "Test affinity ownership"
+	depends on LIBUKTEST
+	default n
+
 config LIBUKSCHED_STATS
 	bool "Scheduler statistics"
 	depends on LIBUKSTORE # circular dependency

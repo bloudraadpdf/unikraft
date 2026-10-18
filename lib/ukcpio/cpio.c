@@ -66,8 +66,19 @@ int uk_syscall_do_stat(const char *, struct stat *);
 int uk_syscall_do_unlinkat(int, const char *, int);
 int uk_syscall_do_rename(const char *, const char *);
 
-struct cpio_ilist_elm {
+struct cpio_inode {
 	uint32_t ino;
+	uint32_t major;
+	uint32_t minor;
+};
+
+static inline int cpio_inode_equal(struct cpio_inode a, struct cpio_inode b)
+{
+	return a.ino == b.ino && a.major == b.major && a.minor == b.minor;
+}
+
+struct cpio_ilist_elm {
+	struct cpio_inode inode;
 	UK_SLIST_ENTRY(struct cpio_ilist_elm) next;
 	char path[];
 };
@@ -79,7 +90,7 @@ struct cpio_ilist {
 
 static inline
 struct cpio_ilist_elm *cpio_ilist_elm_create(struct cpio_ilist *ilist,
-					     uint32_t ino,
+					     struct cpio_inode inode,
 					     const char *path,
 					     size_t pathlen)
 {
@@ -89,7 +100,7 @@ struct cpio_ilist_elm *cpio_ilist_elm_create(struct cpio_ilist *ilist,
 	if (unlikely(!elm))
 		return NULL;
 
-	elm->ino = ino;
+	elm->inode = inode;
 	/* Includes terminating null byte */
 	memcpy(elm->path, path, pathlen);
 
@@ -98,12 +109,12 @@ struct cpio_ilist_elm *cpio_ilist_elm_create(struct cpio_ilist *ilist,
 
 static inline
 struct cpio_ilist_elm *cpio_ilist_elm_upto(struct cpio_ilist *ilist,
-					   uint64_t ino)
+					   struct cpio_inode inode)
 {
 	struct cpio_ilist_elm *elm, *next_elm;
 
 	if (UK_SLIST_EMPTY(&ilist->elms) ||
-	    UK_SLIST_FIRST(&ilist->elms)->ino > ino)
+	    UK_SLIST_FIRST(&ilist->elms)->inode.ino > inode.ino)
 		return NULL;
 
 	/* Search in the ascendingly sorted list */
@@ -112,7 +123,7 @@ struct cpio_ilist_elm *cpio_ilist_elm_upto(struct cpio_ilist *ilist,
 		 * If we already encountered this multi-hardlink inode
 		 * just return it.
 		 */
-		if (elm->ino == ino)
+		if (cpio_inode_equal(elm->inode, inode))
 			break;
 
 		/*
@@ -125,7 +136,7 @@ struct cpio_ilist_elm *cpio_ilist_elm_upto(struct cpio_ilist *ilist,
 		 * able to insert right after it and maintain the list
 		 * ascendingly sorted.
 		 */
-		if (!next_elm || next_elm->ino > ino)
+		if (!next_elm || next_elm->inode.ino > inode.ino)
 			break;
 	}
 
@@ -185,17 +196,19 @@ write_file(int fd, const char *contents, size_t len)
 
 static enum ukcpio_error
 extract_file(const char *path, const char *contents, size_t len,
-	     mode_t mode, uint32_t mtime)
+	     mode_t mode, uint32_t mtime, int linked)
 {
 	int ret = UKCPIO_SUCCESS;
 	int fd;
+	int flags;
 	int err;
 	struct utimbuf times = {mtime, mtime};
 
 	uk_pr_info("Extracting %s (%zu bytes)\n", path, len);
 
-	fd = uk_syscall_do_open(path, O_CREAT | O_WRONLY | O_EXCL, 0);
-	if (unlikely(fd == -EEXIST)) {
+	flags = O_WRONLY | (linked ? O_TRUNC : O_CREAT | O_EXCL);
+	fd = uk_syscall_do_open(path, flags, 0);
+	if (unlikely(!linked && fd == -EEXIST)) {
 		uk_pr_info("Path exists, trying removal\n");
 		err = try_remove(path);
 		if (unlikely(err))
@@ -334,7 +347,11 @@ extract_section(struct cpio_ilist *ilist,
 	const char *data = UKCPIO_DATA(header, namesize);
 	struct cpio_ilist_elm *elm, *new_elm;
 	enum ukcpio_error err;
-	uint32_t ino;
+	struct cpio_inode inode = {
+		.ino = UKCPIO_U32FIELD(header->inode_num),
+		.major = UKCPIO_U32FIELD(header->major),
+		.minor = UKCPIO_U32FIELD(header->minor),
+	};
 	int rc;
 
 	if (unlikely(fname + namesize > eof)) {
@@ -353,18 +370,17 @@ extract_section(struct cpio_ilist *ilist,
 	}
 	memcpy(fullpath + prefixlen, fname, namesize);
 
-	if (nlink > 1 && strcmp(".", fname)) {
-		ino = UKCPIO_U32FIELD(header->inode_num);
+	if (nlink > 1 && !UKCPIO_IS_DIR(mode)) {
 		uk_pr_info("%s inode %u has more than 1 link (%u)\n",
-			   fname, ino, nlink);
-		elm = cpio_ilist_elm_upto(ilist, ino);
+			   fname, inode.ino, nlink);
+		elm = cpio_ilist_elm_upto(ilist, inode);
 		/*
 		 * If the list already contains an element with this inode
 		 * just link this current entry to it.
 		 */
-		if (elm && elm->ino == ino) {
+		if (elm && cpio_inode_equal(elm->inode, inode)) {
 			uk_pr_info("Inode %u has already been linked by %s, creating new hardlink at %s\n",
-				   ino, elm->path, fullpath);
+				   inode.ino, elm->path, fullpath);
 			rc = uk_syscall_do_link(elm->path, fullpath);
 			if (unlikely(rc)) {
 				uk_pr_err("Failed to create new hard link %s (from %s).\n",
@@ -372,8 +388,11 @@ extract_section(struct cpio_ilist *ilist,
 				return -UKCPIO_LINK_FAILED;
 			}
 
-			*headerp = UKCPIO_NEXT(header, namesize, filesize);
-			return UKCPIO_SUCCESS;
+			err = UKCPIO_SUCCESS;
+			if (UKCPIO_IS_FILE(mode) && filesize)
+				err = extract_file(fullpath, data, filesize,
+						   mode & 0777, mtime, 1);
+			goto ownership;
 		}
 
 		/*
@@ -381,7 +400,7 @@ extract_section(struct cpio_ilist *ilist,
 		 * element's inode is smaller so create the new inode list
 		 * element to insert.
 		 */
-		new_elm = cpio_ilist_elm_create(ilist, ino, fullpath,
+		new_elm = cpio_ilist_elm_create(ilist, inode, fullpath,
 						prefixlen + namesize);
 		if (unlikely(!new_elm)) {
 			uk_pr_err("Failed to create new ilist elm.\n");
@@ -407,7 +426,7 @@ extract_section(struct cpio_ilist *ilist,
 		err = extract_dir(fullpath, mode & 0777);
 	else if (UKCPIO_IS_FILE(mode))
 		err = extract_file(fullpath, data, filesize,
-				   mode & 0777, mtime);
+				   mode & 0777, mtime, 0);
 	else if (UKCPIO_IS_SYMLINK(mode))
 		err = extract_symlink(fullpath, data, filesize);
 	else {
@@ -415,6 +434,7 @@ extract_section(struct cpio_ilist *ilist,
 		goto next;
 	}
 
+ownership:
 	if (err == UKCPIO_SUCCESS) {
 		rc = uk_syscall_do_lchown(fullpath,
 					UKCPIO_U32FIELD(header->uid),

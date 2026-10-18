@@ -70,7 +70,8 @@ enum uk_poll_chain_type {
 
 enum uk_poll_chain_op {
 	UK_POLL_CHAINOP_CLEAR,
-	UK_POLL_CHAINOP_SET
+	UK_POLL_CHAINOP_SET,
+	UK_POLL_CHAINOP_IO_CHANGE
 };
 
 struct uk_poll_chain;
@@ -98,6 +99,7 @@ struct uk_poll_chain {
 	UK_STAILQ_ENTRY(struct uk_poll_chain) list_entry;
 	uk_pollevent mask; /* Events to register for */
 	enum uk_poll_chain_type type;
+	int io_changes;
 	union {
 		struct uk_pollq *queue; /* Where to propagate updates */
 		struct {
@@ -138,6 +140,7 @@ struct uk_pollq {
 	uk_poll_func poll_fn;
 #endif /* CONFIG_LIBUKFILE_POLLED */
 	uk_pollevent events;
+	unsigned long io_generation;
 	uk_pollevent waitmask;
 	struct uk_waitq waitq; /* Polling threads */
 	struct uk_rwlock waitlock;
@@ -168,6 +171,7 @@ struct uk_pollq {
 #if CONFIG_LIBUKFILE_POLLED
 #define __UK_POLLQ_INIT(q, pollfunc, ev) { \
 	.poll_fn = (pollfunc),					\
+	.io_generation = 0,					\
 	.events = (ev),						\
 	.waitmask = 0,						\
 	.waitq = UK_WAIT_QUEUE_INITIALIZER((q).waitq),		\
@@ -178,6 +182,7 @@ struct uk_pollq {
 }
 #else /* !CONFIG_LIBUKFILE_POLLED */
 #define __UK_POLLQ_INIT(q, pollfunc, ev) { \
+	.io_generation = 0,					\
 	.events = (ev),						\
 	.waitmask = 0,						\
 	.waitq = UK_WAIT_QUEUE_INITIALIZER((q).waitq),		\
@@ -191,6 +196,7 @@ struct uk_pollq {
 #if CONFIG_LIBUKFILE_POLLED
 #define __UK_POLLQ_INIT(q, pollfunc, ev) { \
 	.poll_fn = (pollfunc),					\
+	.io_generation = 0,					\
 	.events = (ev),						\
 	.waitmask = 0,						\
 	.waitq = UK_WAIT_QUEUE_INITIALIZER((q).waitq),		\
@@ -198,6 +204,7 @@ struct uk_pollq {
 }
 #else /* !CONFIG_LIBUKFILE_POLLED */
 #define __UK_POLLQ_INIT(q, pollfunc, ev) { \
+	.io_generation = 0,					\
 	.events = (ev),						\
 	.waitmask = 0,						\
 	.waitq = UK_WAIT_QUEUE_INITIALIZER((q).waitq),		\
@@ -221,6 +228,13 @@ struct uk_pollq {
 	((struct uk_pollq)UK_POLLQ_MANAGED_EVENTS_INITIALIZER(q, ev))
 #define UK_POLLQ_MANAGED_INIT_VALUE(q) \
 	((struct uk_pollq)UK_POLLQ_MANAGED_INITIALIZER(q))
+
+static inline unsigned long uk_pollq_io_generation(struct uk_pollq *q)
+{
+	return uk_load_n(&q->io_generation);
+}
+
+void uk_pollq_notify_io(struct uk_pollq *q, uk_pollevent events);
 
 /* Polling */
 

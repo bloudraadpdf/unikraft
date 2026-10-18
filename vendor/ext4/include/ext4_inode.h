@@ -209,8 +209,8 @@ void ext4_inode_set_generation(struct ext4_inode *inode, uint32_t gen);
  * @param inode      I-node
  * @return extra I-node size
  */
-uint16_t ext4_inode_get_extra_isize(struct ext4_sblock *sb,
-				    struct ext4_inode *inode);
+uint16_t ext4_inode_get_extra_isize(const struct ext4_sblock *sb,
+				    const struct ext4_inode *inode);
 
 /**@brief Set extra I-node size field.
  * @param sb         Superblock

@@ -1515,7 +1515,8 @@ static ssize_t vsock_sendto(posix_sock *sock, const void *buf, size_t len,
 }
 
 static ssize_t vsock_read(posix_sock *sock,
-			  const struct iovec *iov, size_t iovcnt)
+			  const struct iovec *iov, size_t iovcnt,
+			  int flags __unused)
 {
 	struct uk_vsock *vsock;
 	ssize_t ret = 0;

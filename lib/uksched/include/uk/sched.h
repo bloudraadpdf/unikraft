@@ -51,7 +51,30 @@ extern "C" {
 
 struct uk_sched;
 
-struct uk_sched *uk_sched_select(void);
+struct uk_sched *uk_sched_select(const struct uk_thread *thread);
+
+struct uk_sched_affinity;
+
+UK_TAILQ_HEAD(uk_sched_affinity_list, struct uk_sched_affinity);
+
+struct uk_sched_affinity *uk_sched_affinity_create(struct uk_alloc *allocator,
+						   const unsigned long *mask);
+void uk_sched_affinity_discard(struct uk_sched_affinity *request);
+int uk_sched_thread_affinity_submit(struct uk_thread *thread,
+				    struct uk_sched_affinity *request);
+int uk_sched_thread_affinity_wait(struct uk_sched_affinity *request);
+int uk_sched_thread_get_affinity(struct uk_thread *thread, size_t size,
+				 unsigned long *mask);
+void uk_sched_thread_inherit_affinity(struct uk_thread *child,
+				      struct uk_thread *parent);
+void uk_sched_thread_notify(struct uk_thread *thread);
+unsigned int uk_sched_process_affinity_requests(struct uk_sched *scheduler);
+
+static inline bool uk_sched_thread_affinity_pending(struct uk_thread *thread)
+{
+	return __atomic_load_n(&thread->affinity_pending, __ATOMIC_ACQUIRE) !=
+	       0;
+}
 int uk_sched_get_cpu_mask(size_t size, unsigned long *mask);
 int uk_sched_membarrier(bool sync_core);
 
@@ -79,6 +102,8 @@ typedef void  (*uk_sched_thread_woken_func_t)
 typedef const struct uk_thread * (*uk_sched_idle_thread_func_t)
 		(struct uk_sched *s, unsigned int proc_id);
 
+typedef __nsec (*uk_sched_current_exec_time_func_t)(struct uk_sched *s);
+
 typedef int   (*uk_sched_start_t)(struct uk_sched *s, struct uk_thread *main);
 
 #if CONFIG_LIBUKSCHED_STATS
@@ -99,6 +124,7 @@ struct uk_sched {
 	uk_sched_thread_woken_func_t    thread_woken;
 	uk_sched_thread_woken_func_t    thread_woken_isr;
 	uk_sched_idle_thread_func_t     idle_thread;
+	uk_sched_current_exec_time_func_t current_exec_time;
 
 	uk_sched_start_t sched_start;
 
@@ -108,6 +134,7 @@ struct uk_sched {
 	__u64 cpu_index;
 	struct uk_thread *current;
 	struct uk_thread_list stop_requests;
+	struct uk_sched_affinity_list affinity_requests;
 	struct uk_thread_list thread_list;
 	struct uk_thread_list exited_threads;
 	struct uk_waitq gc_wait;
@@ -137,6 +164,8 @@ static inline void uk_sched_yield(void)
 }
 
 int uk_sched_thread_add(struct uk_sched *s, struct uk_thread *t);
+
+__nsec uk_sched_current_exec_time(void);
 
 int uk_sched_thread_remove(struct uk_thread *t);
 

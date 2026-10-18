@@ -4,7 +4,7 @@
  * You may not use this file except in compliance with the License.
  */
 
-/* Pseudo-files with constant input and discarding output */
+/* Pseudo-files with constant input */
 
 #include <poll.h>
 #include <limits.h>
@@ -18,6 +18,7 @@
 static const char NULL_VOLID[] = "null_vol";
 static const char VOID_VOLID[] = "void_vol";
 static const char ZERO_VOLID[] = "zero_vol";
+static const char FULL_VOLID[] = "full_vol";
 
 static ssize_t null_read(const struct uk_file *f __maybe_unused,
 			 const struct iovec *iov __unused,
@@ -44,30 +45,41 @@ static ssize_t zero_read(const struct uk_file *f __maybe_unused,
 	size_t iovi = 0;
 	size_t cur = 0;
 
-	UK_ASSERT(f->vol == ZERO_VOLID);
+	UK_ASSERT(f->vol == ZERO_VOLID || f->vol == FULL_VOLID);
 	if (unlikely(!iov))
 		return -EFAULT;
 
 	return uk_iov_zero(iov, iovcnt, SSIZE_MAX, &iovi, &cur);
 }
 
-static ssize_t null_write(const struct uk_file *f __maybe_unused,
-			  const struct iovec *iov, size_t iovcnt,
-			  size_t off __unused, long flags __unused)
+static struct uk_file_io_result
+null_write(const struct uk_file *f __maybe_unused, const struct iovec *iov,
+	   size_t iovcnt, size_t off __unused, long flags __unused,
+	   enum uk_file_write_kind kind __unused)
 {
 	UK_ASSERT(f->vol == NULL_VOLID || f->vol == ZERO_VOLID ||
 		  f->vol == VOID_VOLID);
 	if (unlikely(!iov))
-		return -EFAULT;
+		return uk_file_io_status(-EFAULT);
 
-	return uk_iov_len(iov, iovcnt);
+	return uk_file_io_status(uk_iov_len(iov, iovcnt));
+}
+
+static struct uk_file_io_result
+full_write(const struct uk_file *f __maybe_unused,
+	   const struct iovec *iov __unused, size_t iovcnt __unused,
+	   size_t off __unused, long flags __unused,
+	   enum uk_file_write_kind kind __unused)
+{
+	UK_ASSERT(f->vol == FULL_VOLID);
+	return uk_file_io_status(-ENOSPC);
 }
 
 static int pseudo_getstat(const struct uk_file *f __maybe_unused,
 			  unsigned int mask __unused, struct uk_statx *arg)
 {
 	UK_ASSERT(f->vol == NULL_VOLID || f->vol == VOID_VOLID ||
-		  f->vol == ZERO_VOLID);
+		  f->vol == ZERO_VOLID || f->vol == FULL_VOLID);
 
 	/* Since all information is immediately available, ignore mask arg */
 	arg->stx_mask = UK_STATX_TYPE | UK_STATX_MODE | UK_STATX_NLINK |
@@ -80,8 +92,8 @@ static int pseudo_getstat(const struct uk_file *f __maybe_unused,
 	/* Following fields are always filled in, not in stx_mask */
 	arg->stx_dev_major = 0;
 	arg->stx_dev_minor = 5; /* Same value Linux returns for /dev/null */
-	arg->stx_rdev_major = 0;
-	arg->stx_rdev_minor = 0;
+	arg->stx_rdev_major = f->vol == FULL_VOLID ? 1 : 0;
+	arg->stx_rdev_minor = f->vol == FULL_VOLID ? 7 : 0;
 	arg->stx_blksize = 0x1000;
 	return 0;
 }
@@ -113,10 +125,29 @@ static const struct uk_file_ops zero_ops = {
 	.ctl = uk_file_nop_ctl,
 };
 
+static off_t full_seek(const struct uk_file *f __maybe_unused,
+		       off_t offset __unused, int whence __unused,
+		       off_t current __unused)
+{
+	UK_ASSERT(f->vol == FULL_VOLID);
+	return 0;
+}
+
+static const struct uk_file_ops full_ops = {
+	.read = zero_read,
+	.write = full_write,
+	.seek = full_seek,
+	.mem = uk_file_nop_mem,
+	.getstat = pseudo_getstat,
+	.setstat = uk_file_nop_setstat,
+	.ctl = uk_file_nop_ctl,
+};
+
 /* Refcounts initialized to 1 to count the static lifetime reference */
 static uk_file_refcnt null_ref = UK_FILE_REFCNT_INITIALIZER(null_ref);
 static uk_file_refcnt void_ref = UK_FILE_REFCNT_INITIALIZER(void_ref);
 static uk_file_refcnt zero_ref = UK_FILE_REFCNT_INITIALIZER(zero_ref);
+static uk_file_refcnt full_ref = UK_FILE_REFCNT_INITIALIZER(full_ref);
 
 static struct uk_file_state null_state = UK_FILE_STATE_EVENTS_INITIALIZER(
 	null_state, POLLIN | POLLOUT);
@@ -124,6 +155,9 @@ static struct uk_file_state void_state = UK_FILE_STATE_EVENTS_INITIALIZER(
 	void_state, POLLOUT);
 static struct uk_file_state zero_state = UK_FILE_STATE_EVENTS_INITIALIZER(
 	zero_state, POLLIN | POLLOUT);
+
+static struct uk_file_state full_state =
+	UK_FILE_STATE_EVENTS_INITIALIZER(full_state, POLLIN | POLLOUT);
 
 const struct uk_file uk_file_null = {
 	.vol = NULL_VOLID,
@@ -149,5 +183,14 @@ const struct uk_file uk_file_zero = {
 	.ops = &zero_ops,
 	.refcnt = &zero_ref,
 	.state = &zero_state,
+	._release = uk_file_static_release
+};
+
+const struct uk_file uk_file_full = {
+	.vol = FULL_VOLID,
+	.node = NULL,
+	.ops = &full_ops,
+	.refcnt = &full_ref,
+	.state = &full_state,
 	._release = uk_file_static_release
 };

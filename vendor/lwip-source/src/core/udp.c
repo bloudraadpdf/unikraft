@@ -1170,24 +1170,17 @@ udp_recv(struct udp_pcb *pcb, udp_recv_fn recv, void *recv_arg)
   pcb->recv_arg = recv_arg;
 }
 
-/**
- * @ingroup udp_raw
- * Removes and deallocates the pcb.  
- * 
- * @param pcb UDP PCB to be removed. The PCB is removed from the list of
- * UDP PCB's and the data structure is freed from memory.
- *
- * @see udp_new()
- */
-void
-udp_remove(struct udp_pcb *pcb)
+void udp_unbind(struct udp_pcb *pcb)
 {
   struct udp_pcb *pcb2;
 
   LWIP_ASSERT_CORE_LOCKED();
 
-  LWIP_ERROR("udp_remove: invalid pcb", pcb != NULL, return);
+  LWIP_ERROR("udp_unbind: invalid pcb", pcb != NULL, return);
 
+  if (!pcb->local_port) {
+    return;
+  }
   mib2_udp_unbind(pcb);
   /* pcb to be removed is first in list? */
   if (udp_pcbs == pcb) {
@@ -1204,6 +1197,24 @@ udp_remove(struct udp_pcb *pcb)
       }
     }
   }
+  pcb->next = NULL;
+  pcb->local_port = 0;
+}
+
+/**
+ * @ingroup udp_raw
+ * Removes and deallocates the pcb.
+ *
+ * @param pcb UDP PCB to be removed. The PCB is removed from the list of
+ * UDP PCB's and the data structure is freed from memory.
+ *
+ * @see udp_new()
+ */
+void udp_remove(struct udp_pcb *pcb)
+{
+  LWIP_ASSERT_CORE_LOCKED();
+  LWIP_ERROR("udp_remove: invalid pcb", pcb != NULL, return);
+  udp_unbind(pcb);
   memp_free(MEMP_UDP_PCB, pcb);
 }
 

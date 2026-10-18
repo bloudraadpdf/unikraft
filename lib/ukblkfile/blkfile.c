@@ -95,10 +95,12 @@ static ssize_t block_read(const struct uk_file *file, const struct iovec *iov,
 	return block_io(file, iov, count, offset, false);
 }
 
-static ssize_t block_write(const struct uk_file *file, const struct iovec *iov,
-			   size_t count, size_t offset, long flags __unused)
+static struct uk_file_io_result
+block_write(const struct uk_file *file, const struct iovec *iov, size_t count,
+	    size_t offset, long flags __unused,
+	    enum uk_file_write_kind kind __unused)
 {
-	return block_io(file, iov, count, offset, true);
+	return uk_file_io_status(block_io(file, iov, count, offset, true));
 }
 
 static int block_stat(const struct uk_file *file, unsigned int mask __unused,
@@ -126,6 +128,12 @@ static int block_control(const struct uk_file *file, int family, int request,
 	struct block_file *block = (struct block_file *)file->node;
 	int result;
 
+	if (family == UKFILE_CTL_FILE &&
+	    request == UKFILE_CTL_FILE_SYNC_RANGE) {
+		uk_mutex_lock(&block->lock);
+		uk_mutex_unlock(&block->lock);
+		return 0;
+	}
 	if (family == UKFILE_CTL_FILE && request == UKFILE_CTL_FILE_SYNC) {
 		if (block->readonly)
 			return 0;
@@ -208,10 +216,11 @@ static int block_files_init(struct uk_init_ctx *context __unused)
 			return -EOPNOTSUPP;
 		block->size = capacity->sectors * 512;
 		block->chunk = MIN(capacity->max_sectors_per_req,
-				   capacity->mode == O_RDONLY ? 128 : 8) * 512;
-		result = posix_memalign((void **)&block->buffer,
-				       MAX(capacity->ioalign, 4096),
-				       block->chunk);
+				   capacity->mode == O_RDONLY ? 128U : 8U) *
+			       512;
+		result =
+		    posix_memalign((void **)&block->buffer,
+				   MAX(capacity->ioalign, 4096), block->chunk);
 		if (result)
 			return -result;
 		block->id = id;

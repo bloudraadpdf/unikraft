@@ -78,4 +78,6 @@
  */
 #define FALLOC_FL_UNSHARE_RANGE		0x40
 
+#define FALLOC_FL_WRITE_ZEROES		0x80
+
 #endif /* _UAPI_FALLOC_H_ */

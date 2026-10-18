@@ -170,4 +170,95 @@ UK_TESTCASE(uknofault, test_nofault_try_write)
 	UK_TEST_EXPECT_SNUM_EQ(v2, v);
 }
 
+UK_TESTCASE(uknofault, atomic_word_access_preserves_values_on_fault)
+{
+	__u32 word = 17, value = 99, expected = 4;
+	__u32 *invalid = (__u32 *)UK_PAGING_VADDR_INV;
+	int result;
+
+	result = uk_nofault_read32(&word, &value, UK_NOFAULTF_NOPAGING);
+	UK_TEST_EXPECT_SNUM_EQ(result, 0);
+	UK_TEST_EXPECT_SNUM_EQ(value, 17);
+	result = uk_nofault_cmpxchg32(&word, &expected, 23,
+				      UK_NOFAULTF_NOPAGING);
+	UK_TEST_EXPECT_SNUM_EQ(result, 0);
+	UK_TEST_EXPECT_SNUM_EQ(expected, 17);
+	UK_TEST_EXPECT_SNUM_EQ(word, 17);
+	result = uk_nofault_cmpxchg32(&word, &expected, 23,
+				      UK_NOFAULTF_NOPAGING);
+	UK_TEST_EXPECT_SNUM_EQ(result, 0);
+	UK_TEST_EXPECT_SNUM_EQ(word, 23);
+	expected = 23;
+	result = uk_nofault_cmpxchg32(&word, &expected, 31, 0);
+	UK_TEST_EXPECT_SNUM_EQ(result, 0);
+	UK_TEST_EXPECT_SNUM_EQ(word, 31);
+	value = 99;
+	result = uk_nofault_read32(invalid, &value, UK_NOFAULTF_NOPAGING);
+	UK_TEST_EXPECT_SNUM_EQ(result, -EFAULT);
+	UK_TEST_EXPECT_SNUM_EQ(value, 99);
+	result = uk_nofault_cmpxchg32(invalid, &expected, 0,
+				      UK_NOFAULTF_NOPAGING);
+	UK_TEST_EXPECT_SNUM_EQ(result, -EFAULT);
+	UK_TEST_EXPECT_SNUM_EQ(expected, 23);
+	result = uk_nofault_read32(&word, &value, UK_NOFAULTF_CONTINUE);
+	UK_TEST_EXPECT_SNUM_EQ(result, -EINVAL);
+	UK_TEST_EXPECT_SNUM_EQ(value, 99);
+	result = uk_nofault_cmpxchg32(&word, &expected, 0,
+				      UK_NOFAULTF_CONTINUE);
+	UK_TEST_EXPECT_SNUM_EQ(result, -EINVAL);
+	UK_TEST_EXPECT_SNUM_EQ(word, 31);
+}
+
+#if CONFIG_LIBUKVMEM
+#include <uk/vmem.h>
+#include <uk/vmem/vma_ops.h>
+
+UK_TESTCASE(uknofault, atomic_nopaging_does_not_populate_a_lazy_mapping)
+{
+	struct uk_vas *vas = uk_vas_get_active();
+	__vaddr_t address = UK_PAGING_VADDR_ANY;
+	__u32 value = 99, expected = 0;
+	__u32 *word;
+	unsigned long flags = vas->flags;
+	int result;
+
+	result = uk_vma_map(vas, &address, UK_PAGING_PAGE_SIZE,
+			    UK_PAGING_PAGE_ATTR_PROT_RW, 0, NULL,
+			    &uk_vma_anon_ops, NULL, NULL);
+	UK_TEST_EXPECT_SNUM_EQ(result, 0);
+	if (result)
+		return;
+	word = (__u32 *)address;
+	result = uk_nofault_read32(word, &value, UK_NOFAULTF_NOPAGING);
+	UK_TEST_EXPECT_SNUM_EQ(result, -EFAULT);
+	UK_TEST_EXPECT_SNUM_EQ(value, 99);
+	UK_TEST_EXPECT_SNUM_EQ(vas->flags, flags);
+	result = uk_nofault_read32(word, &value, 0);
+	UK_TEST_EXPECT_SNUM_EQ(result, 0);
+	UK_TEST_EXPECT_SNUM_EQ(value, 0);
+	result = uk_nofault_cmpxchg32(word, &expected, 9, UK_NOFAULTF_NOPAGING);
+	UK_TEST_EXPECT_SNUM_EQ(result, 0);
+	UK_TEST_EXPECT_SNUM_EQ(vas->flags, flags);
+	result = uk_vma_set_attr(vas, address, UK_PAGING_PAGE_SIZE,
+				 UK_PAGING_PAGE_ATTR_PROT_READ, 0);
+	UK_TEST_EXPECT_SNUM_EQ(result, 0);
+	if (!result) {
+		expected = 9;
+		result = uk_nofault_read32(word, &value, UK_NOFAULTF_NOPAGING);
+		UK_TEST_EXPECT_SNUM_EQ(result, 0);
+		UK_TEST_EXPECT_SNUM_EQ(value, 9);
+		result = uk_nofault_cmpxchg32(word, &expected, 10,
+					      UK_NOFAULTF_NOPAGING);
+		UK_TEST_EXPECT_SNUM_EQ(result, -EFAULT);
+		UK_TEST_EXPECT_SNUM_EQ(expected, 9);
+		result = uk_nofault_read32(word, &value, 0);
+		UK_TEST_EXPECT_SNUM_EQ(result, 0);
+		UK_TEST_EXPECT_SNUM_EQ(value, 9);
+	}
+	UK_TEST_EXPECT_SNUM_EQ(vas->flags, flags);
+	UK_TEST_EXPECT_SNUM_EQ(uk_vma_unmap(vas, address,
+					    UK_PAGING_PAGE_SIZE, 0), 0);
+}
+#endif
+
 uk_testsuite_register(uknofault, NULL);

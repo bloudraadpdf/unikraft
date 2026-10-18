@@ -406,6 +406,27 @@ UK_SYSCALL_R_DEFINE(int, fchown, int, fd, uid_t, owner, gid_t, group)
 
 /* Ctl */
 
+UK_SYSCALL_R_DEFINE(int, sync_file_range, int, fd, off_t, offset, off_t, length,
+		    unsigned int, flags)
+{
+	union uk_shim_file sf;
+	int rc;
+
+	switch (uk_fdtab_shim_get(fd, &sf)) {
+	case UK_SHIM_OFILE:
+		rc = uk_sys_sync_file_range(sf.ofile, offset, length, flags);
+		uk_ofile_release(sf.ofile);
+		return rc;
+#if CONFIG_LIBVFSCORE
+	case UK_SHIM_LEGACY:
+		fdrop(sf.vfile);
+		return -EOPNOTSUPP;
+#endif
+	default:
+		return -EBADF;
+	}
+}
+
 UK_SYSCALL_R_DEFINE(int, fsync, int, fd)
 {
 	int r;

@@ -10,7 +10,7 @@
 #include <sys/types.h>
 
 #include <uk/nofault.h>
-#if CONFIG_HAVE_PAGING
+#if CONFIG_LIBUKPAGING
 #include <uk/paging.h>
 #endif
 #include <uk/process.h>
@@ -85,7 +85,7 @@ int pprocess_signal_stack_reserve(const struct pprocess_signal_stack *stack,
 	     top - (__uptr)stack->previous.ss_sp > stack->previous.ss_size))
 		return -EFAULT;
 	length = top - bottom;
-#if CONFIG_HAVE_PAGING
+#if CONFIG_LIBUKPAGING
 	if (!uk_paging_vaddr_range_isvalid(bottom, length))
 		return -EFAULT;
 #endif

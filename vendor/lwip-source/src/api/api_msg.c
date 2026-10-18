@@ -84,6 +84,43 @@ static err_t lwip_netconn_do_writemore(struct netconn *conn  WRITE_DELAYED_PARAM
 static err_t lwip_netconn_do_close_internal(struct netconn *conn  WRITE_DELAYED_PARAM);
 #endif
 
+#if LWIP_TCP
+static int
+netconn_write_space(const struct netconn *conn)
+{
+  const struct tcp_pcb *pcb = conn->pcb.tcp;
+
+  return pcb && tcp_sndbuf(pcb) > tcp_sndlowat(pcb) &&
+    tcp_sndqueuelen(pcb) < TCP_SNDQUEUELOWAT;
+}
+
+void
+lwip_netconn_set_sendbufsize(struct netconn *conn, u32_t bytes)
+{
+  struct tcp_pcb *pcb = conn->pcb.tcp;
+
+  LWIP_ASSERT_CORE_LOCKED();
+  conn->send_bufsize = bytes;
+  if (!pcb || pcb->state == LISTEN) {
+    return;
+  }
+  pcb->snd_buf_limit = bytes;
+  if (pcb->state != ESTABLISHED && pcb->state != CLOSE_WAIT) {
+    return;
+  }
+  if (conn->state == NETCONN_WRITE) {
+    lwip_netconn_do_writemore(conn  WRITE_DELAYED);
+  }
+  if (netconn_write_space(conn)) {
+    netconn_clear_flags(conn, NETCONN_FLAG_CHECK_WRITESPACE);
+    API_EVENT(conn, NETCONN_EVT_SENDPLUS, 0);
+  } else {
+    conn->flags |= NETCONN_FLAG_CHECK_WRITESPACE;
+    API_EVENT(conn, NETCONN_EVT_SENDMINUS, 0);
+  }
+}
+#endif /* LWIP_TCP */
+
 static void netconn_drain(struct netconn *conn);
 
 #if LWIP_TCPIP_CORE_LOCKING
@@ -263,6 +300,19 @@ recv_udp(void *arg, struct udp_pcb *pcb, struct pbuf *p,
       const struct udp_hdr *udphdr = (const struct udp_hdr *)ip_next_header_ptr();
       buf->flags = NETBUF_FLAG_DESTADDR;
       ip_addr_set(&buf->toaddr, ip_current_dest_addr());
+#if LWIP_IPV4
+      if (IP_IS_V4(&buf->toaddr)) {
+        const ip4_addr_t *destination = ip_2_ip4(&buf->toaddr);
+        struct netif *interface = ip_current_netif();
+
+        if (ip4_addr_ismulticast(destination) ||
+            ip4_addr_isbroadcast(destination, interface)) {
+          ip4_addr_copy(buf->spec_dst, *netif_ip4_addr(interface));
+        } else {
+          ip4_addr_copy(buf->spec_dst, *destination);
+        }
+      }
+#endif
       buf->toport_chksum = udphdr->dest;
     }
 #endif /* LWIP_NETBUF_RECVINFO */
@@ -377,8 +427,7 @@ poll_tcp(void *arg, struct tcp_pcb *pcb)
   if (conn->flags & NETCONN_FLAG_CHECK_WRITESPACE) {
     /* If the queued byte- or pbuf-count drops below the configured low-water limit,
        let select mark this pcb as writable again. */
-    if ((conn->pcb.tcp != NULL) && (tcp_sndbuf(conn->pcb.tcp) > TCP_SNDLOWAT) &&
-        (tcp_sndqueuelen(conn->pcb.tcp) < TCP_SNDQUEUELOWAT)) {
+    if (netconn_write_space(conn)) {
       netconn_clear_flags(conn, NETCONN_FLAG_CHECK_WRITESPACE);
       API_EVENT(conn, NETCONN_EVT_SENDPLUS, 0);
     }
@@ -411,8 +460,7 @@ sent_tcp(void *arg, struct tcp_pcb *pcb, u16_t len)
 
     /* If the queued byte- or pbuf-count drops below the configured low-water limit,
        let select mark this pcb as writable again. */
-    if ((conn->pcb.tcp != NULL) && (tcp_sndbuf(conn->pcb.tcp) > TCP_SNDLOWAT) &&
-        (tcp_sndqueuelen(conn->pcb.tcp) < TCP_SNDQUEUELOWAT)) {
+    if (netconn_write_space(conn)) {
       netconn_clear_flags(conn, NETCONN_FLAG_CHECK_WRITESPACE);
       API_EVENT(conn, NETCONN_EVT_SENDPLUS, len);
     }
@@ -516,6 +564,7 @@ setup_tcp(struct netconn *conn)
   struct tcp_pcb *pcb;
 
   pcb = conn->pcb.tcp;
+  pcb->snd_buf_limit = conn->send_bufsize;
   tcp_arg(pcb, conn);
   tcp_recv(pcb, recv_tcp);
   tcp_sent(pcb, sent_tcp);
@@ -567,6 +616,11 @@ accept_function(void *arg, struct tcp_pcb *newpcb, err_t err)
     }
     return ERR_MEM;
   }
+#if LWIP_SOCKET
+  newconn->socket_receive_timeout_ms = conn->socket_receive_timeout_ms;
+  newconn->socket_send_timeout_ms = conn->socket_send_timeout_ms;
+#endif
+  newconn->send_bufsize = conn->send_bufsize;
   newconn->pcb.tcp = newpcb;
   setup_tcp(newconn);
 
@@ -762,10 +816,16 @@ netconn_alloc(enum netconn_type t, netconn_callback callback)
 #if LWIP_SOCKET
   /* initialize socket to -1 since 0 is a valid socket */
   conn->socket       = -1;
+  conn->socket_receive_timeout_ms = (u64_t)-1;
+  conn->socket_send_timeout_ms = (u64_t)-1;
+#if LWIP_UDP
+  conn->socket_udp_port_locked = 0;
+#endif /* LWIP_UDP */
 #endif /* LWIP_SOCKET */
   conn->callback     = callback;
 #if LWIP_TCP
   conn->current_msg  = NULL;
+  conn->send_bufsize = TCP_SND_BUF;
 #endif /* LWIP_TCP */
 #if LWIP_SO_SNDTIMEO
   conn->send_timeout = 0;
@@ -1735,8 +1795,7 @@ err_mem:
            and let poll_tcp check writable space to mark the pcb writable again */
         API_EVENT(conn, NETCONN_EVT_SENDMINUS, 0);
         conn->flags |= NETCONN_FLAG_CHECK_WRITESPACE;
-      } else if ((tcp_sndbuf(conn->pcb.tcp) <= TCP_SNDLOWAT) ||
-                 (tcp_sndqueuelen(conn->pcb.tcp) >= TCP_SNDQUEUELOWAT)) {
+      } else if (!netconn_write_space(conn)) {
         /* The queued byte- or pbuf-count exceeds the configured low-water limit,
            let select mark this pcb as non-writable. */
         API_EVENT(conn, NETCONN_EVT_SENDMINUS, 0);
