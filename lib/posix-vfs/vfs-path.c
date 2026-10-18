@@ -208,6 +208,13 @@ struct uk_fs_path vfs_path_cwd_name(struct uk_vfs_path *path)
 	return name;
 }
 
+void vfs_path_mark_deleted(struct uk_vfs_path *path)
+{
+	uk_mutex_lock(&path_lock);
+	path->deleted = true;
+	uk_mutex_unlock(&path_lock);
+}
+
 void vfs_path_unlinked(const struct uk_file *parent,
 		       const char *name, size_t length)
 {

@@ -69,7 +69,7 @@ void uk_ofile_init(struct uk_ofile *of,
 #define UKFD_MODE_MASK \
 	(O_RDONLY | O_WRONLY | O_RDWR | O_PATH | O_NONBLOCK | O_NOATIME | \
 	 O_APPEND | O_DIRECT | O_SYNC | O_DSYNC | O_LARGEFILE | O_DIRECTORY | \
-	 O_NOFOLLOW)
+	 O_NOFOLLOW | O_TMPFILE)
 
 /* Unikraft-specific mode bits, chosen to not overlap with any O_* flags */
 /* Open file is not seekable (e.g. for pipes, sockets & FIFOs) */

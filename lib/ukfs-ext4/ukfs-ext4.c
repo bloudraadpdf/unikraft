@@ -54,6 +54,7 @@ struct disk_node {
 	uint32_t inode;
 	size_t size;
 	unsigned int type, references;
+	int tmpfile_linkable;
 	char *link;
 	size_t link_length;
 };
@@ -1187,12 +1188,17 @@ static struct disk_node *node_create(struct disk_node *node,
 	if (allocated)
 		result = initialise_child(volume, &parent, &child, mode,
 					  type == S_IFLNK ? target.ukfs.path : NULL);
+	if (!result && hardlink && !ext4_inode_get_links_cnt(child.inode) &&
+	    !target.livenode->tmpfile_linkable)
+		result = ENOENT;
 	if (!result && ext4_inode_get_links_cnt(child.inode) == UINT16_MAX)
 		result = EMLINK;
 	if (!result && !temporary) {
 		result = ext4_dir_add_entry(&parent, name, length, &child);
 		if (!result) {
 			linked = 1;
+			if (hardlink)
+				target.livenode->tmpfile_linkable = 0;
 			ext4_fs_inode_links_count_inc(&child);
 			if (type == S_IFDIR) {
 				ext4_fs_inode_links_count_inc(&child);
@@ -1206,6 +1212,8 @@ static struct disk_node *node_create(struct disk_node *node,
 		created = node_get(volume, child.index);
 	if (created && PTRISERR(created))
 		result = -PTR2ERR(created);
+	if (!result && temporary)
+		created->tmpfile_linkable = !(flags & O_EXCL);
 	if (result && allocated && !linked) {
 		int removed = inode_delete(&child);
 		if (removed)

@@ -36,6 +36,7 @@ struct uk_vfs_path *vfs_path_get(struct uk_vfs_path *parent,
 				 size_t length);
 struct uk_fs_path vfs_path_cwd_name(struct uk_vfs_path *path);
 struct uk_vfs_path *vfs_path_parent(struct uk_vfs_path *path);
+void vfs_path_mark_deleted(struct uk_vfs_path *path);
 void vfs_path_unlinked(const struct uk_file *parent,
 		       const char *name, size_t length);
 struct vfs_path_move;

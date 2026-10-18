@@ -1251,6 +1251,8 @@ struct viofs_node *virtiofs_live_fs_create(struct viofs_node *n,
 {
 	int r;
 
+	if ((flags & O_TMPFILE) == O_TMPFILE)
+		return ERR2PTR(-EOPNOTSUPP);
 	switch (mode & S_IFMT) {
 	case S_IFMT: /* link */
 	{

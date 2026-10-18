@@ -152,6 +152,7 @@ struct ramfs_node {
 	struct uk_swrefcount refcnt;
 	struct uk_file_state fstate;
 	struct ramfs_stat statx;
+	bool tmpfile_linkable;
 	union {
 		struct ramfs_dir_data dir_data;
 		struct ramfs_file_data file_data;
@@ -200,6 +201,7 @@ void ramfs_init_statx(struct ramfs_node *n, unsigned int mode)
 {
 	const struct uk_statx_timestamp now = ramfs_now();
 
+	n->tmpfile_linkable = false;
 	n->statx = (struct ramfs_stat){
 		.stx_nlink = 0,
 		.stx_uid = 0, /* TODO: use euid */
@@ -446,6 +448,7 @@ void ramfs_node_relink(struct ramfs_node *n, struct ramfs_node *parent)
 static
 void ramfs_node_newlink(struct ramfs_node *n, struct ramfs_node *parent)
 {
+	n->tmpfile_linkable = false;
 	uk_inc(&n->statx.stx_nlink);
 	ramfs_node_relink(n, parent);
 }
@@ -1171,6 +1174,8 @@ struct ramfs_node *ramfs_node_create(unsigned int mode,
 		break;
 	case S_IFMT:
 		newnode = target.livenode;
+		if (!newnode->statx.stx_nlink && !newnode->tmpfile_linkable)
+			return ERR2PTR(-ENOENT);
 		/* Refuse multiple hardlinks to directories */
 		if (unlikely(ramfs_live_nodekind(newnode, UK_FS_TMPL_DIR) &&
 			     newnode->dir_data.parent))
@@ -1260,6 +1265,7 @@ struct ramfs_node *ramfs_live_fs_create_locked(struct ramfs_node *n,
 	union UK_FS_TMPL_LIVE_CREATE_TARGET(ramfs) target,
 	unsigned long mntflags)
 {
+	const bool temporary = (flags & O_TMPFILE) == O_TMPFILE;
 	union ramfs_link newlink;
 	unsigned char dtype;
 	int err;
@@ -1267,12 +1273,15 @@ struct ramfs_node *ramfs_live_fs_create_locked(struct ramfs_node *n,
 	if (!n->statx.stx_nlink)
 		return ERR2PTR(-ENOENT);
 
+	if (temporary && (mode & S_IFMT) != S_IFREG)
+		return ERR2PTR(-EINVAL);
+
 	/* refuse to operate on "." and ".." */
-	if (unlikely(!(flags & O_TMPFILE) &&
+	if (unlikely(!temporary &&
 		     (uk_fs_path_isdot(name, namelen) ||
 		      uk_fs_path_isdotdot(name, namelen))))
 		return ERR2PTR(-EEXIST);
-	if (unlikely(!(flags & O_TMPFILE) && namelen > RAMFS_MAX_NAMELEN))
+	if (unlikely(!temporary && namelen > RAMFS_MAX_NAMELEN))
 		return ERR2PTR(-ENAMETOOLONG);
 
 	switch (mode & S_IFMT) {
@@ -1296,8 +1305,11 @@ struct ramfs_node *ramfs_live_fs_create_locked(struct ramfs_node *n,
 	if (unlikely(err))
 		return ERR2PTR(err);
 
+	if (temporary)
+		newlink.node->tmpfile_linkable = !(flags & O_EXCL);
+
 	/* Link in if not tmpfile */
-	if (!(flags & O_TMPFILE)) {
+	if (!temporary) {
 		err = ramfs_linkin(n, name, namelen, dtype,
 				   newlink, mode, flags);
 		if (unlikely(err)) {
@@ -1483,6 +1495,7 @@ int ramfs_live_fs_rename_locked(struct ramfs_node *n,
 
 	if (unlikely(flags & RENAME_WHITEOUT))
 		return -EINVAL;
+
 	/* refuse to operate on "." and ".." */
 	if (unlikely(uk_fs_path_isdot(name, nlen) ||
 		     uk_fs_path_isdotdot(name, nlen) ||

@@ -2387,6 +2387,39 @@ const struct uk_file *uk_posix_vfs_socket_create(const char *path)
 	return file;
 }
 
+static struct uk_ofile *vfs_open_tmpfile(struct uk_vfs_path *directory,
+					 int flags, mode_t mode)
+{
+	struct uk_vfs_path *identity;
+	const struct uk_file *file;
+	struct uk_statx status;
+	char name[1 + 20 + 1];
+	int error, length;
+
+	vfs_wlock(directory->file);
+	error = vfs_check_perms(directory->file, W_OK | X_OK);
+	file = error ? ERR2PTR(error) :
+		uk_fs_createat(directory->file, "", 0, mode,
+			       flags & (O_TMPFILE | O_EXCL), UKFS_NOTARGET);
+	vfs_wunlock(directory->file);
+	if (PTRISERR(file))
+		return ERR2PTR(PTR2ERR(file));
+	error = uk_file_getstat(file, UK_STATX_INO, &status);
+	if (error) {
+		uk_file_release(file);
+		return ERR2PTR(error);
+	}
+	length = snprintf(name, sizeof(name), "#%llu",
+			  (unsigned long long)status.stx_ino);
+	identity = vfs_path_get(directory, directory->mount, file,
+				name, length);
+	uk_file_release(file);
+	if (PTRISERR(identity))
+		return ERR2PTR(PTR2ERR(identity));
+	vfs_path_mark_deleted(identity);
+	return vfs_open_identity(identity, flags & UKFD_MODE_MASK);
+}
+
 static struct uk_ofile *vfs_openat(struct uk_ofile *of, const char *path,
 				   int flags, mode_t mode, __u64 resolve)
 {
@@ -2404,8 +2437,6 @@ static struct uk_ofile *vfs_openat(struct uk_ofile *of, const char *path,
 		flags |= O_LARGEFILE;
 	if ((flags & O_CREAT) && (flags & O_DIRECTORY))
 		return ERR2PTR(-EINVAL);
-	if ((flags & O_TMPFILE) == O_TMPFILE)
-		return ERR2PTR(-ENOSYS);
 	walk.flags = flags;
 	walk.mode = vfs_apply_umask((mode & ~S_IFMT) | S_IFREG);
 	identity = vfs_walk_start(of, path, strlen(path), &walk,
@@ -2421,6 +2452,10 @@ static struct uk_ofile *vfs_openat(struct uk_ofile *of, const char *path,
 	}
 	if ((flags & O_DIRECTORY) && !uk_fs_isdir(target)) {
 		ret = ERR2PTR(-ENOTDIR);
+		goto out_identity;
+	}
+	if ((flags & O_TMPFILE) == O_TMPFILE) {
+		ret = vfs_open_tmpfile(identity, flags, walk.mode);
 		goto out_identity;
 	}
 	if (!walk.created && !(flags & O_PATH)) {
