@@ -1080,11 +1080,11 @@ struct socket_message {
 	void *control;
 };
 
-static struct uk_ofile *socket_message_get(int fd, const struct msghdr *user,
+static struct uk_ofile *socket_message_get(struct uk_ofile *of,
+					   const struct msghdr *user,
 					   struct socket_message *message,
 					   bool send)
 {
-	struct uk_ofile *of = socketfd_get(fd);
 	struct msghdr *header = &message->header;
 	size_t metadata, total = 0;
 	int error = -EFAULT;
@@ -1217,7 +1217,7 @@ UK_SYSCALL_R_DEFINE(ssize_t, recvmsg, int, sock, struct msghdr *, msg,
 
 	trace_posix_socket_recvmsg(sock, msg, flags);
 
-	of = socket_message_get(sock, msg, &message, false);
+	of = socket_message_get(socketfd_get(sock), msg, &message, false);
 	if (unlikely(PTRISERR(of))) {
 		ret = PTR2ERR(of);
 		goto out;
@@ -1277,7 +1277,7 @@ UK_SYSCALL_R_DEFINE(ssize_t, sendmsg, int, sock, const struct msghdr *, msg,
 
 	trace_posix_socket_sendmsg(sock, msg, flags);
 
-	of = socket_message_get(sock, msg, &message, true);
+	of = socket_message_get(socketfd_get(sock), msg, &message, true);
 	if (unlikely(PTRISERR(of))) {
 		ret = PTR2ERR(of);
 		goto out;
@@ -1294,6 +1294,46 @@ out:
 	else
 		trace_posix_socket_sendmsg_ret(ret);
 	return ret;
+}
+
+UK_SYSCALL_R_DEFINE(int, sendmmsg, int, sock, struct mmsghdr *, messages,
+		    unsigned int, count, unsigned int, flags)
+{
+	struct uk_ofile *of = socketfd_get(sock);
+	unsigned int sent = 0;
+	ssize_t result = 0;
+
+	if (PTRISERR(of))
+		return PTR2ERR(of);
+	count = MIN(count, 1024U);
+	while (sent < count) {
+		struct socket_message message;
+		struct uk_ofile *current;
+		unsigned int length;
+		bool write_sigpipe;
+
+		uk_ofile_acquire(of);
+		current = socket_message_get(of, &messages[sent].msg_hdr,
+					     &message, true);
+		if (PTRISERR(current)) {
+			result = PTR2ERR(current);
+			break;
+		}
+		result = socket_message_io(current, &message.header, flags, true);
+		write_sigpipe = current->file->write_sigpipe;
+		socket_message_put(current, &message);
+		result = socket_send_result(result, write_sigpipe, flags);
+		if (result < 0)
+			break;
+		length = result;
+		if (!uk_nofault_try_write(length, &messages[sent].msg_len)) {
+			result = -EFAULT;
+			break;
+		}
+		sent++;
+	}
+	uk_ofile_release(of);
+	return sent ? (int)sent : (int)result;
 }
 
 UK_TRACEPOINT(trace_posix_socket_sendto, "%d %p %d %d %p %d",

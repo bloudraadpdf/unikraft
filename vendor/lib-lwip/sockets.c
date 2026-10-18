@@ -45,6 +45,12 @@
 #include <uk/essentials.h>
 #include <uk/socket_driver.h>
 #include <uk/nofault.h>
+#include <uk/init.h>
+#include <uk/list.h>
+#include <uk/refcount.h>
+#include <uk/sched.h>
+#include <uk/semaphore.h>
+#include <uk/spinlock.h>
 
 #include <lwip/sockets.h>
 #include <sys/socket.h>
@@ -65,8 +71,60 @@ struct lwip_socket_data {
 	struct uk_alloc *allocator;
 	struct uk_mutex receive;
 	struct uk_mutex send;
+	struct uk_mutex publish;
+	struct uk_list_head event_link;
+	posix_sock *event_file;
+	__atomic references;
+	bool event_queued;
+	bool event_accepting;
 	int fd;
 };
+
+static UK_LIST_HEAD(socket_events);
+static struct uk_spinlock socket_events_lock = UK_SPINLOCK_INITIALIZER();
+static struct uk_semaphore socket_events_ready;
+
+static void lwip_socket_data_release(struct lwip_socket_data *data)
+{
+	if (uk_refcount_release(&data->references))
+		uk_free(data->allocator, data);
+}
+
+__noreturn static void lwip_socket_event_worker(void *arg __unused)
+{
+	for (;;) {
+		struct lwip_socket_data *data;
+		posix_sock *file;
+		unsigned long flags;
+
+		uk_semaphore_down(&socket_events_ready);
+		uk_spin_lock_irqsave(&socket_events_lock, flags);
+		UK_ASSERT(!uk_list_empty(&socket_events));
+		data = uk_list_first_entry(&socket_events,
+					   struct lwip_socket_data, event_link);
+		uk_list_del_init(&data->event_link);
+		data->event_queued = false;
+		file = data->event_file;
+		uk_spin_unlock_irqrestore(&socket_events_lock, flags);
+
+		if (uk_file_try_acquire(file)) {
+			lwip_posix_socket_poll_setup(file);
+			uk_file_release(file);
+		}
+		lwip_socket_data_release(data);
+		uk_file_release_weak(file);
+	}
+}
+
+static int lwip_socket_events_init(struct uk_init_ctx *context __unused)
+{
+	uk_semaphore_init(&socket_events_ready, 0);
+	return uk_sched_thread_create(uk_sched_current(),
+				       lwip_socket_event_worker, NULL,
+				       "lwip-events") ? 0 : -ENOMEM;
+}
+
+uk_early_initcall(lwip_socket_events_init, 0x0);
 
 static void *lwip_socket_data_create(struct uk_alloc *allocator, int fd)
 {
@@ -80,6 +138,10 @@ static void *lwip_socket_data_create(struct uk_alloc *allocator, int fd)
 	data->fd = fd;
 	uk_mutex_init(&data->receive);
 	uk_mutex_init(&data->send);
+	uk_mutex_init(&data->publish);
+	uk_refcount_init(&data->references, 1);
+	data->event_queued = false;
+	data->event_accepting = true;
 	return data;
 }
 
@@ -449,17 +511,21 @@ static int
 lwip_posix_socket_close(posix_sock *file)
 {
 	struct lwip_socket_data *data = posix_sock_get_data(file);
+	unsigned long flags;
 	int lwip_fd;
 	int ret;
 
 	lwip_fd = _lwip_getfd(file);
 	UK_ASSERT(lwip_fd >= 0);
 
+	uk_spin_lock_irqsave(&socket_events_lock, flags);
+	data->event_accepting = false;
+	uk_spin_unlock_irqrestore(&socket_events_lock, flags);
 	ret = lwip_close(lwip_fd);
 	if (unlikely(ret < 0))
 		ret = -errno;
 
-	uk_free(data->allocator, data);
+	lwip_socket_data_release(data);
 	return ret;
 }
 
@@ -607,7 +673,9 @@ lwip_posix_socket_event_callback(struct lwip_sock *sock,
 				 u16_t len __unused)
 {
 	posix_sock *sockobj;
-	unsigned int events;
+	struct lwip_socket_data *data;
+	unsigned long flags;
+	bool queued = false;
 
 	UK_ASSERT(sock);
 	if (unlikely(!sock->sock_data))
@@ -616,8 +684,19 @@ lwip_posix_socket_event_callback(struct lwip_sock *sock,
 	sockobj = (posix_sock *)sock->sock_data;
 	UK_ASSERT(_lwip_getfd(sockobj) == sock->conn->socket);
 
-	events = get_lwip_socket_events(sock);
-	posix_sock_event_assign(sockobj, events);
+	data = posix_sock_get_data(sockobj);
+	uk_spin_lock_irqsave(&socket_events_lock, flags);
+	if (data->event_accepting && !data->event_queued) {
+		uk_file_acquire_weak(sockobj);
+		uk_refcount_acquire(&data->references);
+		data->event_file = sockobj;
+		data->event_queued = true;
+		uk_list_add_tail(&data->event_link, &socket_events);
+		queued = true;
+	}
+	uk_spin_unlock_irqrestore(&socket_events_lock, flags);
+	if (queued)
+		uk_semaphore_up(&socket_events_ready);
 }
 
 struct lwip_socket_state_query {
@@ -625,6 +704,7 @@ struct lwip_socket_state_query {
 	posix_sock *file;
 	enum posix_socket_timeout direction;
 	__u64 milliseconds;
+	unsigned int events;
 	bool set_timeout;
 };
 
@@ -651,9 +731,22 @@ static err_t lwip_socket_state_query(struct tcpip_api_call_data *call)
 		sock->conn->socket_receive_timeout_ms;
 	posix_sock_get_node(file)->send_timeout_ms =
 		sock->conn->socket_send_timeout_ms;
-	posix_sock_event_assign(file, get_lwip_socket_events(sock));
+	query->events = get_lwip_socket_events(sock);
 	SYS_ARCH_UNPROTECT(lev);
 	return ERR_OK;
+}
+
+static int lwip_socket_state_publish(struct lwip_socket_state_query *query)
+{
+	struct lwip_socket_data *data = posix_sock_get_data(query->file);
+	err_t error;
+
+	uk_mutex_lock(&data->publish);
+	error = tcpip_api_call(lwip_socket_state_query, &query->call);
+	if (error == ERR_OK)
+		posix_sock_event_assign(query->file, query->events);
+	uk_mutex_unlock(&data->publish);
+	return -err_to_errno(error);
 }
 
 static int
@@ -668,8 +761,7 @@ lwip_posix_socket_timeout_update(posix_sock *file,
 		.set_timeout = true,
 	};
 
-	return -err_to_errno(
-		tcpip_api_call(lwip_socket_state_query, &query.call));
+	return lwip_socket_state_publish(&query);
 }
 
 static void
@@ -677,7 +769,7 @@ lwip_posix_socket_poll_setup(posix_sock *file)
 {
 	struct lwip_socket_state_query query = {.file = file};
 
-	if (tcpip_api_call(lwip_socket_state_query, &query.call) != ERR_OK)
+	if (lwip_socket_state_publish(&query))
 		posix_sock_event_set(file, EPOLLERR);
 }
 
