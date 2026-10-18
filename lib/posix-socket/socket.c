@@ -50,6 +50,7 @@
 #include <uk/file/nops.h>
 #include <uk/posix-fd.h>
 #include <uk/posix-fdio.h>
+#include <uk/plat/time.h>
 #if CONFIG_LIBPOSIX_PROCESS_SIGNAL
 #include <uk/posix-signal-wait.h>
 #endif
@@ -268,6 +269,18 @@ static void socket_release(const struct uk_file *sock, int what)
 }
 
 
+#if CONFIG_LIBPOSIX_SOCKET_POLLED
+static uk_pollevent socket_poll(posix_sock *sock, uk_pollevent mask)
+{
+	struct posix_socket_driver *driver = posix_sock_get_driver(sock);
+	uk_pollevent events = driver->ops->poll(sock, mask);
+
+	if (uk_load_n(&posix_sock_get_node(sock)->pending_error))
+		events |= EPOLLERR;
+	return events & mask;
+}
+#endif
+
 static void _socket_init(struct socket_alloc *al,
 			 struct posix_socket_driver *d, void *sock_data,
 			 bool write_sigpipe)
@@ -276,12 +289,13 @@ static void _socket_init(struct socket_alloc *al,
 		.sock_data = sock_data,
 		.driver = d,
 		.receive_timeout_ms = __U64_MAX,
-		.send_timeout_ms = __U64_MAX
+		.send_timeout_ms = __U64_MAX,
+		.event_lock = UK_MUTEX_INITIALIZER(al->node.event_lock)
 	};
 #if CONFIG_LIBPOSIX_SOCKET_POLLED
 	if (d->ops->poll)
 		al->fstate = UK_FILE_POLLED_STATE_INIT_VALUE(al->fstate,
-							     d->ops->poll);
+							     socket_poll);
 	else
 #endif /* CONFIG_LIBPOSIX_SOCKET_POLLED */
 		al->fstate = UK_FILE_STATE_INIT_VALUE(al->fstate);
@@ -1203,26 +1217,17 @@ static ssize_t socket_message_io(struct uk_ofile *of, struct msghdr *header,
 	return ret;
 }
 
-UK_TRACEPOINT(trace_posix_socket_recvmsg, "%d %p %d", int, struct msghdr*, int);
-UK_TRACEPOINT(trace_posix_socket_recvmsg_ret, "%d", int);
-UK_TRACEPOINT(trace_posix_socket_recvmsg_err, "%d", int);
-
-UK_SYSCALL_R_DEFINE(ssize_t, recvmsg, int, sock, struct msghdr *, msg,
-		    int, flags)
+static ssize_t socket_receive_message(struct uk_ofile *of,
+				      struct msghdr *msg, int flags,
+				      int *message_flags)
 {
 	struct socket_message message;
 	struct msghdr *header = &message.header;
 	ssize_t ret;
-	struct uk_ofile *of;
 
-	trace_posix_socket_recvmsg(sock, msg, flags);
-
-	of = socket_message_get(socketfd_get(sock), msg, &message, false);
-	if (unlikely(PTRISERR(of))) {
-		ret = PTR2ERR(of);
-		goto out;
-	}
-
+	of = socket_message_get(of, msg, &message, false);
+	if (PTRISERR(of))
+		return PTR2ERR(of);
 	ret = socket_message_io(of, header, flags, false);
 	if (ret >= 0 && message.address_user) {
 		size_t length =
@@ -1240,14 +1245,111 @@ UK_SYSCALL_R_DEFINE(ssize_t, recvmsg, int, sock, struct msghdr *, msg,
 				   &msg->msg_controllen) ||
 	     !uk_nofault_try_write(header->msg_flags, &msg->msg_flags)))
 		ret = -EFAULT;
+	if (ret >= 0 && message_flags)
+		*message_flags = header->msg_flags;
 	socket_message_put(of, &message);
+	return ret;
+}
 
-out:
+UK_TRACEPOINT(trace_posix_socket_recvmsg, "%d %p %d", int, struct msghdr*, int);
+UK_TRACEPOINT(trace_posix_socket_recvmsg_ret, "%d", int);
+UK_TRACEPOINT(trace_posix_socket_recvmsg_err, "%d", int);
+
+UK_SYSCALL_R_DEFINE(ssize_t, recvmsg, int, sock, struct msghdr *, msg,
+		    int, flags)
+{
+	ssize_t ret;
+
+	trace_posix_socket_recvmsg(sock, msg, flags);
+	ret = socket_receive_message(socketfd_get(sock), msg, flags, NULL);
 	if (ret < 0 && ret != -EAGAIN)
 		trace_posix_socket_recvmsg_err(ret);
 	else
 		trace_posix_socket_recvmsg_ret(ret);
 	return ret;
+}
+
+#define SOCKET_MSG_CMSG_COMPAT 0x80000000U
+
+UK_SYSCALL_R_DEFINE(int, recvmmsg, int, sock, struct mmsghdr *, messages,
+		    unsigned int, count, unsigned int, flags,
+		    struct timespec *, timeout)
+{
+	struct timespec remaining;
+	struct uk_ofile *of;
+	__nsec deadline = 0;
+	unsigned int received = 0;
+	ssize_t result = 0;
+
+	if (flags & SOCKET_MSG_CMSG_COMPAT)
+		return -EINVAL;
+	if (timeout) {
+		__nsec now, maximum, seconds, fraction;
+
+		if (!uk_nofault_try_read(remaining, timeout))
+			return -EFAULT;
+		if (remaining.tv_sec < 0 || remaining.tv_nsec < 0 ||
+		    remaining.tv_nsec >= 1000000000)
+			return -EINVAL;
+		seconds = remaining.tv_sec;
+		fraction = remaining.tv_nsec;
+		now = ukplat_monotonic_clock();
+		maximum = __SNSEC_MAX - now;
+		deadline = seconds > maximum / 1000000000 ||
+			(seconds == maximum / 1000000000 &&
+			 fraction > maximum % 1000000000) ?
+			__SNSEC_MAX : now + seconds * 1000000000 + fraction;
+	}
+	of = socketfd_get(sock);
+	if (PTRISERR(of))
+		return PTR2ERR(of);
+	if (!(flags & MSG_ERRQUEUE)) {
+		result = -posix_sock_error(of->file);
+		if (result)
+			goto out;
+	}
+	while (received < count) {
+		unsigned int length;
+		int message_flags;
+
+		uk_ofile_acquire(of);
+		result = socket_receive_message(of, &messages[received].msg_hdr,
+						flags & ~MSG_WAITFORONE,
+						&message_flags);
+		if (result < 0)
+			break;
+		length = result;
+		if (!uk_nofault_try_write(length,
+					  &messages[received].msg_len)) {
+			result = -EFAULT;
+			break;
+		}
+		received++;
+		result = 0;
+		if (flags & MSG_WAITFORONE)
+			flags |= MSG_DONTWAIT;
+		if (timeout) {
+			__nsec now = ukplat_monotonic_clock();
+			__nsec duration = now < deadline ? deadline - now : 0;
+
+			remaining.tv_sec = duration / 1000000000;
+			remaining.tv_nsec = duration % 1000000000;
+			if (!duration)
+				break;
+		}
+		if (message_flags & MSG_OOB)
+			break;
+	}
+	if (received && result < 0 && result != -EAGAIN)
+		posix_sock_error_set(of->file, -result);
+	if (received && timeout &&
+	    !uk_nofault_try_write(remaining, timeout)) {
+		result = -EFAULT;
+		received = 0;
+	}
+out:
+	uk_ofile_release(of);
+	return received ? (int)received : (int)result;
 }
 
 static ssize_t socket_send_result(ssize_t ret, bool write_sigpipe, int flags)

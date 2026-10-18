@@ -51,6 +51,8 @@ extern "C" {
 #include <uk/errptr.h>
 #include <uk/file.h>
 #include <uk/posix-fd.h>
+#include <uk/atomic.h>
+#include <uk/nofault.h>
 
 #include <sys/socket.h>
 #include <sys/uio.h>
@@ -129,13 +131,50 @@ struct posix_socket_driver *posix_sock_get_driver(posix_sock *sock)
 	return posix_sock_get_node(sock)->driver;
 }
 
+static inline void posix_sock_event_update(posix_sock *sock,
+					   unsigned int clear, unsigned int set)
+{
+	struct posix_socket_node *node = posix_sock_get_node(sock);
+
+	uk_mutex_lock(&node->event_lock);
+	node->driver_events = (node->driver_events & ~clear) | set;
+	uk_file_event_assign(sock, node->driver_events |
+			      (node->pending_error ? EPOLLERR : 0));
+	uk_mutex_unlock(&node->event_lock);
+}
+
+static inline void posix_sock_error_set(posix_sock *sock, int error)
+{
+	struct posix_socket_node *node = posix_sock_get_node(sock);
+
+	uk_mutex_lock(&node->event_lock);
+	uk_store_n(&node->pending_error, error);
+	uk_file_event_assign(sock, node->driver_events | EPOLLERR);
+	uk_mutex_unlock(&node->event_lock);
+}
+
+static inline int posix_sock_error(posix_sock *sock)
+{
+	struct posix_socket_node *node = posix_sock_get_node(sock);
+	int error;
+
+	if (!uk_load_n(&node->pending_error))
+		return 0;
+	uk_mutex_lock(&node->event_lock);
+	error = uk_exchange_n(&node->pending_error, 0);
+	if (error)
+		uk_file_event_assign(sock, node->driver_events);
+	uk_mutex_unlock(&node->event_lock);
+	return error;
+}
+
 /**
  * Clear event flags from posix socket object.
  */
 static inline
 void posix_sock_event_clear(posix_sock *sock, unsigned int events)
 {
-	uk_file_event_clear(sock, events);
+	posix_sock_event_update(sock, events, 0);
 }
 
 /**
@@ -144,7 +183,7 @@ void posix_sock_event_clear(posix_sock *sock, unsigned int events)
 static inline
 void posix_sock_event_set(posix_sock *sock, unsigned int events)
 {
-	uk_file_event_set(sock, events);
+	posix_sock_event_update(sock, 0, events);
 }
 
 /**
@@ -153,7 +192,7 @@ void posix_sock_event_set(posix_sock *sock, unsigned int events)
 static inline
 void posix_sock_event_assign(posix_sock *sock, unsigned int events)
 {
-	uk_file_event_assign(sock, events);
+	posix_sock_event_update(sock, ~0U, events);
 }
 
 /* Socket operations */
@@ -582,6 +621,20 @@ posix_socket_getsockopt(posix_sock *sock, int level, int optname,
 {
 	struct posix_socket_driver *d = posix_sock_get_driver(sock);
 
+	if (level == SOL_SOCKET && optname == SO_ERROR) {
+		int error = posix_sock_error(sock);
+
+		if (error) {
+			socklen_t length = MIN(*optlen, sizeof(error));
+
+			if (uk_nofault_memcpy(optval, (const char *)&error,
+					      length, 0) != length)
+				return -EFAULT;
+			*optlen = length;
+			return 0;
+		}
+	}
+
 	UK_ASSERT(d->ops->getsockopt);
 	return d->ops->getsockopt(sock, level, optname, optval, optlen);
 }
@@ -622,6 +675,11 @@ posix_socket_recvfrom(posix_sock *sock, void *restrict buf,
 {
 	struct posix_socket_driver *d = posix_sock_get_driver(sock);
 
+	int error = (flags & MSG_ERRQUEUE) ? 0 : posix_sock_error(sock);
+
+	if (error)
+		return -error;
+
 	UK_ASSERT(d->ops->recvfrom);
 	return d->ops->recvfrom(sock, buf, len, flags, from, fromlen);
 }
@@ -631,6 +689,11 @@ posix_socket_recvmsg(posix_sock *sock, struct msghdr *msg,
 		     int flags)
 {
 	struct posix_socket_driver *d = posix_sock_get_driver(sock);
+
+	int error = (flags & MSG_ERRQUEUE) ? 0 : posix_sock_error(sock);
+
+	if (error)
+		return -error;
 
 	UK_ASSERT(d->ops->recvmsg);
 	return d->ops->recvmsg(sock, msg, flags);
@@ -642,6 +705,11 @@ posix_socket_sendmsg(posix_sock *sock,
 {
 	struct posix_socket_driver *d = posix_sock_get_driver(sock);
 
+	int error = posix_sock_error(sock);
+
+	if (error)
+		return -error;
+
 	UK_ASSERT(d->ops->sendmsg);
 	return d->ops->sendmsg(sock, msg, flags);
 }
@@ -652,6 +720,11 @@ posix_socket_sendto(posix_sock *sock, const void *buf,
 		    socklen_t addrlen)
 {
 	struct posix_socket_driver *d = posix_sock_get_driver(sock);
+
+	int error = posix_sock_error(sock);
+
+	if (error)
+		return -error;
 
 	UK_ASSERT(d->ops->sendto);
 	return d->ops->sendto(sock, buf, len, flags, dest_addr, addrlen);
@@ -682,6 +755,11 @@ posix_socket_write(posix_sock *sock, const struct iovec *iov,
 {
 	struct posix_socket_driver *d = posix_sock_get_driver(sock);
 
+	int error = posix_sock_error(sock);
+
+	if (error)
+		return -error;
+
 	UK_ASSERT(d->ops->write);
 	return d->ops->write(sock, iov, iovcnt);
 }
@@ -691,6 +769,11 @@ posix_socket_read(posix_sock *sock, const struct iovec *iov,
 		  size_t iovcnt, int flags)
 {
 	struct posix_socket_driver *d = posix_sock_get_driver(sock);
+
+	int error = (flags & MSG_ERRQUEUE) ? 0 : posix_sock_error(sock);
+
+	if (error)
+		return -error;
 
 	UK_ASSERT(d->ops->read);
 	return d->ops->read(sock, iov, iovcnt, flags);

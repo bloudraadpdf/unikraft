@@ -44,6 +44,7 @@
 
 #include <uk/config.h>
 #include <uk/arch/types.h>
+#include <uk/mutex.h>
 
 struct posix_socket_driver;
 
@@ -54,6 +55,9 @@ struct posix_socket_node {
 	struct posix_socket_driver *driver;
 	__u64 receive_timeout_ms;
 	__u64 send_timeout_ms;
+	struct uk_mutex event_lock;
+	unsigned int driver_events;
+	int pending_error;
 };
 
 #ifdef CONFIG_LIBPOSIX_SOCKET_PRINT_ERRORS
