@@ -498,6 +498,7 @@ void ramfs_node_free(struct ramfs_node *n)
 		UK_ASSERT(!n->dir_data.parent);
 		UK_RB_FOREACH_SAFE(dp, ramfs_name_map,
 				   &n->dir_data.children, tmp) {
+			UK_RB_REMOVE(ramfs_name_map, &n->dir_data.children, dp);
 			ramfs_dentry_release_target(dp);
 			ramfs_obj_free(dp);
 		}
@@ -1603,3 +1604,53 @@ UK_FS_TMPL_LIVE_GENERATE_STATIC(ramfs, struct ramfs_node *, ramfs_node_cmp,
 
 UK_FS_DRIVER_REGISTER(ramfs, UK_FS_TMPL_LIVE_OP_VOPEN(ramfs),
 		      UK_FS_VOPEN_VOL_IGNORE | UK_FS_VOPEN_DATA_IGNORE);
+
+#ifdef CONFIG_LIBUKFS_RAMFS_TEST
+#include <uk/test.h>
+
+static unsigned int ramfs_test_resources, ramfs_test_objects;
+
+static void ramfs_test_release(const struct uk_file *file __unused, int what)
+{
+	if (what & UK_FILE_RELEASE_RES)
+		ramfs_test_resources++;
+	if (what & UK_FILE_RELEASE_OBJ)
+		ramfs_test_objects++;
+}
+
+UK_TESTCASE(ukfs_ramfs, directory_release_unlinks_entries)
+{
+	static uk_file_refcnt references[32];
+	static struct uk_file files[32];
+	struct ramfs_node *directory = ramfs_new(0);
+	unsigned int inserted = 0;
+
+	UK_TEST_EXPECT_NOT_NULL(directory);
+	if (!directory)
+		return;
+	ramfs_init_dir(directory, 0700);
+	ramfs_test_resources = ramfs_test_objects = 0;
+	for (unsigned int i = 0; i < ARRAY_SIZE(files); i++) {
+		char name[2] = {'a' + i / 26, 'a' + i % 26};
+		struct ramfs_dentry *entry = ramfs_dentry_new(name, sizeof(name));
+
+		UK_TEST_EXPECT_NOT_NULL(entry);
+		if (!entry)
+			break;
+		references[i] = UK_FILE_REFCNT_INIT_VALUE(references[i]);
+		files[i] = (struct uk_file){
+			.refcnt = &references[i], ._release = ramfs_test_release
+		};
+		entry->type = RAMFS_DENT_FILE;
+		entry->target.file = &files[i];
+		ramfs_dir_insert(directory, entry);
+		inserted++;
+	}
+	ramfs_node_release(directory, 0);
+	UK_TEST_EXPECT_SNUM_EQ(inserted, ARRAY_SIZE(files));
+	UK_TEST_EXPECT_SNUM_EQ(ramfs_test_resources, inserted);
+	UK_TEST_EXPECT_SNUM_EQ(ramfs_test_objects, inserted);
+}
+
+uk_testsuite_register(ukfs_ramfs, NULL);
+#endif

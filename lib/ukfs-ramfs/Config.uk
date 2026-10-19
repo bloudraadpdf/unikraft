@@ -11,3 +11,9 @@ config LIBUKFS_RAMFS
 	select LIBUKSPARSEBUF
 	select LIBPOSIX_FD
 	select LIBPOSIX_TIME
+
+config LIBUKFS_RAMFS_TEST
+	bool "RAMFS directory release tests"
+	depends on LIBUKFS_RAMFS
+	select LIBUKTEST
+	default n
