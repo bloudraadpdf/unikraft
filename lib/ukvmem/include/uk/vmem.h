@@ -319,6 +319,12 @@ struct uk_vma_ops {
 	int (*unmap)(struct uk_vma *vma, __vaddr_t vaddr, __sz len);
 
 	/**
+	 * Releases range metadata after unmap or DONTNEED. The mutation mutex
+	 * remains held, but the fault lock is released so this may free heap data.
+	 */
+	void (*unmap_release)(struct uk_vma *vma, __vaddr_t vaddr, __sz len);
+
+	/**
 	 * Allocates a new VMA and configures its VMA-type specific properties
 	 * when a VMA is split into multiple separate VMAs. This may happen
 	 * when a range of a VMA is removed or protections are changed. The

@@ -104,6 +104,7 @@ choice
 config LIBUKBOOT_INITBBUDDY
 	bool "Binary buddy allocator"
 	select LIBUKALLOCBBUDDY
+	select LIBUKNOFAULT if LIBUKVMEM
 
 config LIBUKBOOT_INITREGION
 	bool "Region allocator"

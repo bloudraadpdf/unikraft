@@ -34,6 +34,7 @@
 #ifndef __UKALLOCBBUDDY_H__
 #define __UKALLOCBBUDDY_H__
 
+#include <stdint.h>
 #include <uk/alloc.h>
 
 #ifdef __cplusplus
@@ -41,6 +42,16 @@ extern "C" {
 #endif
 
 struct uk_alloc *uk_allocbbuddy_init(void *base, size_t len);
+
+/* Backing callbacks run under the allocator lock with interrupts disabled. */
+struct uk_allocbbuddy_backing {
+	int (*prepare)(void *context, uintptr_t address, size_t length);
+	void (*release)(void *context, uintptr_t address, size_t length);
+	void *context;
+};
+
+void uk_allocbbuddy_set_backing(struct uk_alloc *allocator,
+			      const struct uk_allocbbuddy_backing *backing);
 
 #ifdef __cplusplus
 }

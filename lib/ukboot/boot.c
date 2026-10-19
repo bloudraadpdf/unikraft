@@ -118,6 +118,33 @@ struct uk_semaphore main_sema;
 
 #if defined(CONFIG_LIBUKBOOT_HEAP_BASE) && defined(CONFIG_LIBUKVMEM)
 static struct uk_vas kernel_vas;
+#if CONFIG_LIBUKBOOT_INITBBUDDY
+#include <uk/nofault.h>
+
+static int heap_prepare_backing(void *context __unused,
+				uintptr_t address, size_t length)
+{
+	return uk_nofault_probe_rw(address, length, 0) == length ? 0 : -ENOMEM;
+}
+
+static void heap_release_backing(void *context, uintptr_t address,
+				 size_t length)
+{
+	struct uk_vas *vas = context;
+	unsigned long flags = uk_pal_save_irqf();
+	int rc;
+
+	/* The heap VMA remains live while its allocator releases free pages. */
+	while (!uk_spin_trylock(&vas->fault_lock)) {
+		uk_paging_tlb_service();
+		uk_arch_spinwait();
+	}
+	rc = uk_paging_page_unmap(vas->pt, address, length / __PAGE_SIZE,
+				  UK_PAGING_PAGE_FLAG_KEEP_PTES);
+	uk_spin_unlock_irqrestore(&vas->fault_lock, flags);
+	UK_ASSERT(!rc);
+}
+#endif
 #endif /* CONFIG_LIBUKBOOT_HEAP_BASE && CONFIG_LIBUKVMEM */
 
 static struct uk_alloc *heap_init()
@@ -129,6 +156,7 @@ static struct uk_alloc *heap_init()
 	__vaddr_t heap_base;
 #ifdef CONFIG_LIBUKVMEM
 	__vaddr_t vaddr;
+	unsigned long heap_flags = UK_VMA_MAP_UNINITIALIZED;
 #endif /* CONFIG_LIBUKVMEM */
 	int rc;
 #else /* CONFIG_LIBUKBOOT_HEAP_BASE */
@@ -198,10 +226,13 @@ static struct uk_alloc *heap_init()
 	alloc_pages = free_pages - UK_PAGING_PT_PAGES(free_pages);
 
 	vaddr = heap_base;
+#if CONFIG_LIBUKBOOT_INITBBUDDY
+	heap_flags |= UK_VMA_MAP_SIZE(UK_PAGING_PAGE_SHIFT);
+#endif
 	rc = uk_vma_map_anon(&kernel_vas, &vaddr,
 			     (alloc_pages + HEAP_INITIAL_PAGES) << UK_PAGING_PAGE_SHIFT,
 			     UK_PAGING_PAGE_ATTR_PROT_RW,
-			     UK_VMA_MAP_UNINITIALIZED,
+			     heap_flags,
 			     "heap");
 	if (unlikely(rc))
 		return NULL;
@@ -210,6 +241,15 @@ static struct uk_alloc *heap_init()
 			     (alloc_pages - HEAP_INITIAL_PAGES) << UK_PAGING_PAGE_SHIFT);
 	if (unlikely(rc))
 		return NULL;
+#if CONFIG_LIBUKBOOT_INITBBUDDY
+	const struct uk_allocbbuddy_backing backing = {
+		.prepare = heap_prepare_backing,
+		.release = heap_release_backing,
+		.context = &kernel_vas
+	};
+
+	uk_allocbbuddy_set_backing(a, &backing);
+#endif
 #else /* CONFIG_LIBUKVMEM */
 	free_pages  = pt->fa->free_memory >> UK_PAGING_PAGE_SHIFT;
 	alloc_pages = free_pages - UK_PAGING_PT_PAGES(free_pages);

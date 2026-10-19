@@ -7,6 +7,11 @@ menuconfig LIBUKALLOCBBUDDY
 	select LIBUKBITOPS
 
 if LIBUKALLOCBBUDDY
+	config LIBUKALLOCBBUDDY_TEST
+	bool "Test backing failure and free-list recovery"
+	default n
+	select LIBUKTEST
+
 	config LIBUKALLOCBBUDDY_FREELIST_SANITY
 	bool "Debug: sanity check freelists"
 	default n

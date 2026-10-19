@@ -515,18 +515,24 @@ static void file_vma_fault_discard(struct uk_vma *vma, struct uk_vm_fault *fault
 	}
 }
 
-static int file_vma_unmap(struct uk_vma *vma, __vaddr_t addr, __sz len)
+static void file_vma_unmap_release(struct uk_vma *vma, __vaddr_t addr,
+				   __sz len)
 {
 	struct file_vma *fvma = (struct file_vma *)vma;
 
 	if (!fvma->shared) {
-		int rc = uk_vma_op_unmap(vma, addr, len);
 		__u64 offset = fvma->offset + addr - vma->start;
 
-		if (!rc)
-			file_pages_release(fvma, offset, offset + len);
-		return rc;
+		file_pages_release(fvma, offset, offset + len);
 	}
+}
+
+static int file_vma_unmap(struct uk_vma *vma, __vaddr_t addr, __sz len)
+{
+	struct file_vma *fvma = (struct file_vma *)vma;
+
+	if (!fvma->shared)
+		return uk_vma_op_unmap(vma, addr, len);
 	return uk_paging_page_unmap(vma->vas->pt, addr, len / UK_PAGING_PAGE_SIZE,
 				    UK_PAGING_PAGE_FLAG_KEEP_FRAMES);
 }
@@ -562,6 +568,7 @@ const struct uk_vma_ops uk_fdio_vma_ops = {
 	.fault_can_block = 1,
 	.fault_discard	= file_vma_fault_discard,
 	.unmap		= file_vma_unmap,
+	.unmap_release	= file_vma_unmap_release,
 	.split		= file_vma_op_split,
 	.merge		= file_vma_op_merge,
 	.set_attr	= file_vma_op_set_attr,

@@ -524,6 +524,16 @@ int uk_vma_op_unmap(struct uk_vma *vma, __vaddr_t vaddr, __sz len)
 				    len / UK_PAGING_PAGE_SIZE, 0);
 }
 
+static void vmem_vma_unmap_release(struct uk_vma *vma, __vaddr_t vaddr,
+				 __sz len)
+{
+	if (vma->ops->unmap_release) {
+		vmem_mutation_pause(vma->vas);
+		vma->ops->unmap_release(vma, vaddr, len);
+		vmem_mutation_resume(vma->vas);
+	}
+}
+
 static void vmem_vma_unmap(struct uk_vma *vma, __vaddr_t vaddr, __sz len)
 {
 	int rc;
@@ -547,6 +557,7 @@ static void vmem_vma_unmap(struct uk_vma *vma, __vaddr_t vaddr, __sz len)
 		UK_CRASH("Failed to unmap address range 0x%" __PRIvaddr
 			 "-0x%" __PRIvaddr ": %d", vaddr, vaddr + len, rc);
 	}
+	vmem_vma_unmap_release(vma, vaddr, len);
 }
 
 static void vmem_vma_unmap_and_free(struct uk_vma *vma)
@@ -1207,6 +1218,8 @@ int uk_vma_op_advise(struct uk_vma *vma, __vaddr_t vaddr, __sz len,
 static int vmem_vma_advise(struct uk_vma *vma, __vaddr_t vaddr, __sz len,
 			   unsigned long advice)
 {
+	int rc;
+
 	UK_ASSERT(vma);
 	UK_ASSERT(vaddr <= __VADDR_MAX - len);
 	UK_ASSERT(vaddr >= vma->start && vaddr + len <= vma->end);
@@ -1215,7 +1228,11 @@ static int vmem_vma_advise(struct uk_vma *vma, __vaddr_t vaddr, __sz len,
 	UK_ASSERT(UK_PAGING_PAGE_Lx_ALIGNED(len, MAX(vma->page_lvl,
 						     UK_PAGING_PAGE_LEVEL)));
 
-	return VMA_ADVISE(vma, vaddr, len, advice);
+	rc = VMA_ADVISE(vma, vaddr, len, advice);
+	if (!rc && (advice & UK_VMA_ADV_DONTNEED) &&
+	    !(advice & UK_VMA_ADV_WILLNEED))
+		vmem_vma_unmap_release(vma, vaddr, len);
+	return rc;
 }
 
 static int vmem_advise(struct uk_vas *vas, __vaddr_t vaddr, __sz len,

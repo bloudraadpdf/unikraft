@@ -81,6 +81,7 @@ struct uk_bbpalloc_memr {
 
 struct uk_bbpalloc {
 	__spinlock lock;
+	struct uk_allocbbuddy_backing backing;
 	unsigned long nr_free_pages;
 	struct uk_hlist_head free_head[FREELIST_SIZE];
 	struct uk_bbpalloc_memr *memr_head;
@@ -358,6 +359,56 @@ static inline void bbuddy_trim(struct uk_bbpalloc *b, struct chunk_head *ch,
 	}
 }
 
+static unsigned long bbuddy_lock(struct uk_bbpalloc *b)
+{
+	unsigned long flags = uk_lcpu_save_irqf();
+
+	while (!ukarch_spin_trylock(&b->lock)) {
+#ifdef CONFIG_LIBUKPAGING
+		uk_paging_tlb_service();
+#endif
+		uk_arch_spinwait();
+	}
+	return flags;
+}
+
+static void bbuddy_release_backing(struct uk_bbpalloc *b,
+				   struct chunk_head *chunk, size_t order)
+{
+	size_t length = BBUDDY_LEN(order);
+
+	if (b->backing.release && length > __PAGE_SIZE)
+		b->backing.release(b->backing.context,
+				   (uintptr_t)chunk + __PAGE_SIZE,
+				   length - __PAGE_SIZE);
+}
+
+static int bbuddy_prepare_backing(struct uk_bbpalloc *b,
+				  struct chunk_head *chunk, size_t order,
+				  unsigned long num_pages)
+{
+	unsigned long spare_pages = BBUDDY_PAGES(order) - num_pages;
+	uintptr_t spare_end = (uintptr_t)CHUNK_END(chunk, order);
+	int rc;
+
+	if (!b->backing.prepare)
+		return 0;
+	rc = b->backing.prepare(b->backing.context, (uintptr_t)chunk,
+				num_pages * __PAGE_SIZE);
+	while (!rc && spare_pages) {
+		size_t spare_order = npages_order(spare_pages);
+		size_t length = BBUDDY_LEN(spare_order);
+
+		spare_end -= length;
+		rc = b->backing.prepare(b->backing.context, spare_end,
+					 sizeof(struct chunk_head));
+		spare_pages -= BBUDDY_PAGES(spare_order);
+	}
+	if (rc)
+		bbuddy_release_backing(b, chunk, order);
+	return rc;
+}
+
 static void *bbuddy_palloc(struct uk_alloc *a, unsigned long num_pages)
 {
 	struct uk_bbpalloc *const b = (struct uk_bbpalloc *)&a->priv;
@@ -367,7 +418,7 @@ static void *bbuddy_palloc(struct uk_alloc *a, unsigned long num_pages)
 
 	UK_ASSERT(a);
 	UK_ASSERT(num_pages);
-	ukplat_spin_lock_irqsave(&b->lock, irq_flags);
+	irq_flags = bbuddy_lock(b);
 	freelist_sanitycheck(b->free_head);
 
 	ord = num_pages_to_order(num_pages);
@@ -381,6 +432,8 @@ static void *bbuddy_palloc(struct uk_alloc *a, unsigned long num_pages)
 	/* Grab & unlink a chunk */
 	alloc_ch = uk_hlist_entry(b->free_head[ord].first, struct chunk_head,
 				  link);
+	if (bbuddy_prepare_backing(b, alloc_ch, ord, num_pages))
+		goto err_nomem;
 	uk_hlist_del(&alloc_ch->link);
 	UK_ASSERT(FREELIST_ALIGNED(alloc_ch, ord));
 
@@ -480,7 +533,7 @@ static void bbuddy_pfree(struct uk_alloc *a, void *obj, unsigned long num_pages)
 	UK_ASSERT(num_pages);
 	UK_ASSERT(IS_ALIGNED((uintptr_t)obj, __PAGE_SIZE));
 
-	ukplat_spin_lock_irqsave(&b->lock, irq_flags);
+	irq_flags = bbuddy_lock(b);
 	uk_alloc_stats_count_pfree(a, obj, num_pages);
 	freelist_sanitycheck(b->free_head);
 
@@ -505,6 +558,7 @@ static void bbuddy_pfree(struct uk_alloc *a, void *obj, unsigned long num_pages)
 		map_free(b, (uintptr_t)base, freed_pages);
 		/* Link into freelist */
 		uk_hlist_add_head(&ch->link, &b->free_head[ord]);
+		bbuddy_release_backing(b, ch, ord);
 
 		num_pages -= freed_pages;
 		base += freed_pages * __PAGE_SIZE;
@@ -524,7 +578,7 @@ static long bbuddy_pmaxalloc(struct uk_alloc *a)
 	b = (struct uk_bbpalloc *)&a->priv;
 
 	/* Find biggest order that has still elements available */
-	ukplat_spin_lock_irqsave(&b->lock, irq_flags);
+	irq_flags = bbuddy_lock(b);
 	order = FREELIST_SIZE;
 	for (i = 0; i < FREELIST_SIZE; i++) {
 		if (!FREELIST_EMPTY(&b->free_head[i]))
@@ -546,7 +600,7 @@ static long bbuddy_pavailmem(struct uk_alloc *a)
 	UK_ASSERT(a != NULL);
 	b = (struct uk_bbpalloc *)&a->priv;
 
-	ukplat_spin_lock_irqsave(&b->lock, irq_flags);
+	irq_flags = bbuddy_lock(b);
 	pages = (long)b->nr_free_pages;
 	ukplat_spin_unlock_irqrestore(&b->lock, irq_flags);
 	return pages;
@@ -588,7 +642,7 @@ static int bbuddy_addmem(struct uk_alloc *a, void *base, size_t len)
 		return -EINVAL;
 	}
 
-	ukplat_spin_lock_irqsave(&b->lock, irq_flags);
+	irq_flags = bbuddy_lock(b);
 	freelist_sanitycheck(b->free_head);
 	memr = (struct uk_bbpalloc_memr *)min;
 
@@ -697,4 +751,16 @@ struct uk_alloc *uk_allocbbuddy_init(void *base, size_t len)
 				 (size_t)(max - min));
 
 	return a;
+}
+
+void uk_allocbbuddy_set_backing(struct uk_alloc *allocator,
+			      const struct uk_allocbbuddy_backing *backing)
+{
+	struct uk_bbpalloc *b = (struct uk_bbpalloc *)&allocator->priv;
+	unsigned long flags;
+
+	UK_ASSERT(backing && backing->prepare && backing->release);
+	flags = bbuddy_lock(b);
+	b->backing = *backing;
+	ukplat_spin_unlock_irqrestore(&b->lock, flags);
 }
