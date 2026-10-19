@@ -15,15 +15,32 @@
 #include <uk/vmem/vma_ops.h>
 #include <uk/arch/limits.h>
 #include <uk/paging.h>
+#include <uk/tree.h>
 
 #include "fdio-impl.h"
 
 struct file_page {
 	struct file_page *next;
+	UK_RB_ENTRY(file_page) index;
 	__off offset;
 	__paddr_t physical;
 	bool written;
 };
+
+UK_RB_HEAD(file_page_index, file_page);
+
+static __off file_page_key(struct file_page *page)
+{
+	return page->offset;
+}
+
+static int file_page_compare(__off first, __off second)
+{
+	return (first > second) - (first < second);
+}
+
+UK_RB_KEY_GENERATE_STATIC(file_page_index, file_page, index,
+			  file_page_compare, file_page_key);
 
 struct file_vma {
 	struct uk_vma base;
@@ -33,9 +50,25 @@ struct file_vma {
 	/** Start offset describing what position in the file is mapped */
 	__off offset;
 	struct file_page *pages;
+	struct file_page_index page_index;
 	int shared;
 	struct uk_fdio_vma_lifetime *lifetime;
 };
+
+static void file_page_attach(struct file_vma *vma, struct file_page *page)
+{
+	struct file_page *old __maybe_unused;
+
+	old = UK_RB_INSERT(file_page_index, &vma->page_index, page);
+	UK_ASSERT(!old);
+	page->next = vma->pages;
+	vma->pages = page;
+}
+
+static void file_page_unindex(struct file_vma *vma, struct file_page *page)
+{
+	UK_RB_REMOVE(file_page_index, &vma->page_index, page);
+}
 
 struct uk_ofile *uk_fdio_vma_file(const struct uk_vma *vma, __off *offset)
 {
@@ -122,6 +155,7 @@ int file_vma_op_new(struct uk_vas *vas, __vaddr_t vaddr __unused,
 	fvma->of = args->of;
 	fvma->offset = args->offset;
 	fvma->pages = NULL;
+	UK_RB_INIT(&fvma->page_index);
 	fvma->shared = shared;
 	fvma->base.name = uk_ofile_name(args->of, "file");
 	fvma->lifetime = args->lifetime;
@@ -147,6 +181,7 @@ static void file_pages_release(struct file_vma *fvma, __u64 start, __u64 end)
 			entry = &page->next;
 			continue;
 		}
+		file_page_unindex(fvma, page);
 		if (fvma->shared)
 			uk_file_mem(file, UKFILE_MEM_RELEASE, page->offset,
 				    UK_PAGING_PAGE_SIZE, NULL, 0);
@@ -176,12 +211,12 @@ static int file_shared_fault(struct file_vma *fvma, struct uk_vm_fault *fault)
 		rc = -ENXIO;
 		goto fail;
 	}
-	for (page = fvma->pages; page; page = page->next)
-		if (page->offset == off) {
-			fault->paddr = page->physical;
-			uk_file_wunlock(file);
-			return 0;
-		}
+	page = UK_RB_FIND(file_page_index, &fvma->page_index, off);
+	if (page) {
+		fault->paddr = page->physical;
+		uk_file_wunlock(file);
+		return 0;
+	}
 	page = uk_malloc(fvma->base.vas->a, sizeof(*page));
 	if (!page) {
 		rc = -ENOMEM;
@@ -205,8 +240,7 @@ static int file_shared_fault(struct file_vma *fvma, struct uk_vm_fault *fault)
 	}
 	page->offset = off;
 	page->physical = uk_paging_virt_to_phys((__vaddr_t)buffer.iov_base);
-	page->next = fvma->pages;
-	fvma->pages = page;
+	file_page_attach(fvma, page);
 	fault->paddr = page->physical;
 	uk_file_wunlock(file);
 	return 0;
@@ -293,16 +327,17 @@ int file_vma_op_fault(struct uk_vma *vma, struct uk_vm_fault *fault)
 			return -EFAULT;
 		for (__sz index = 0; index < fault->len;
 		     index += UK_PAGING_PAGE_SIZE) {
-			for (page = fvma->pages; page; page = page->next)
-				if (page->offset == off + (__off)index)
-					break;
+			page = UK_RB_FIND(file_page_index, &fvma->page_index,
+					  off + (__off)index);
 			if (!page)
 				return -EFAULT;
 		}
-		for (page = fvma->pages; page; page = page->next)
-			if (page->offset >= off &&
-			    (__u64)(page->offset - off) < fault->len)
-				page->written = true;
+		for (__sz index = 0; index < fault->len;
+		     index += UK_PAGING_PAGE_SIZE) {
+			page = UK_RB_FIND(file_page_index, &fvma->page_index,
+					  off + (__off)index);
+			page->written = true;
+		}
 		return 0;
 	}
 	for (__sz index = 0; index < fault->len;
@@ -357,8 +392,7 @@ int file_vma_op_fault(struct uk_vma *vma, struct uk_vm_fault *fault)
 		page = created;
 		created = page->next;
 		page->physical = paddr + page->offset - off;
-		page->next = fvma->pages;
-		fvma->pages = page;
+		file_page_attach(fvma, page);
 	}
 	return 0;
 fail:
@@ -391,6 +425,7 @@ int file_vma_op_split(struct uk_vma *vma, __vaddr_t vaddr,
 	v->of = fvma->of;
 	v->shared = fvma->shared;
 	v->pages = NULL;
+	UK_RB_INIT(&v->page_index);
 	v->lifetime = fvma->lifetime;
 	if (v->lifetime)
 		v->lifetime->acquire(v->lifetime);
@@ -402,8 +437,8 @@ int file_vma_op_split(struct uk_vma *vma, __vaddr_t vaddr,
 			continue;
 		}
 		*entry = page->next;
-		page->next = v->pages;
-		v->pages = page;
+		file_page_unindex(fvma, page);
+		file_page_attach(v, page);
 	}
 
 	*new_vma = &v->base;
@@ -431,8 +466,8 @@ int file_vma_op_merge(struct uk_vma *vma, struct uk_vma *next)
 	while (nvma->pages) {
 		struct file_page *page = nvma->pages;
 		nvma->pages = page->next;
-		page->next = fvma->pages;
-		fvma->pages = page;
+		file_page_unindex(nvma, page);
+		file_page_attach(fvma, page);
 	}
 	/* We release the file in the destructor */
 	return 0;
@@ -509,6 +544,7 @@ static void file_vma_fault_discard(struct uk_vma *vma, struct uk_vm_fault *fault
 				continue;
 			}
 			*entry = page->next;
+			file_page_unindex(fvma, page);
 			uk_free(vma->vas->a, page);
 		}
 		uk_vma_op_fault_discard(vma, fault);

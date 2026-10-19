@@ -27,7 +27,7 @@ config LIBPOSIX_FDIO_VMA_COPY
 endchoice
 
 config LIBPOSIX_FDIO_VMA_TEST
-	bool "Enable private file mapping tests"
+	bool "Enable file mapping tests"
 	depends on LIBPOSIX_FDIO_VMA_COPY && LIBPOSIX_FD_HEAPOFD
 	default n
 	select LIBUKTEST

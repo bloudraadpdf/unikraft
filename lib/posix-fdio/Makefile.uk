@@ -47,5 +47,6 @@ endif
 ifeq ($(CONFIG_LIBPOSIX_FDIO_VMA_COPY),y)
 ifneq ($(filter y,$(CONFIG_LIBPOSIX_FDIO_VMA_TEST) $(CONFIG_LIBUKTEST_ALL)),)
 LIBPOSIX_FDIO_SRCS-y += $(LIBPOSIX_FDIO_BASE)/tests/test_vma_private.c
+LIBPOSIX_FDIO_SRCS-y += $(LIBPOSIX_FDIO_BASE)/tests/test_vma_shared.c
 endif
 endif
