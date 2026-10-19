@@ -380,6 +380,7 @@ void uk_sparsebuf_clear(const struct uk_sparsebuf_ctx *ctx,
 		struct uk_sparsebuf_slice *const sl = &blk->sl;
 
 		UK_ASSERT(sparsebuf_can_release(sl));
+		UK_RB_REMOVE(sparsebuf_map, map, blk);
 		sparsebuf_slice_buffree(ctx, sl);
 		uk_free(ctx->alloc, blk);
 	}

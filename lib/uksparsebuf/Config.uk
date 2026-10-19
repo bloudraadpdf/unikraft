@@ -4,6 +4,11 @@ menuconfig LIBUKSPARSEBUF
 
 if LIBUKSPARSEBUF
 
+config LIBUKSPARSEBUF_TEST
+	bool "Test sparse buffer metadata release"
+	default n
+	select LIBUKTEST
+
 choice LIBUKSPARSEBUF_IMPL
 	prompt "Implementation"
 	default LIBUKSPARSEBUF_IMPL_RBTREE
