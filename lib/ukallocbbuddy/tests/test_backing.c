@@ -4,6 +4,7 @@
 #include <uk/allocbbuddy.h>
 #include <uk/arch/limits.h>
 #include <uk/test.h>
+#include <uk/essentials.h>
 
 static unsigned char region[16 * __PAGE_SIZE] __align(__PAGE_SIZE);
 
@@ -11,6 +12,7 @@ struct backing_control {
 	unsigned int calls;
 	unsigned int fail_at;
 	unsigned int releases;
+	size_t largest_release;
 	int invalid_release;
 };
 
@@ -32,6 +34,8 @@ static void release(void *context, uintptr_t address, size_t length)
 	    address + length > (uintptr_t)region + sizeof(region))
 		control->invalid_release = 1;
 	control->releases++;
+	if (length > control->largest_release)
+		control->largest_release = length;
 }
 
 UK_TESTCASE(ukallocbbuddy_backing, failure_keeps_free_lists)
@@ -41,7 +45,7 @@ UK_TESTCASE(ukallocbbuddy_backing, failure_keeps_free_lists)
 	const struct uk_allocbbuddy_backing backing = {
 		.prepare = prepare, .release = release, .context = &control
 	};
-	void *first, *second;
+	void *first, *second, *pages[8];
 	long available;
 
 	UK_TEST_EXPECT(allocator != NULL);
@@ -72,6 +76,16 @@ UK_TESTCASE(ukallocbbuddy_backing, failure_keeps_free_lists)
 		UK_TEST_EXPECT(*(unsigned char *)second == 0x5a);
 		uk_pfree(allocator, second, 1);
 	}
+	UK_TEST_EXPECT(uk_alloc_pavailmem(allocator) == available);
+	for (unsigned int i = 0; i < ARRAY_SIZE(pages); i++) {
+		pages[i] = uk_palloc(allocator, 1);
+		UK_TEST_EXPECT(pages[i] != NULL);
+	}
+	control.largest_release = 0;
+	for (unsigned int i = ARRAY_SIZE(pages); i > 0; i--)
+		if (pages[i - 1])
+			uk_pfree(allocator, pages[i - 1], 1);
+	UK_TEST_EXPECT(control.largest_release <= __PAGE_SIZE);
 	UK_TEST_EXPECT(uk_alloc_pavailmem(allocator) == available);
 	UK_TEST_EXPECT(!control.invalid_release);
 }

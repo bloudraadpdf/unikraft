@@ -506,13 +506,15 @@ static inline size_t bbuddy_merge(struct uk_bbpalloc *b,
 		    buddy->page_order != ord)
 			break;
 
-		if (BBUDDY_ISHEAD(buddy, ord))
-			/* buddy is predecessor; merge downwards */
-			ch = buddy;
-		/* else: ch is already correct base, increase ord to merge up */
-
-		/* Unlink buddy from freelist & continue to next order */
+		/* Unlink before the obsolete header loses its backing. */
 		uk_hlist_del(&buddy->link);
+		if (b->backing.release)
+			b->backing.release(b->backing.context,
+					   ((uintptr_t)buddy > (uintptr_t)ch ?
+					    (uintptr_t)buddy : (uintptr_t)ch),
+					   __PAGE_SIZE);
+		if (BBUDDY_ISHEAD(buddy, ord))
+			ch = buddy;
 		ord++;
 	}
 	*chp = ch;
@@ -550,6 +552,7 @@ static void bbuddy_pfree(struct uk_alloc *a, void *obj, unsigned long num_pages)
 		UK_ASSERT(ord < FREELIST_SIZE);
 		UK_ASSERT(freed_pages <= num_pages);
 
+		bbuddy_release_backing(b, ch, ord);
 		ord = bbuddy_merge(b, &ch, ord);
 
 		/* Populate chunk (must be done before marking free) */
@@ -558,7 +561,6 @@ static void bbuddy_pfree(struct uk_alloc *a, void *obj, unsigned long num_pages)
 		map_free(b, (uintptr_t)base, freed_pages);
 		/* Link into freelist */
 		uk_hlist_add_head(&ch->link, &b->free_head[ord]);
-		bbuddy_release_backing(b, ch, ord);
 
 		num_pages -= freed_pages;
 		base += freed_pages * __PAGE_SIZE;
