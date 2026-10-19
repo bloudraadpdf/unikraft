@@ -49,11 +49,11 @@ int uk_file_nop_setstat(const struct uk_file *f __unused,
 	return -ENOSYS;
 }
 
-int uk_file_nop_ctl(const struct uk_file *f __unused, int fam __unused,
+int uk_file_nop_ctl(const struct uk_file *f __unused, int fam,
 		    int req __unused, uintptr_t arg1 __unused,
 		    uintptr_t arg2 __unused, uintptr_t arg3 __unused)
 {
-	return -ENOSYS;
+	return fam == UKFILE_CTL_IOCTL ? -ENOTTY : -ENOSYS;
 }
 
 const struct uk_file_ops uk_file_nops =
