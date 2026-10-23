@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <uk/devfs.h>
 #include <uk/file.h>
 #include <uk/file/nops.h>
@@ -197,7 +198,24 @@ static int generation_control(const struct uk_file *file __unused,
 	return rc;
 }
 
+static off_t clock_seek(const struct uk_file *file __unused, off_t offset,
+			int whence, off_t current)
+{
+	if (whence == SEEK_END)
+		current = CLOCK_BYTES;
+	else if (whence == SEEK_SET)
+		current = 0;
+	else if (whence != SEEK_CUR)
+		return -EINVAL;
+	if (offset > 0 && current > INT64_MAX - offset)
+		return -EINVAL;
+	if (offset < -current)
+		return -EINVAL;
+	return current + offset;
+}
+
 static const struct uk_file_ops clock_ops = {
+	.seek = clock_seek,
 	.read = clock_read,
 	.write = uk_file_nop_write,
 	.mem = uk_file_nop_mem,
